@@ -1,4 +1,5 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
+import { supabase } from "../lib/supabase";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -475,10 +476,30 @@ function HabitsPage({ habits, setHabits }) {
   );
 }
 
-export default function App() {
+export default function App() { const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+      if (!session) window.location.href = "/login";
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (!session) window.location.href = "/login";
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  
   const [tab, setTab] = useState("dashboard");
   const [habits, setHabits] = useState(INITIAL_HABITS);
-
+if (authLoading) return (
+    <div style={{ minHeight: "100vh", background: "#080C10", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Orbitron',monospace", color: "#00FFB2", letterSpacing: 4, fontSize: 12 }}>
+      LOADING...
+    </div>
+  );
   const nav = [
     { id: "dashboard", icon: "◈", label: "DASHBOARD" },
     { id: "fitness", icon: "⚡", label: "FITNESS" },
