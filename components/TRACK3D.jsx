@@ -53,13 +53,34 @@ const heatColor = (v) => {
   return NEON;
 };
 
+const SUGGESTED_TASKS = [
+  { name: "Take supplements", duration: 5, type: "tick" },
+  { name: "Have a shower", duration: 15, type: "tick" },
+  { name: "Go for a walk", duration: 30, type: "tick" },
+  { name: "Meditate", duration: 10, type: "tick" },
+  { name: "Journaling", duration: 10, type: "tick" },
+  { name: "Read", duration: 20, type: "tick" },
+  { name: "Cold shower", duration: 10, type: "tick" },
+  { name: "Stretch / Mobility", duration: 15, type: "tick" },
+  { name: "Drink water", duration: 2, type: "tick" },
+  { name: "Review goals", duration: 5, type: "tick" },
+];
+
+const MORNING_QUOTES = [
+  "Well done. The hardest part is showing up — go smash it.",
+  "Another morning won. Now go make the rest of the day count.",
+  "You started right. Carry that energy forward.",
+  "Discipline in the morning, freedom in the afternoon.",
+  "Small wins stack. You just added one. Keep going.",
+];
+
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Space+Mono:wght@400;700&display=swap');
   .t3d * { box-sizing: border-box; margin: 0; padding: 0; }
   .t3d { display: flex; min-height: 100vh; background: #080C10; color: #E0EAF0; font-family: 'Space Mono', monospace; }
   .t3d-sidebar { width: 210px; background: #0D1318; border-right: 1px solid #1A2530; display: flex; flex-direction: column; padding: 28px 0; flex-shrink: 0; }
-  .t3d-logo { font-family: 'Orbitron', monospace; font-weight: 900; font-size: 20px; letter-spacing: 4px; padding: 0 22px 28px; background: linear-gradient(90deg,#00FFB2,#00C8FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent;  text-align: center; }
-  .t3d-logo small { font-size: 10px; letter-spacing: 2px; display: block; -webkit-text-fill-color: #2A3A48; color: #2A3A48; margin-top: 2px; font-weight: 400; }
+  .t3d-logo { font-family: 'Orbitron', monospace; font-weight: 900; font-size: 20px; letter-spacing: 4px; padding: 0 22px 28px; background: linear-gradient(90deg,#00FFB2,#00C8FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
+  .t3d-logo small { font-size: 9px; letter-spacing: 1px; display: block; -webkit-text-fill-color: #FFFFFF; color: #FFFFFF; margin-top: 4px; font-weight: 400; text-align: center; }
   .t3d-nav { display: flex; align-items: center; gap: 10px; padding: 12px 22px; cursor: pointer; font-size: 11px; letter-spacing: 1px; color: #3A5060; border-left: 2px solid transparent; transition: all .18s; }
   .t3d-nav:hover { color: #8AABB8; background: rgba(0,255,178,.04); }
   .t3d-nav.on { color: #00FFB2; border-left-color: #00FFB2; background: rgba(0,255,178,.06); }
@@ -115,8 +136,25 @@ const css = `
   .t3d-ai-input::placeholder { color: #1E2E3A; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
+  .t3d-input { background: #111921; border: 1px solid #1A2530; border-radius: 5px; padding: 9px 12px; color: #E0EAF0; font-family: 'Space Mono', monospace; font-size: 12px; outline: none; transition: border-color .18s; width: 100%; }
+  .t3d-input:focus { border-color: rgba(0,255,178,.35); }
+  .t3d-input::placeholder { color: #1E2E3A; }
+  .t3d-checkin-step { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; }
+  .t3d-big-btn { width: 100%; padding: 18px; font-family: 'Orbitron', monospace; font-size: 13px; letter-spacing: 3px; border-radius: 8px; cursor: pointer; transition: all .2s; border: none; }
+  .t3d-tick-btn { background: rgba(0,255,178,.1); border: 2px solid #00FFB2; color: #00FFB2; padding: 16px 32px; font-family: 'Orbitron', monospace; font-size: 20px; border-radius: 8px; cursor: pointer; transition: all .2s; margin: 8px; }
+  .t3d-tick-btn:hover { background: rgba(0,255,178,.2); transform: scale(1.05); }
+  .t3d-cross-btn { background: rgba(255,45,120,.1); border: 2px solid #FF2D78; color: #FF2D78; padding: 16px 32px; font-family: 'Orbitron', monospace; font-size: 20px; border-radius: 8px; cursor: pointer; transition: all .2s; margin: 8px; }
+  .t3d-cross-btn:hover { background: rgba(255,45,120,.2); transform: scale(1.05); }
+  .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 10px; letter-spacing: 1px; cursor: pointer; border: 1px solid #1A2530; background: #111921; color: #4A6070; margin: 4px; transition: all .18s; }
+  .t3d-task-chip.selected { border-color: #00FFB2; background: rgba(0,255,178,.08); color: #00FFB2; }
+  .t3d-task-chip:hover { border-color: #3A5060; color: #8AABB8; }
+  .t3d-progress-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 24px; }
+  .t3d-dot-step { width: 8px; height: 8px; border-radius: 50%; background: #1A2530; transition: all .3s; }
+  .t3d-dot-step.active { background: #00FFB2; box-shadow: 0 0 6px #00FFB2; }
+  .t3d-dot-step.done { background: rgba(0,255,178,.4); }
 `;
 
+// ─── Score Ring ───────────────────────────────────────────────────────────────
 function ScoreRing({ score, size = 108 }) {
   const r = size / 2 - 10;
   const circ = 2 * Math.PI * r;
@@ -139,7 +177,8 @@ function ScoreRing({ score, size = 108 }) {
   );
 }
 
-function AICoach({ habits }) {
+// ─── AI Coach ─────────────────────────────────────────────────────────────────
+function AICoach({ habits, system }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -148,11 +187,12 @@ function AICoach({ habits }) {
 
   const scroll = () => endRef.current?.scrollIntoView({ behavior: "smooth" });
 
-  const ctx = () => {
-    const done = habits.filter(h => h.done).map(h => h.name).join(", ");
-    const pending = habits.filter(h => !h.done).map(h => h.name).join(", ");
-    return `You are TRACK3D's AI coach - sharp, direct, data-driven accountability partner. Keep responses to 2-4 sentences. Be real, not fluffy.\n\nUser data today:\n- Completed habits: ${done || "none"}\n- Pending habits: ${pending || "all done!"}\n- Workout: Push day - Bench Press 185lbs, Incline DB 70lbs, Cable Flies, Triceps\n- Nutrition: ${TOTAL_CALS} kcal | ${TOTAL_P}g protein | ${TOTAL_C}g carbs | ${TOTAL_F}g fat\n- Overall score: 74/100`;
-  };
+  const defaultSystem = `You are TRACK3D's AI coach - sharp, direct, data-driven accountability partner. Keep responses to 2-4 sentences. Be real, not fluffy.
+User data today:
+- Completed habits: ${habits.filter(h => h.done).map(h => h.name).join(", ") || "none"}
+- Pending habits: ${habits.filter(h => !h.done).map(h => h.name).join(", ") || "all done!"}
+- Nutrition: ${TOTAL_CALS} kcal | ${TOTAL_P}g protein
+- Overall score: 74/100`;
 
   const send = async (msg) => {
     if (!msg.trim() || loading) return;
@@ -168,7 +208,7 @@ function AICoach({ habits }) {
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 1000,
-          system: ctx(),
+          system: system || defaultSystem,
           messages: updated,
         }),
       });
@@ -182,18 +222,18 @@ function AICoach({ habits }) {
     setTimeout(scroll, 50);
   };
 
-  const activate = () => { setStarted(true); send("Give me a quick assessment of my day so far and what I should focus on."); };
+  const activate = () => { setStarted(true); send(system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."); };
 
   return (
     <div className="t3d-card" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div className="t3d-ctitle">AI COACH</div>
+      <div className="t3d-ctitle">{system ? "AI MORNING PLANNER" : "AI COACH"}</div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 0" }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>
           <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 18, textAlign: "center", lineHeight: 1.6, letterSpacing: 1 }}>
-            Your AI coach analyzes your habits,<br />workouts and nutrition in real-time.
+            {system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time."}
           </div>
-          <button className="t3d-btn" onClick={activate}>ACTIVATE COACH</button>
+          <button className="t3d-btn" onClick={activate}>{system ? "BUILD MY ROUTINE" : "ACTIVATE COACH"}</button>
         </div>
       ) : (
         <>
@@ -204,29 +244,24 @@ function AICoach({ habits }) {
                 border: `1px solid ${m.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}`,
               }}>
                 <div className="t3d-ai-tag" style={{ color: m.role === "user" ? NEON2 : NEON }}>
-                  {m.role === "user" ? "YOU" : "AI COACH"}
+                  {m.role === "user" ? "YOU" : "AI"}
                 </div>
                 <span style={{ color: m.role === "user" ? "#C0D8E8" : "#8AABB8" }}>{m.content}</span>
               </div>
             ))}
             {loading && (
               <div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}>
-                <div className="t3d-ai-tag" style={{ color: NEON }}>AI COACH</div>
-                <span className="t3d-cursor" style={{ color: "#3A5060", fontSize: 11 }}>Analyzing</span>
+                <div className="t3d-ai-tag" style={{ color: NEON }}>AI</div>
+                <span className="t3d-cursor" style={{ color: "#3A5060", fontSize: 11 }}>Thinking</span>
               </div>
             )}
             <div ref={endRef} />
           </div>
           <div style={{ display: "flex", gap: 7, marginBottom: 7 }}>
-            <input className="t3d-ai-input" placeholder="Ask your coach..." value={input}
+            <input className="t3d-ai-input" placeholder="Ask anything..." value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === "Enter" && send(input)} />
             <button className="t3d-btn t3d-btn-sm" onClick={() => send(input)} disabled={loading || !input.trim()}>SEND</button>
-          </div>
-          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-            {["What should I eat tonight?", "Am I overtraining?", "Motivate me"].map(q => (
-              <button key={q} className="t3d-btn t3d-btn-sm" style={{ opacity: .65, fontSize: 8 }} onClick={() => send(q)} disabled={loading}>{q}</button>
-            ))}
           </div>
         </>
       )}
@@ -234,6 +269,638 @@ function AICoach({ habits }) {
   );
 }
 
+// ─── Schedule Review with Drag ────────────────────────────────────────────────
+function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTimes, calcFinishTime, LOCKED_LAST, onBack, onSave }) {
+  const [dragIdx, setDragIdx] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiExplanation, setAiExplanation] = useState("");
+
+  const draggable = scheduledTasks.filter(t => t.id !== "checkin");
+  const locked = scheduledTasks.find(t => t.id === "checkin") || LOCKED_LAST;
+
+  const handleDragStart = (i) => setDragIdx(i);
+  const handleDragOver = (e, i) => {
+    e.preventDefault();
+    if (dragIdx === null || dragIdx === i) return;
+    const newList = [...draggable];
+    const [moved] = newList.splice(dragIdx, 1);
+    newList.splice(i, 0, moved);
+    setScheduledTasks(recalcTimes([...newList, locked]));
+    setDragIdx(i);
+  };
+  const handleDragEnd = () => setDragIdx(null);
+
+  const optimiseWithAI = async () => {
+    setAiLoading(true);
+    setAiExplanation("");
+    const taskList = draggable.map(t => t.name + " (" + t.duration + "min)").join(", ");
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: "You are a morning routine expert. Reorder the tasks for maximum effectiveness. Respond ONLY with JSON: {order: [task names], explanation: string}",
+          messages: [{ role: "user", content: "Optimise this morning routine: " + taskList }],
+        }),
+      });
+      const data = await res.json();
+      const text = data.content?.map(b => b.text || "").join("") || "";
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      if (parsed.order) {
+        const reordered = parsed.order.map(name => draggable.find(t => t.name === name)).filter(Boolean);
+        const remaining = draggable.filter(t => !reordered.find(r => r.name === t.name));
+        setScheduledTasks(recalcTimes([...reordered, ...remaining, locked]));
+        setAiExplanation(parsed.explanation || "");
+      }
+    } catch (e) {
+      setAiExplanation("Could not optimise. Try again.");
+    }
+    setAiLoading(false);
+  };
+
+  return (
+    <div>
+      <div className="t3d-ctitle">DRAG TO REORDER YOUR ROUTINE</div>
+      <div style={{ marginBottom: 12, fontSize: 10, color: "#3A5060", letterSpacing: 1 }}>
+        Hold and drag using the lines to reorder. Check-in is locked last.
+      </div>
+      <div style={{ marginBottom: 8 }}>
+        {draggable.map((t, i) => (
+          <div key={t.id || i} draggable
+            onDragStart={() => handleDragStart(i)}
+            onDragOver={(e) => handleDragOver(e, i)}
+            onDragEnd={handleDragEnd}
+            style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 10px", borderBottom: "1px solid #1A2530", cursor: "grab", borderRadius: 4, background: dragIdx === i ? "rgba(0,255,178,.04)" : "transparent" }}>
+            <div style={{ color: "#2A3A48", fontSize: 18, userSelect: "none" }}>≡</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 45 }}>{t.scheduledTime}</div>
+            <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
+            <div style={{ fontSize: 10, color: "#3A5060" }}>{t.duration}min</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 10px", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6, marginBottom: 16, background: "rgba(0,200,255,.04)" }}>
+        <div style={{ fontSize: 14 }}>🔒</div>
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 45 }}>{locked.scheduledTime}</div>
+        <div style={{ flex: 1, fontSize: 12, color: "#4A6070" }}>{locked.icon} {locked.name}</div>
+        <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>LOCKED</div>
+      </div>
+      <div style={{ background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6, padding: 12, marginBottom: 16, display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 11, color: "#3A5060" }}>ROUTINE FINISHES AT</span>
+        <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#00C8FF" }}>{calcFinishTime(wakeTime, scheduledTasks)}</span>
+      </div>
+      {aiExplanation && (
+        <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#00FFB2", letterSpacing: 2, marginBottom: 6 }}>AI SUGGESTION</div>
+          {aiExplanation}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack}>← TASKS</button>
+        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={optimiseWithAI} disabled={aiLoading}>
+          {aiLoading ? "THINKING..." : "✨ OPTIMISE WITH AI"}
+        </button>
+        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave}>
+          LOCK IT IN →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Morning Section ──────────────────────────────────────────────────────────
+function MorningSection({ user }) {
+  const [view, setView] = useState("home");
+  const [setupStep, setSetupStep] = useState(0);
+  const [wakeTime, setWakeTime] = useState("06:00");
+  const [selectedTasks, setSelectedTasks] = useState([]);
+  const [customTask, setCustomTask] = useState("");
+  const [scheduledTasks, setScheduledTasks] = useState([]);
+  const [checkinStep, setCheckinStep] = useState(0);
+  const [checkinData, setCheckinData] = useState({});
+  const [tempInput, setTempInput] = useState("");
+  const [photoPreview, setPhotoPreview] = useState(null);
+  const [isSetup, setIsSetup] = useState(false);
+  const [completedToday, setCompletedToday] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const fileRef = useRef(null);
+
+  const today = new Date().toISOString().split("T")[0];
+
+  const NON_NEGS = [
+    { id: "weight", name: "Log body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
+    { id: "sleep", name: "Log sleep duration", type: "sleep", icon: "😴", duration: 1 },
+    { id: "photo", name: "Progress photo", type: "photo", icon: "📸", duration: 2 },
+  ];
+  const LOCKED_LAST = { id: "checkin", name: "TRACK3D Morning Check-in", type: "tick", icon: "📱", duration: 2 };
+
+  // Load routine and history from Supabase on mount
+  useEffect(() => {
+    if (!user) return;
+    loadData();
+  }, [user]);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      // Load routine
+      const { data: routineData } = await supabase
+        .from("morning_routines")
+        .select("*")
+        .eq("user_id", user.id)
+        .single();
+
+      if (routineData) {
+        setWakeTime(routineData.wake_time || "06:00");
+        setScheduledTasks(routineData.tasks || []);
+        setIsSetup(true);
+      }
+
+      // Load checkins
+      const { data: checkinHistory } = await supabase
+        .from("morning_checkins")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("date", { ascending: false })
+        .limit(30);
+
+      if (checkinHistory) {
+        setHistory(checkinHistory);
+        const todayEntry = checkinHistory.find(c => c.date === today);
+        if (todayEntry) setCompletedToday(true);
+      }
+    } catch (e) {
+      console.log("Load error:", e);
+    }
+    setLoading(false);
+  };
+
+  const saveRoutine = async (tasks) => {
+    if (!user) return;
+    await supabase.from("morning_routines").upsert({
+      user_id: user.id,
+      wake_time: wakeTime,
+      tasks: tasks,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+  };
+
+  const saveCheckin = async (data, score) => {
+    if (!user) return;
+    await supabase.from("morning_checkins").upsert({
+      user_id: user.id,
+      date: today,
+      score: score,
+      data: data,
+      created_at: new Date().toISOString(),
+    }, { onConflict: "user_id,date" });
+  };
+
+  const calcFinishTime = (wake, tasks) => {
+    const [h, m] = wake.split(":").map(Number);
+    const totalMins = tasks.reduce((a, t) => a + (t.duration || 10), 0);
+    const finishMins = h * 60 + m + totalMins;
+    const fh = Math.floor(finishMins / 60) % 24;
+    const fm = finishMins % 60;
+    return `${String(fh).padStart(2,"0")}:${String(fm).padStart(2,"0")}`;
+  };
+
+  const toggleTask = (task) => {
+    setSelectedTasks(prev =>
+      prev.find(t => t.name === task.name)
+        ? prev.filter(t => t.name !== task.name)
+        : [...prev, { ...task, id: task.name }]
+    );
+  };
+
+  const addCustomTask = () => {
+    if (!customTask.trim()) return;
+    setSelectedTasks(prev => [...prev, { id: customTask, name: customTask, duration: 10, type: "tick" }]);
+    setCustomTask("");
+  };
+
+  const buildSchedule = (orderedTasks) => {
+    const [h, m] = wakeTime.split(":").map(Number);
+    let cursor = h * 60 + m;
+    const all = [...(orderedTasks || [...NON_NEGS, ...selectedTasks]), LOCKED_LAST];
+    return all.map(task => {
+      const th = Math.floor(cursor / 60) % 24;
+      const tm = cursor % 60;
+      const time = `${String(th).padStart(2,"0")}:${String(tm).padStart(2,"0")}`;
+      cursor += task.duration || 5;
+      return { ...task, scheduledTime: time };
+    });
+  };
+
+  const recalcTimes = (tasks) => {
+    const [h, m] = wakeTime.split(":").map(Number);
+    let cursor = h * 60 + m;
+    return tasks.map(task => {
+      const th = Math.floor(cursor / 60) % 24;
+      const tm = cursor % 60;
+      const time = `${String(th).padStart(2,"0")}:${String(tm).padStart(2,"0")}`;
+      cursor += task.duration || 5;
+      return { ...task, scheduledTime: time };
+    });
+  };
+
+  const allSteps = scheduledTasks.length > 0 ? scheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
+  const currentStep = allSteps[checkinStep];
+
+  const morningScore = (data) => {
+    const vals = Object.values(data);
+    const done = vals.filter(v => v !== null && v !== undefined && v !== false).length;
+    return Math.round((done / allSteps.length) * 10);
+  };
+
+  const finishTime = isSetup ? calcFinishTime(wakeTime, scheduledTasks) : "--:--";
+
+  // 7-day chart data
+  const last7 = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const dateStr = d.toISOString().split("T")[0];
+    const entry = history.find(h => h.date === dateStr);
+    return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
+  });
+
+  if (loading) return (
+    <div className="t3d-fade">
+      <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
+        <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2 }}>LOADING MORNING DATA...</div>
+      </div>
+    </div>
+  );
+
+  // HOME view
+  if (view === "home") {
+    return (
+      <div className="t3d-fade">
+        {!isSetup ? (
+          <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
+            <div style={{ fontSize: 40, marginBottom: 16 }}>🌅</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>MORNING ROUTINE</div>
+            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 28, lineHeight: 1.7 }}>
+              Build your optimal morning routine.<br />Track it every day. Win every morning.
+            </div>
+            <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => setView("setup")}>
+              SET UP MY MORNING
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="t3d-grid3">
+              <div className="t3d-card" style={{ textAlign: "center" }}>
+                <div className="t3d-ctitle">WAKE UP</div>
+                <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{wakeTime}</div>
+              </div>
+              <div className="t3d-card" style={{ textAlign: "center" }}>
+                <div className="t3d-ctitle">FINISH BY</div>
+                <div className="t3d-sval" style={{ color: NEON2, fontSize: 24 }}>{finishTime}</div>
+              </div>
+              <div className="t3d-card" style={{ textAlign: "center" }}>
+                <div className="t3d-ctitle">TASKS</div>
+                <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 24 }}>{allSteps.length}</div>
+              </div>
+            </div>
+
+            {/* Check-in button or completed state */}
+            <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 32 }}>
+              {completedToday ? (
+                <>
+                  <div style={{ fontSize: 40, marginBottom: 12 }}>✅</div>
+                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 2, marginBottom: 8 }}>
+                    MORNING COMPLETE
+                  </div>
+                  <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 1 }}>
+                    Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20, letterSpacing: 1 }}>
+                    READY TO START YOUR MORNING?
+                  </div>
+                  <button
+                    className="t3d-big-btn"
+                    style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
+                    onClick={() => { setCheckinStep(0); setCheckinData({}); setTempInput(""); setView("checkin"); }}>
+                    ☀️ MORNING CHECK-IN
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* Today's schedule */}
+            <div className="t3d-card" style={{ marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY'S SCHEDULE</div>
+                <button className="t3d-btn t3d-btn-sm" onClick={() => { setView("setup"); setSetupStep(0); }}>EDIT</button>
+              </div>
+              {scheduledTasks.map((t, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
+                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, width: 45 }}>{t.scheduledTime}</div>
+                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
+                  <div style={{ fontSize: 10, color: "#3A5060" }}>{t.duration}min</div>
+                </div>
+              ))}
+            </div>
+
+            {/* 7-day chart */}
+            <div className="t3d-card" style={{ marginBottom: 16 }}>
+              <div className="t3d-ctitle">7-DAY MORNING SCORES</div>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80, padding: "0 4px" }}>
+                {last7.map((d, i) => (
+                  <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                    <div style={{ width: "100%", position: "relative", height: 60, display: "flex", alignItems: "flex-end" }}>
+                      <div style={{
+                        width: "100%",
+                        height: d.score !== null ? `${(d.score / 10) * 100}%` : "4px",
+                        background: d.score !== null
+                          ? d.score >= 7 ? NEON : d.score >= 4 ? "#FF8C00" : NEON3
+                          : BORDER,
+                        borderRadius: "3px 3px 0 0",
+                        transition: "height .6s cubic-bezier(.16,1,.3,1)",
+                        boxShadow: d.score !== null && d.score >= 7 ? `0 0 6px ${NEON}60` : "none",
+                        minHeight: 4,
+                      }} />
+                    </div>
+                    <div style={{ fontSize: 9, color: d.date === today ? NEON : "#2A3A48", letterSpacing: 0.5 }}>{d.label}</div>
+                    {d.score !== null && <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#3A5060" }}>{d.score}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* History accordion */}
+            <div className="t3d-card">
+              <div
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+                onClick={() => setHistoryOpen(h => !h)}>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>MORNING HISTORY</div>
+                <div style={{ color: "#3A5060", fontSize: 14, transition: "transform .2s", transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▾</div>
+              </div>
+              {historyOpen && (
+                <div style={{ marginTop: 16 }}>
+                  {history.length === 0 ? (
+                    <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", padding: "16px 0" }}>No history yet — complete your first morning check-in!</div>
+                  ) : (
+                    history.map((entry, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
+                        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#3A5060", width: 80 }}>
+                          {new Date(entry.date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                            {entry.data && Object.entries(entry.data).map(([k, v]) => (
+                              <span key={k} style={{
+                                fontSize: 9, padding: "2px 6px", borderRadius: 10,
+                                background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
+                                color: v === true ? NEON : v === false ? NEON3 : NEON2,
+                                border: `1px solid ${v === true ? "rgba(0,255,178,.2)" : v === false ? "rgba(255,45,120,.2)" : "rgba(0,200,255,.2)"}`,
+                              }}>
+                                {k}: {v === true ? "✓" : v === false ? "✗" : String(v).slice(0,8)}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div style={{
+                          fontFamily: "'Orbitron',monospace", fontSize: 13, fontWeight: 700,
+                          color: entry.score >= 7 ? NEON : entry.score >= 4 ? "#FF8C00" : NEON3
+                        }}>{entry.score}/10</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // SETUP view
+  if (view === "setup") {
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card">
+          <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
+            {["WAKE TIME", "TASKS", "REVIEW"].map((s, i) => (
+              <div key={i} style={{
+                flex: 1, textAlign: "center", padding: "8px 4px", borderRadius: 5, fontSize: 9,
+                letterSpacing: 1, fontFamily: "'Orbitron',monospace",
+                background: setupStep === i ? "rgba(0,255,178,.08)" : "transparent",
+                border: `1px solid ${setupStep === i ? NEON : BORDER}`,
+                color: setupStep === i ? NEON : "#3A5060"
+              }}>{s}</div>
+            ))}
+          </div>
+
+          {setupStep === 0 && (
+            <div>
+              <div className="t3d-ctitle">WHAT TIME DO YOU WANT TO WAKE UP?</div>
+              <div style={{ display: "flex", justifyContent: "center", margin: "32px 0" }}>
+                <input type="time" value={wakeTime} onChange={e => setWakeTime(e.target.value)}
+                  style={{ background: SURFACE2, border: `1px solid ${NEON}`, borderRadius: 8, padding: "16px 24px", color: NEON, fontFamily: "'Orbitron',monospace", fontSize: 32, outline: "none", textAlign: "center" }} />
+              </div>
+              <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", marginBottom: 24 }}>
+                Your morning routine will be scheduled from this time
+              </div>
+              <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={() => setSetupStep(1)}>NEXT →</button>
+            </div>
+          )}
+
+          {setupStep === 1 && (
+            <div>
+              <div className="t3d-ctitle">CHOOSE YOUR MORNING TASKS</div>
+              <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#3A5060" }}>
+                ✓ Body weight, sleep & progress photo included. TRACK3D Check-in always last.
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                {SUGGESTED_TASKS.map((t, i) => (
+                  <span key={i} className={`t3d-task-chip ${selectedTasks.find(s => s.name === t.name) ? "selected" : ""}`}
+                    onClick={() => toggleTask(t)}>
+                    {selectedTasks.find(s => s.name === t.name) ? "✓ " : ""}{t.name} ({t.duration}m)
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+                <input className="t3d-input" placeholder="Add custom task..." value={customTask}
+                  onChange={e => setCustomTask(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && addCustomTask()} />
+                <button className="t3d-btn t3d-btn-sm" onClick={addCustomTask}>ADD</button>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="t3d-btn t3d-btn-sm" onClick={() => setSetupStep(0)}>← BACK</button>
+                <button className="t3d-btn" style={{ flex: 1, padding: 12 }}
+                  onClick={() => { setScheduledTasks(buildSchedule([...NON_NEGS, ...selectedTasks])); setSetupStep(2); }}>
+                  NEXT →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {setupStep === 2 && (
+            <ScheduleReview
+              scheduledTasks={scheduledTasks}
+              setScheduledTasks={setScheduledTasks}
+              wakeTime={wakeTime}
+              recalcTimes={recalcTimes}
+              calcFinishTime={calcFinishTime}
+              LOCKED_LAST={LOCKED_LAST}
+              onBack={() => setSetupStep(1)}
+              onSave={async () => {
+                await saveRoutine(scheduledTasks);
+                setIsSetup(true);
+                setView("home");
+              }}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // CHECK-IN view
+  if (view === "checkin" && currentStep) {
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card">
+          <div className="t3d-progress-dots">
+            {allSteps.map((_, i) => (
+              <div key={i} className={`t3d-dot-step ${i === checkinStep ? "active" : i < checkinStep ? "done" : ""}`} />
+            ))}
+          </div>
+          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>
+            STEP {checkinStep + 1} OF {allSteps.length}
+          </div>
+          <div className="t3d-checkin-step">
+            <div style={{ fontSize: 40, marginBottom: 16 }}>{currentStep.icon || "▸"}</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 2, color: "#E0EAF0", marginBottom: 8 }}>
+              {currentStep.name}
+            </div>
+
+            {currentStep.type === "number" && (
+              <div style={{ width: "100%", maxWidth: 280 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+                  <input className="t3d-input" type="number" placeholder={`Enter ${currentStep.unit}...`}
+                    value={tempInput} onChange={e => setTempInput(e.target.value)}
+                    style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
+                  <span style={{ color: "#3A5060", fontSize: 14 }}>{currentStep.unit}</span>
+                </div>
+                <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); setCheckinStep(s => s + 1); }}>
+                  CONFIRM →
+                </button>
+              </div>
+            )}
+
+            {currentStep.type === "sleep" && (
+              <div style={{ width: "100%", maxWidth: 280 }}>
+                <input className="t3d-input" placeholder="e.g. 7h 30m" value={tempInput}
+                  onChange={e => setTempInput(e.target.value)}
+                  style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
+                <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); setCheckinStep(s => s + 1); }}>
+                  CONFIRM →
+                </button>
+              </div>
+            )}
+
+            {currentStep.type === "photo" && (
+              <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
+                <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+                  onChange={e => { const f = e.target.files[0]; if (f) { setPhotoPreview(URL.createObjectURL(f)); setCheckinData(d => ({ ...d, photo: f.name })); } }} />
+                {photoPreview ? (
+                  <div>
+                    <img src={photoPreview} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt="progress" />
+                    <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
+                      onClick={() => setCheckinStep(s => s + 1)}>
+                      CONFIRM →
+                    </button>
+                  </div>
+                ) : (
+                  <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
+                    📸 UPLOAD PHOTO
+                  </button>
+                )}
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ width: "100%" }}
+                  onClick={() => { setCheckinData(d => ({ ...d, photo: "skipped" })); setCheckinStep(s => s + 1); }}>
+                  SKIP TODAY
+                </button>
+              </div>
+            )}
+
+            {currentStep.type === "tick" && (
+              <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+                <button className="t3d-tick-btn"
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: true })); setCheckinStep(s => s + 1); }}>
+                  ✓
+                </button>
+                <button className="t3d-cross-btn"
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: false })); setCheckinStep(s => s + 1); }}>
+                  ✗
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // COMPLETE view
+  if (view === "checkin" && checkinStep >= allSteps.length) {
+    const score = morningScore(checkinData);
+    const quote = MORNING_QUOTES[Math.floor(Math.random() * MORNING_QUOTES.length)];
+
+    // Save handled via button click
+
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🌟</div>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, letterSpacing: 3, color: NEON, marginBottom: 8 }}>MORNING COMPLETE</div>
+          <div style={{ margin: "24px auto" }}>
+            <ScoreRing score={score * 10} size={120} />
+          </div>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#3A5060", letterSpacing: 2, marginBottom: 8 }}>
+            MORNING SCORE: {score}/10
+          </div>
+          <div style={{ fontSize: 13, color: "#8AABB8", fontStyle: "italic", marginBottom: 32, lineHeight: 1.7, padding: "0 20px" }}>
+            "{quote}"
+          </div>
+          <div style={{ marginBottom: 24 }}>
+            {Object.entries(checkinData).map(([k, v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
+                <span style={{ color: "#4A6070" }}>{k}</span>
+                <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
+                  {v === true ? "✓" : v === false ? "✗" : v}
+                </span>
+              </div>
+            ))}
+          </div>
+          <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => {
+            await saveCheckin(checkinData, score);
+            setCompletedToday(true);
+            await loadData();
+            setView("home");
+          }}>
+            BACK TO MORNING
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
 function Dashboard({ habits, setHabits }) {
   const done = habits.filter(h => h.done).length;
   const score = Math.round((done / habits.length) * 58 + 16);
@@ -293,6 +960,7 @@ function Dashboard({ habits, setHabits }) {
   );
 }
 
+// ─── Fitness ──────────────────────────────────────────────────────────────────
 function Fitness() {
   const stats = [
     { label: "WORKOUTS THIS WEEK", val: "4", delta: "+1 vs last week", up: true, color: NEON },
@@ -338,7 +1006,7 @@ function Fitness() {
         <div className="t3d-card">
           <div className="t3d-ctitle">WEEKLY SPLIT</div>
           {split.map((d, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: "1px solid #1A2530", opacity: d.done ? .45 : 1 }}>
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}`, opacity: d.done ? .45 : 1 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 28, color: d.today ? NEON : "#3A5060" }}>{d.day}</div>
               <div style={{ flex: 1, fontSize: 11, color: d.today ? "#E0EAF0" : "#4A6070" }}>{d.name}</div>
               {d.today && <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, padding: "2px 7px", borderRadius: 10, background: "rgba(0,255,178,.1)", color: NEON, border: "1px solid rgba(0,255,178,.25)" }}>TODAY</span>}
@@ -351,6 +1019,7 @@ function Fitness() {
   );
 }
 
+// ─── Nutrition ────────────────────────────────────────────────────────────────
 function Nutrition() {
   const macros = [
     { label: "PROTEIN", val: TOTAL_P, goal: 180, color: NEON },
@@ -434,6 +1103,7 @@ function Nutrition() {
   );
 }
 
+// ─── Habits ───────────────────────────────────────────────────────────────────
 function HabitsPage({ habits, setHabits }) {
   const cats = [...new Set(habits.map(h => h.category))];
   return (
@@ -476,8 +1146,12 @@ function HabitsPage({ habits, setHabits }) {
   );
 }
 
-export default function App() { const [user, setUser] = useState(null);
+// ─── App ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [tab, setTab] = useState("dashboard");
+  const [habits, setHabits] = useState(INITIAL_HABITS);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -492,28 +1166,27 @@ export default function App() { const [user, setUser] = useState(null);
     return () => subscription.unsubscribe();
   }, []);
 
-  
-  const [tab, setTab] = useState("dashboard");
-  const [habits, setHabits] = useState(INITIAL_HABITS);
-if (authLoading) return (
+  if (authLoading) return (
     <div style={{ minHeight: "100vh", background: "#080C10", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Orbitron',monospace", color: "#00FFB2", letterSpacing: 4, fontSize: 12 }}>
       LOADING...
     </div>
   );
+
   const nav = [
     { id: "dashboard", icon: "◈", label: "DASHBOARD" },
+    { id: "morning", icon: "🌅", label: "MORNING" },
     { id: "fitness", icon: "⚡", label: "FITNESS" },
     { id: "nutrition", icon: "◎", label: "NUTRITION" },
     { id: "habits", icon: "◇", label: "HABITS" },
   ];
 
-  const titles = { dashboard: "OVERVIEW", fitness: "FITNESS", nutrition: "NUTRITION", habits: "HABITS" };
+  const titles = { dashboard: "OVERVIEW", morning: "MORNING", fitness: "FITNESS", nutrition: "NUTRITION", habits: "HABITS" };
 
   return (
     <>
       <style>{css}</style>
       <div className="t3d">
-        <nav className="t3d-sidebar"># 
+        <nav className="t3d-sidebar">
           <div className="t3d-logo">TRACK3D<small>Awareness. Strategy. Action. Results.</small></div>
           {nav.map(n => (
             <div key={n.id} className={`t3d-nav ${tab===n.id?"on":""}`} onClick={() => setTab(n.id)}>
@@ -535,10 +1208,20 @@ if (authLoading) return (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
+                onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
+                SIGN OUT
+              </button>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
+                onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
+                SIGN OUT
+              </button>
             </div>
           </div>
 
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} />}
+          {tab === "morning" && <MorningSection user={user} />}
+          {tab === "morning" && <MorningSection user={user} />}
           {tab === "fitness" && <Fitness />}
           {tab === "nutrition" && <Nutrition />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
