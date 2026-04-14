@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+#import { useState, useRef, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 
 const NEON = "#00FFB2";
@@ -388,7 +388,11 @@ function MorningSection({ user }) {
   const [loading, setLoading] = useState(true);
   const fileRef = useRef(null);
 
-  const today = new Date().toISOString().split("T")[0];
+  const getLocalDate = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  };
+  const today = getLocalDate();
 
   const NON_NEGS = [
     { id: "weight", name: "Log body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
@@ -531,7 +535,7 @@ function MorningSection({ user }) {
   const last7 = Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
-    const dateStr = d.toISOString().split("T")[0];
+    const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
     const entry = history.find(h => h.date === dateStr);
     return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
   });
