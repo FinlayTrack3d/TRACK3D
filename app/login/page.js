@@ -39,7 +39,7 @@ export default function Login() {
           WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
           marginBottom: 4 , textAlign: "center"
         }}>TRACK3D</div>
-        <div style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 2, marginBottom: 32 }}>
+        <div style={{ fontSize: 10, color: "#FFFFFF", letterSpacing: 2, marginBottom: 32, textAlign: "center" }}>
           Awareness. Strategy. Action. Results.
         </div>
 
@@ -94,7 +94,7 @@ export default function Login() {
 
         <div
           onClick={() => setIsSignUp(!isSignUp)}
-          style={{ fontSize: 11, color: "#3A5060", textAlign: "center", cursor: "pointer", letterSpacing: 1 }}>
+          style={{ fontSize: 11, color: "#FFFFFF", textAlign: "center", cursor: "pointer", letterSpacing: 1 }}>
           {isSignUp ? "Already have an account? Sign in" : "No account? Create one"}
         </div>
       </div>
