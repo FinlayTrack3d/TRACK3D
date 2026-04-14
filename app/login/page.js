@@ -37,10 +37,10 @@ export default function Login() {
           fontFamily: "'Orbitron', monospace", fontSize: 24, fontWeight: 900,
           letterSpacing: 4, background: "linear-gradient(90deg,#00FFB2,#00C8FF)",
           WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-          marginBottom: 4
+          marginBottom: 4 , textAlign: "center"
         }}>TRACK3D</div>
         <div style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 2, marginBottom: 32 }}>
-          SELF IMPROVEMENT OS
+          Awareness. Strategy. Action. Results.
         </div>
 
         <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2, marginBottom: 24 }}>

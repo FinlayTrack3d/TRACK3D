@@ -58,7 +58,7 @@ const css = `
   .t3d * { box-sizing: border-box; margin: 0; padding: 0; }
   .t3d { display: flex; min-height: 100vh; background: #080C10; color: #E0EAF0; font-family: 'Space Mono', monospace; }
   .t3d-sidebar { width: 210px; background: #0D1318; border-right: 1px solid #1A2530; display: flex; flex-direction: column; padding: 28px 0; flex-shrink: 0; }
-  .t3d-logo { font-family: 'Orbitron', monospace; font-weight: 900; font-size: 20px; letter-spacing: 4px; padding: 0 22px 28px; background: linear-gradient(90deg,#00FFB2,#00C8FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .t3d-logo { font-family: 'Orbitron', monospace; font-weight: 900; font-size: 20px; letter-spacing: 4px; padding: 0 22px 28px; background: linear-gradient(90deg,#00FFB2,#00C8FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent;  text-align: center; }
   .t3d-logo small { font-size: 10px; letter-spacing: 2px; display: block; -webkit-text-fill-color: #2A3A48; color: #2A3A48; margin-top: 2px; font-weight: 400; }
   .t3d-nav { display: flex; align-items: center; gap: 10px; padding: 12px 22px; cursor: pointer; font-size: 11px; letter-spacing: 1px; color: #3A5060; border-left: 2px solid transparent; transition: all .18s; }
   .t3d-nav:hover { color: #8AABB8; background: rgba(0,255,178,.04); }
@@ -513,8 +513,8 @@ if (authLoading) return (
     <>
       <style>{css}</style>
       <div className="t3d">
-        <nav className="t3d-sidebar">
-          <div className="t3d-logo">TRACK3D<small>SELF IMPROVEMENT OS</small></div>
+        <nav className="t3d-sidebar"># 
+          <div className="t3d-logo">TRACK3D<small>Awareness. Strategy. Action. Results.</small></div>
           {nav.map(n => (
             <div key={n.id} className={`t3d-nav ${tab===n.id?"on":""}`} onClick={() => setTab(n.id)}>
               <span className="t3d-nav-icon">{n.icon}</span>{n.label}
