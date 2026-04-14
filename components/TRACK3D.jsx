@@ -511,9 +511,18 @@ function MorningSection({ user }) {
   const currentStep = allSteps[checkinStep];
 
   const morningScore = (data) => {
-    const vals = Object.values(data);
-    const done = vals.filter(v => v !== null && v !== undefined && v !== false).length;
-    return Math.round((done / allSteps.length) * 10);
+    const total = allSteps.length;
+    if (total === 0) return 0;
+    let points = 0;
+    allSteps.forEach(step => {
+      const key = step.id || step.name;
+      const val = data[key];
+      if (step.type === "number" && val && val !== "") points++;
+      else if (step.type === "sleep" && val && val !== "") points++;
+      else if (step.type === "photo" && val && val !== "skipped") points++;
+      else if (step.type === "tick" && val === true) points++;
+    });
+    return Math.round((points / total) * 10);
   };
 
   const finishTime = isSetup ? calcFinishTime(wakeTime, scheduledTasks) : "--:--";
@@ -705,7 +714,7 @@ function MorningSection({ user }) {
               <div className="t3d-ctitle">WHAT TIME DO YOU WANT TO WAKE UP?</div>
               <div style={{ display: "flex", justifyContent: "center", margin: "32px 0" }}>
                 <input type="time" value={wakeTime} onChange={e => setWakeTime(e.target.value)}
-                  style={{ background: SURFACE2, border: `1px solid ${NEON}`, borderRadius: 8, padding: "16px 24px", color: NEON, fontFamily: "'Orbitron',monospace", fontSize: 32, outline: "none", textAlign: "center" }} />
+                  style={{ background: SURFACE2, border: `1px solid ${NEON}`, borderRadius: 8, padding: "16px 24px", color: NEON, fontSize: 28, outline: "none", textAlign: "center", colorScheme: "dark", minWidth: 180 }} />
               </div>
               <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", marginBottom: 24 }}>
                 Your morning routine will be scheduled from this time
@@ -1220,7 +1229,6 @@ export default function App() {
           </div>
 
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} />}
-          {tab === "morning" && <MorningSection user={user} />}
           {tab === "morning" && <MorningSection user={user} />}
           {tab === "fitness" && <Fitness />}
           {tab === "nutrition" && <Nutrition />}
