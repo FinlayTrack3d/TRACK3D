@@ -86,7 +86,8 @@ const css = `
   .t3d-nav.on { color: #00FFB2; border-left-color: #00FFB2; background: rgba(0,255,178,.06); }
   .t3d-nav-icon { width: 18px; text-align: center; font-size: 14px; }
   .t3d-sfooter { margin-top: auto; padding: 22px; font-size: 11px; color: #2A3A48; letter-spacing: 1px; line-height: 1.6; }
-  .t3d-main { flex: 1; padding: 28px 28px 48px; min-width: 0; overflow-y: auto; }
+  ..t3d-main { flex: 1; padding: 28px 28px 48px; min-width: 0; overflow-y: auto; }
+  @media (max-width: 768px) { .t3d-sidebar { display: none; } .t3d-main { padding: 16px; } }
   .t3d-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; }
   .t3d-title { font-family: 'Orbitron', monospace; font-size: 18px; font-weight: 700; letter-spacing: 3px; }
   .t3d-date { font-size: 10px; color: #3A5060; letter-spacing: 2px; margin-top: 4px; }
