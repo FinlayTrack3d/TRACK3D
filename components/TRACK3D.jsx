@@ -1928,6 +1928,11 @@ export default function App() {
               <div className="t3d-date">{TODAY.toUpperCase()}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 16, padding: "6px 12px" }}
+  onClick={() => document.querySelector('.t3d-sidebar').style.display = 
+    document.querySelector('.t3d-sidebar').style.display === 'none' ? 'flex' : 'none'}>
+  ☰
+</button>
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
