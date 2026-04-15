@@ -1,4 +1,4 @@
-#import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { supabase } from "../lib/supabase";
 
 const NEON = "#00FFB2";
@@ -202,12 +202,10 @@ User data today:
     setInput("");
     setTimeout(scroll, 50);
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
           system: system || defaultSystem,
           messages: updated,
         }),
@@ -295,11 +293,11 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
     setAiExplanation("");
     const taskList = draggable.map(t => t.name + " (" + t.duration + "min)").join(", ");
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           max_tokens: 1000,
           system: "You are a morning routine expert. Reorder the tasks for maximum effectiveness. Respond ONLY with JSON: {order: [task names], explanation: string}",
           messages: [{ role: "user", content: "Optimise this morning routine: " + taskList }],
