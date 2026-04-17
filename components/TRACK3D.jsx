@@ -86,8 +86,21 @@ const css = `
   .t3d-nav.on { color: #00FFB2; border-left-color: #00FFB2; background: rgba(0,255,178,.06); }
   .t3d-nav-icon { width: 18px; text-align: center; font-size: 14px; }
   .t3d-sfooter { margin-top: auto; padding: 22px; font-size: 11px; color: #2A3A48; letter-spacing: 1px; line-height: 1.6; }
-  ..t3d-main { flex: 1; padding: 28px 28px 48px; min-width: 0; overflow-y: auto; }
-  @media (max-width: 768px) { .t3d-sidebar { display: none; } .t3d-main { padding: 16px; } }
+  .t3d-main { flex: 1; padding: 28px 28px 48px; min-width: 0; overflow-y: auto; }
+  @media (max-width: 768px) {
+    .t3d-sidebar { display: none !important; }
+    .t3d-main { padding: 16px 16px 80px; }
+    .t3d-grid3 { grid-template-columns: repeat(2,1fr); }
+    .t3d-grid12 { grid-template-columns: 1fr; }
+    .t3d-grid2 { grid-template-columns: 1fr; }
+  }
+  .t3d-bottom-nav { display: none; }
+  @media (max-width: 768px) {
+    .t3d-bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; background: #0D1318; border-top: 1px solid #1A2530; padding: 8px 0 12px; z-index: 50; justify-content: space-around; align-items: center; }
+  }
+  .t3d-bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; padding: 4px 12px; border-radius: 8px; transition: all .18s; color: #3A5060; font-family: 'Orbitron', monospace; font-size: 7px; letter-spacing: 1px; border: none; background: transparent; }
+  .t3d-bnav-item.on { color: #00FFB2; }
+  .t3d-bnav-icon { font-size: 20px; }
   .t3d-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; }
   .t3d-title { font-family: 'Orbitron', monospace; font-size: 18px; font-weight: 700; letter-spacing: 3px; }
   .t3d-date { font-size: 10px; color: #3A5060; letter-spacing: 2px; margin-top: 4px; }
@@ -1741,89 +1754,783 @@ Respond ONLY with valid JSON:
 
 
 
-// ─── Nutrition ────────────────────────────────────────────────────────────────
-function Nutrition() {
-  const macros = [
-    { label: "PROTEIN", val: TOTAL_P, goal: 180, color: NEON },
-    { label: "CARBS", val: TOTAL_C, goal: 250, color: NEON2 },
-    { label: "FATS", val: TOTAL_F, goal: 70, color: "#FF8C00" },
-    { label: "CALORIES", val: TOTAL_CALS, goal: 2400, color: NEON3 },
-  ];
-  return (
-    <div className="t3d-fade">
-      <div className="t3d-grid2">
-        <div className="t3d-card">
-          <div className="t3d-ctitle">MACROS TODAY</div>
-          {macros.map((m, i) => (
-            <div className="t3d-mrow" key={i}>
-              <div className="t3d-mlbl" style={{ color: m.color }}>{m.label}</div>
-              <div className="t3d-mbar">
-                <div className="t3d-mfill" style={{ width: `${Math.min((m.val/m.goal)*100,100)}%`, background: m.color, boxShadow: `0 0 5px ${m.color}50` }} />
+// ─── Nutrition Section ────────────────────────────────────────────────────────
+const COMMON_MEALS = [
+  { name: "Oats & Banana", time: "08:00", ingredients: [{ name: "Oats", weight: 80, unit: "g" }, { name: "Banana", weight: 120, unit: "g" }, { name: "Whole milk", weight: 200, unit: "ml" }], calories: 420, protein: 14, carbs: 72, fats: 8 },
+  { name: "Chicken & Rice", time: "13:00", ingredients: [{ name: "Chicken breast", weight: 200, unit: "g" }, { name: "White rice", weight: 100, unit: "g" }, { name: "Broccoli", weight: 150, unit: "g" }], calories: 520, protein: 52, carbs: 55, fats: 6 },
+  { name: "Protein Shake", time: "16:00", ingredients: [{ name: "Whey protein", weight: 30, unit: "g" }, { name: "Whole milk", weight: 300, unit: "ml" }], calories: 280, protein: 38, carbs: 14, fats: 6 },
+  { name: "Salmon & Veg", time: "19:00", ingredients: [{ name: "Salmon fillet", weight: 180, unit: "g" }, { name: "Sweet potato", weight: 200, unit: "g" }, { name: "Asparagus", weight: 100, unit: "g" }], calories: 560, protein: 44, carbs: 42, fats: 18 },
+  { name: "Greek Yogurt & Berries", time: "21:00", ingredients: [{ name: "Greek yogurt", weight: 200, unit: "g" }, { name: "Mixed berries", weight: 100, unit: "g" }, { name: "Honey", weight: 10, unit: "g" }], calories: 220, protein: 18, carbs: 28, fats: 4 },
+  { name: "Eggs on Toast", time: "08:00", ingredients: [{ name: "Eggs", weight: 150, unit: "g" }, { name: "Wholegrain bread", weight: 80, unit: "g" }, { name: "Butter", weight: 10, unit: "g" }], calories: 380, protein: 22, carbs: 32, fats: 16 },
+  { name: "Tuna Rice Bowl", time: "13:00", ingredients: [{ name: "Tuna in water", weight: 160, unit: "g" }, { name: "Brown rice", weight: 120, unit: "g" }, { name: "Spinach", weight: 80, unit: "g" }], calories: 440, protein: 48, carbs: 50, fats: 4 },
+  { name: "Beef & Pasta", time: "19:00", ingredients: [{ name: "Lean beef mince", weight: 150, unit: "g" }, { name: "Pasta", weight: 100, unit: "g" }, { name: "Tomato sauce", weight: 100, unit: "g" }], calories: 580, protein: 42, carbs: 58, fats: 14 },
+];
+
+const GOAL_MULTIPLIERS = {
+  "Cut (lose fat)": { calMultiplier: 0.8, proteinPerKg: 2.2, carbPercent: 0.35, fatPercent: 0.25 },
+  "Maintain": { calMultiplier: 1.0, proteinPerKg: 1.8, carbPercent: 0.4, fatPercent: 0.3 },
+  "Lean bulk": { calMultiplier: 1.1, proteinPerKg: 2.0, carbPercent: 0.45, fatPercent: 0.25 },
+  "Bulk": { calMultiplier: 1.2, proteinPerKg: 1.8, carbPercent: 0.5, fatPercent: 0.25 },
+};
+
+function calcMacros(weight, goal, activityLevel) {
+  const activityFactors = { "Sedentary": 1.2, "Lightly active": 1.375, "Moderately active": 1.55, "Very active": 1.725 };
+  const bmr = weight * 24;
+  const tdee = bmr * (activityFactors[activityLevel] || 1.55);
+  const g = GOAL_MULTIPLIERS[goal] || GOAL_MULTIPLIERS["Maintain"];
+  const calories = Math.round(tdee * g.calMultiplier);
+  const protein = Math.round(weight * g.proteinPerKg);
+  const fats = Math.round((calories * g.fatPercent) / 9);
+  const carbs = Math.round((calories - (protein * 4) - (fats * 9)) / 4);
+  return { calories, protein, carbs, fats };
+}
+
+function Nutrition({ user }) {
+  const [view, setView] = useState("home"); // home | setup | review | complete
+  const [plan, setPlan] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [logs, setLogs] = useState([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [weeklyOpen, setWeeklyOpen] = useState(false);
+
+  // Setup state
+  const [setupStep, setSetupStep] = useState(0); // 0=goals, 1=meals, 2=review
+  const [bodyWeight, setBodyWeight] = useState("");
+  const [goal, setGoal] = useState("Maintain");
+  const [activityLevel, setActivityLevel] = useState("Moderately active");
+  const [calculatedMacros, setCalculatedMacros] = useState(null);
+  const [mealBuildMode, setMealBuildMode] = useState(null); // "own" | "common" | "ai"
+  const [planMeals, setPlanMeals] = useState([]);
+  const [addMealModal, setAddMealModal] = useState(false);
+  const [newMeal, setNewMeal] = useState({ name: "", time: "", ingredients: [], calories: "", protein: "", carbs: "", fats: "" });
+  const [newIngredient, setNewIngredient] = useState({ name: "", weight: "", unit: "g" });
+  const [aiMealLoading, setAiMealLoading] = useState(false);
+
+  // Day review state
+  const [reviewStep, setReviewStep] = useState(0);
+  const [mealResults, setMealResults] = useState({});
+  const [offPlanFood, setOffPlanFood] = useState("");
+  const [offPlanCals, setOffPlanCals] = useState("");
+  const [reviewComplete, setReviewComplete] = useState(false);
+  const [aiFeedback, setAiFeedback] = useState("");
+  const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const [todayLogged, setTodayLogged] = useState(false);
+
+  const getLocalDate = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  };
+  const today = getLocalDate();
+
+  useEffect(() => { if (!user) return; loadData(); }, [user]);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const { data: planData } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
+      if (planData) setPlan(planData);
+
+      const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
+      if (logData) {
+        setLogs(logData);
+        if (logData.find(l => l.date === today)) setTodayLogged(true);
+      }
+    } catch (e) { console.log("Load error:", e); }
+    setLoading(false);
+  };
+
+  const savePlan = async (meals, macros) => {
+    if (!user) return;
+    const { data } = await supabase.from("nutrition_plans").upsert({
+      user_id: user.id,
+      daily_calories: macros.calories,
+      protein_target: macros.protein,
+      carbs_target: macros.carbs,
+      fats_target: macros.fats,
+      goal,
+      meals,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    return data;
+  };
+
+  const saveLog = async () => {
+    if (!user) return;
+    const completedMeals = Object.entries(mealResults).filter(([k, v]) => v === true).length;
+    const totalMeals = plan?.meals?.length || 0;
+    const totalCals = Math.round(
+      (plan?.meals || []).filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.calories || 0), 0) +
+      (parseInt(offPlanCals) || 0)
+    );
+    const totalProtein = Math.round(
+      (plan?.meals || []).filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.protein || 0), 0)
+    );
+    await supabase.from("nutrition_logs").upsert({
+      user_id: user.id, date: today,
+      meals_completed: mealResults,
+      off_plan_food: offPlanFood,
+      off_plan_calories: parseInt(offPlanCals) || 0,
+      total_calories: totalCals,
+      total_protein: totalProtein,
+      ai_feedback: aiFeedback,
+      created_at: new Date().toISOString(),
+    }, { onConflict: "user_id,date" });
+  };
+
+  const getAIFeedback = async () => {
+    setAiFeedbackLoading(true);
+    const completedCount = Object.values(mealResults).filter(v => v === true).length;
+    const missedCount = Object.values(mealResults).filter(v => v === false).length;
+    const totalCals = Math.round(
+      (plan?.meals || []).filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.calories || 0), 0) +
+      (parseInt(offPlanCals) || 0)
+    );
+    const calorieTarget = plan?.daily_calories || 2000;
+    const diff = totalCals - calorieTarget;
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system: `You are TRACK3D's nutrition coach. Give honest, direct, motivating feedback on the user's day. 2-3 sentences max. Be real but encouraging. If they went over calories acknowledge it without shame. If they did well, celebrate it. Never give medical advice.`,
+          messages: [{ role: "user", content: `My nutrition day: completed ${completedCount} of ${plan?.meals?.length} meals, missed ${missedCount} meals. Off plan food: ${offPlanFood || "none"} (${offPlanCals || 0} extra kcal). Total calories: ${totalCals} vs target ${calorieTarget} (${diff > 0 ? "+" : ""}${diff} kcal). Protein: ${Math.round((plan?.meals || []).filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.protein || 0), 0))}g vs target ${plan?.protein_target}g. Goal: ${plan?.goal}. Give me feedback.` }],
+        }),
+      });
+      const data = await res.json();
+      const feedback = data.content?.map(b => b.text || "").join("") || "";
+      setAiFeedback(feedback);
+    } catch (e) { setAiFeedback("Keep pushing — every day is a chance to improve."); }
+    setAiFeedbackLoading(false);
+  };
+
+  const buildAIMeals = async () => {
+    setAiMealLoading(true);
+    const macros = calculatedMacros || calcMacros(parseFloat(bodyWeight) || 80, goal, activityLevel);
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system: `You are a nutrition expert. Build a daily meal plan. Respond ONLY with valid JSON:
+{"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}
+Make meals practical, tasty and hit the targets. Include 4-6 meals.`,
+          messages: [{ role: "user", content: `Build a daily meal plan for: Goal: ${goal}, Calories: ${macros.calories}, Protein: ${macros.protein}g, Carbs: ${macros.carbs}g, Fats: ${macros.fats}g. Make it practical and varied.` }],
+        }),
+      });
+      const data = await res.json();
+      const text = data.content?.map(b => b.text || "").join("") || "";
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      setPlanMeals(parsed.meals || []);
+    } catch (e) { console.error("AI meals error:", e); }
+    setAiMealLoading(false);
+  };
+
+  // 7-day stats
+  const last7Logs = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - (6-i));
+    const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const log = logs.find(l => l.date === dateStr);
+    return { date: dateStr, label: d.toLocaleDateString("en-GB", { weekday: "short" }), log };
+  });
+
+  const weekLogs = logs.filter(l => {
+    const d = new Date(l.date); const now = new Date();
+    const ws = new Date(now); ws.setDate(now.getDate() - now.getDay());
+    return d >= ws;
+  });
+  const avgCals = weekLogs.length ? Math.round(weekLogs.reduce((a, l) => a + (l.total_calories||0), 0) / weekLogs.length) : 0;
+  const avgProtein = weekLogs.length ? Math.round(weekLogs.reduce((a, l) => a + (l.total_protein||0), 0) / weekLogs.length) : 0;
+  const onPlanDays = weekLogs.filter(l => {
+    const completed = Object.values(l.meals_completed || {}).filter(v => v === true).length;
+    const total = plan?.meals?.length || 1;
+    return completed / total >= 0.8;
+  }).length;
+
+  if (loading) return (
+    <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
+      <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2 }}>LOADING NUTRITION DATA...</div>
+    </div></div>
+  );
+
+  // ── DAY REVIEW VIEW ───────────────────────────────────────────────────────
+  if (view === "review") {
+    const meals = plan?.meals || [];
+    const isOffPlanStep = reviewStep === meals.length;
+    const isCompleteStep = reviewStep === meals.length + 1;
+
+    if (isCompleteStep) {
+      const completedMeals = Object.values(mealResults).filter(v => v === true).length;
+      const totalCals = Math.round(
+        meals.filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.calories||0), 0) +
+        (parseInt(offPlanCals) || 0)
+      );
+      const targetCals = plan?.daily_calories || 2000;
+      const diff = totalCals - targetCals;
+      const totalProtein = Math.round(meals.filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.protein||0), 0));
+
+      return (
+        <div className="t3d-fade">
+          <div className="t3d-card" style={{ textAlign: "center", padding: 32 }}>
+            <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 3, marginBottom: 24 }}>DAY COMPLETE</div>
+
+            {/* Impact stats */}
+            <div className="t3d-grid3" style={{ marginBottom: 20 }}>
+              <div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: completedMeals === meals.length ? NEON : "#FF8C00" }}>{completedMeals}/{meals.length}</div>
+                <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>MEALS ON PLAN</div>
               </div>
-              <div className="t3d-mval" style={{ color: m.color }}>
-                {m.val}<span style={{ fontSize: 8, color: "#3A5060" }}>/{m.goal}</span>
+              <div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff) < 100 ? NEON : diff > 0 ? NEON3 : "#FF8C00" }}>{totalCals}</div>
+                <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>KCAL TOTAL</div>
+              </div>
+              <div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein >= plan?.protein_target ? NEON : "#FF8C00" }}>{totalProtein}g</div>
+                <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>PROTEIN</div>
               </div>
             </div>
-          ))}
-        </div>
-        <div className="t3d-card">
-          <div className="t3d-ctitle">CALORIE BREAKDOWN</div>
-          <div style={{ display: "flex", justifyContent: "center", paddingTop: 8 }}>
-            <svg width="140" height="140">
-              {(() => {
-                const slices = [
-                  { val: TOTAL_P * 4, color: NEON },
-                  { val: TOTAL_C * 4, color: NEON2 },
-                  { val: TOTAL_F * 9, color: "#FF8C00" },
-                ];
-                const total = slices.reduce((a, s) => a + s.val, 0);
-                let cursor = -Math.PI / 2;
-                const r = 55, cx = 70, cy = 70;
-                return slices.map((s, i) => {
-                  const angle = (s.val / total) * 2 * Math.PI;
-                  const x1 = cx + r * Math.cos(cursor);
-                  const y1 = cy + r * Math.sin(cursor);
-                  cursor += angle;
-                  const x2 = cx + r * Math.cos(cursor);
-                  const y2 = cy + r * Math.sin(cursor);
-                  return <path key={i} d={`M${cx} ${cy} L${x1} ${y1} A${r} ${r} 0 ${angle>Math.PI?1:0} 1 ${x2} ${y2}Z`} fill={s.color} opacity=".75" stroke={BG} strokeWidth="2" />;
-                });
-              })()}
-              <circle cx="70" cy="70" r="33" fill={SURFACE} />
-              <text x="70" y="67" textAnchor="middle" fontFamily="Orbitron,monospace" fontSize="15" fontWeight="700" fill={NEON}>{TOTAL_CALS}</text>
-              <text x="70" y="80" textAnchor="middle" fontFamily="Space Mono,monospace" fontSize="8" fill="#3A5060">KCAL</text>
-            </svg>
-          </div>
-          <div style={{ display: "flex", justifyContent: "center", gap: 18, marginTop: 10 }}>
-            {[["PROTEIN",NEON],["CARBS",NEON2],["FATS","#FF8C00"]].map(([l,c]) => (
-              <div key={l} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>
-                <div style={{ width: 7, height: 7, borderRadius: 2, background: c }} />{l}
+
+            {/* Calorie impact */}
+            <div style={{ background: diff > 200 ? "rgba(255,45,120,.06)" : diff < -200 ? "rgba(255,140,0,.06)" : "rgba(0,255,178,.06)", border: `1px solid ${diff > 200 ? "rgba(255,45,120,.2)" : diff < -200 ? "rgba(255,140,0,.2)" : "rgba(0,255,178,.2)"}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: diff > 200 ? NEON3 : diff < -200 ? "#FF8C00" : NEON, letterSpacing: 2, marginBottom: 8 }}>
+                {diff > 200 ? "OVER TARGET" : diff < -200 ? "UNDER TARGET" : "ON TARGET"} {diff > 0 ? `+${diff}` : diff} KCAL
               </div>
+              <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+                {diff > 200 ? `${diff} extra kcal. Over 7 days this pattern = ~${Math.round(diff * 7 / 7700 * 10) / 10}kg gained per week.`
+                  : diff < -200 ? `${Math.abs(diff)} kcal under target. Consistent undereating can slow metabolism and impact muscle retention.`
+                  : "Great calorie control today! Consistency here is what drives results."}
+              </div>
+            </div>
+
+            {offPlanFood && (
+              <div style={{ background: "rgba(255,140,0,.05)", border: "1px solid rgba(255,140,0,.2)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", textAlign: "left" }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FF8C00", letterSpacing: 2, marginBottom: 4 }}>OFF PLAN</div>
+                {offPlanFood} — {offPlanCals || "?"}kcal
+              </div>
+            )}
+
+            {/* AI Feedback */}
+            {!aiFeedback && !aiFeedbackLoading && (
+              <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>GET AI FEEDBACK</button>
+            )}
+            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 16 }}>AI is analysing your day...</div>}
+            {aiFeedback && (
+              <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 14, marginBottom: 20, textAlign: "left" }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 6 }}>AI COACH</div>
+                <div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.65 }}>{aiFeedback}</div>
+              </div>
+            )}
+
+            <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => {
+              await saveLog();
+              setTodayLogged(true);
+              await loadData();
+              setView("home");
+            }}>SAVE & FINISH</button>
+          </div>
+        </div>
+      );
+    }
+
+    if (isOffPlanStep) {
+      return (
+        <div className="t3d-fade">
+          <div className="t3d-card" style={{ textAlign: "center" }}>
+            <div className="t3d-progress-dots">
+              {[...meals.map((_, i) => i), "offplan"].map((_, i) => (
+                <div key={i} className={`t3d-dot-step ${i === reviewStep ? "active" : i < reviewStep ? "done" : ""}`} />
+              ))}
+            </div>
+            <div style={{ padding: "20px 0 32px" }}>
+              <div style={{ fontSize: 32, marginBottom: 16 }}>🍕</div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>BE HONEST</div>
+              <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 24, lineHeight: 1.6 }}>Did you eat anything off plan today?</div>
+              <div style={{ display: "flex", gap: 12, justifyContent: "center", marginBottom: 20 }}>
+                <button className="t3d-tick-btn" onClick={() => setReviewStep(s => s+1)}>✓ Clean day</button>
+                <button className="t3d-cross-btn" onClick={() => {
+                  // Show input
+                }}>✗ I slipped</button>
+              </div>
+            </div>
+            {/* Off plan input */}
+            <div style={{ background: SURFACE2, borderRadius: 8, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 10 }}>What did you have? (Be honest — it only helps you)</div>
+              <input className="t3d-input" placeholder="e.g. 2 biscuits, chocolate bar..." value={offPlanFood} onChange={e => setOffPlanFood(e.target.value)} style={{ marginBottom: 10 }} />
+              <input className="t3d-input" type="number" placeholder="Estimated extra calories (optional)" value={offPlanCals} onChange={e => setOffPlanCals(e.target.value)} />
+            </div>
+            <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={() => setReviewStep(s => s+1)}>
+              NEXT →
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // Meal review steps
+    const meal = meals[reviewStep];
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card">
+          <div className="t3d-progress-dots">
+            {[...meals.map((_, i) => i), "offplan"].map((_, i) => (
+              <div key={i} className={`t3d-dot-step ${i === reviewStep ? "active" : i < reviewStep ? "done" : ""}`} />
             ))}
           </div>
-        </div>
-      </div>
-      <div className="t3d-card">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-          <div className="t3d-ctitle" style={{ margin: 0 }}>FOOD LOG</div>
-          <button className="t3d-btn t3d-btn-sm">+ LOG MEAL</button>
-        </div>
-        {MEALS.map((m, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, padding: "11px 0", borderBottom: "1px solid #1A2530" }}>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#3A5060", width: 55 }}>{m.time}</div>
-            <div style={{ flex: 1, fontSize: 11 }}>{m.name}</div>
-            <div style={{ display: "flex", gap: 14, fontSize: 10 }}>
-              <span style={{ color: NEON }}>{m.p}g P</span>
-              <span style={{ color: NEON2 }}>{m.c}g C</span>
-              <span style={{ color: "#FF8C00" }}>{m.f}g F</span>
-              <span style={{ fontFamily: "'Orbitron',monospace", color: "#4A6070" }}>{m.cals}</span>
+          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>
+            MEAL {reviewStep+1} OF {meals.length}
+          </div>
+          <div style={{ textAlign: "center", padding: "16px 0 24px" }}>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: "#E0EAF0", marginBottom: 4 }}>{meal?.name}</div>
+            {meal?.time && <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 16 }}>{meal.time}</div>}
+            {/* Ingredients */}
+            <div style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 16, textAlign: "left" }}>
+              {meal?.ingredients?.map((ing, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 11, borderBottom: i < meal.ingredients.length-1 ? `1px solid ${BORDER}` : "none" }}>
+                  <span style={{ color: "#8AABB8" }}>{ing.name}</span>
+                  <span style={{ color: "#3A5060" }}>{ing.weight}{ing.unit}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 16, marginBottom: 24, fontSize: 10 }}>
+              <span style={{ color: NEON }}>{meal?.calories} kcal</span>
+              <span style={{ color: NEON2 }}>{meal?.protein}g P</span>
+              <span style={{ color: "#FF8C00" }}>{meal?.carbs}g C</span>
+              <span style={{ color: "#8AABB8" }}>{meal?.fats}g F</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20 }}>Did you have this exactly as planned?</div>
+            <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
+              <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(s => s+1); }}>✓</button>
+              <button className="t3d-cross-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: false })); setReviewStep(s => s+1); }}>✗</button>
             </div>
           </div>
-        ))}
+        </div>
       </div>
+    );
+  }
+
+  // ── SETUP VIEW ────────────────────────────────────────────────────────────
+  if (view === "setup") {
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card">
+          <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
+            {["GOALS", "MEALS", "REVIEW"].map((s, i) => (
+              <div key={i} style={{ flex: 1, textAlign: "center", padding: "8px 4px", borderRadius: 5, fontSize: 9, letterSpacing: 1, fontFamily: "'Orbitron',monospace",
+                background: setupStep === i ? "rgba(0,255,178,.08)" : "transparent",
+                border: `1px solid ${setupStep === i ? NEON : BORDER}`,
+                color: setupStep === i ? NEON : "#3A5060" }}>{s}</div>
+            ))}
+          </div>
+
+          {/* Step 0: Goals */}
+          {setupStep === 0 && (
+            <div>
+              <div className="t3d-ctitle">YOUR GOALS & STATS</div>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>BODY WEIGHT (kg)</div>
+                <input className="t3d-input" type="number" placeholder="e.g. 80" value={bodyWeight} onChange={e => setBodyWeight(e.target.value)} />
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>GOAL</div>
+                {Object.keys(GOAL_MULTIPLIERS).map(g => (
+                  <button key={g} className="t3d-btn" style={{ width: "100%", textAlign: "left", padding: "11px 16px", marginBottom: 6, fontSize: 11,
+                    background: goal === g ? "rgba(0,255,178,.12)" : "transparent", borderColor: goal === g ? NEON : BORDER, color: goal === g ? NEON : "#4A6070" }}
+                    onClick={() => setGoal(g)}>{g}</button>
+                ))}
+              </div>
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>ACTIVITY LEVEL</div>
+                {["Sedentary", "Lightly active", "Moderately active", "Very active"].map(a => (
+                  <button key={a} className="t3d-btn" style={{ width: "100%", textAlign: "left", padding: "11px 16px", marginBottom: 6, fontSize: 11,
+                    background: activityLevel === a ? "rgba(0,255,178,.12)" : "transparent", borderColor: activityLevel === a ? NEON : BORDER, color: activityLevel === a ? NEON : "#4A6070" }}
+                    onClick={() => setActivityLevel(a)}>{a}</button>
+                ))}
+              </div>
+              <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!bodyWeight}
+                onClick={() => {
+                  const macros = calcMacros(parseFloat(bodyWeight), goal, activityLevel);
+                  setCalculatedMacros(macros);
+                  setSetupStep(1);
+                }}>CALCULATE MY TARGETS →</button>
+            </div>
+          )}
+
+          {/* Step 1: Meals */}
+          {setupStep === 1 && calculatedMacros && (
+            <div>
+              {/* Calculated targets */}
+              <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 20 }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>YOUR DAILY TARGETS</div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                  <span style={{ color: NEON, fontSize: 12 }}>{calculatedMacros.calories} kcal</span>
+                  <span style={{ color: NEON2, fontSize: 12 }}>{calculatedMacros.protein}g protein</span>
+                  <span style={{ color: "#FF8C00", fontSize: 12 }}>{calculatedMacros.carbs}g carbs</span>
+                  <span style={{ color: "#8AABB8", fontSize: 12 }}>{calculatedMacros.fats}g fats</span>
+                </div>
+              </div>
+
+              {!mealBuildMode ? (
+                <div>
+                  <div className="t3d-ctitle">HOW DO YOU WANT TO BUILD YOUR MEALS?</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <button className="t3d-btn" style={{ padding: "16px", textAlign: "left", fontSize: 11 }} onClick={() => setMealBuildMode("own")}>
+                      📝 Build my own meals
+                      <div style={{ fontSize: 9, color: "#3A5060", marginTop: 4 }}>Add your own meals with ingredients</div>
+                    </button>
+                    <button className="t3d-btn" style={{ padding: "16px", textAlign: "left", fontSize: 11 }} onClick={() => { setMealBuildMode("common"); setPlanMeals([]); }}>
+                      🍽️ Choose from common meals
+                      <div style={{ fontSize: 9, color: "#3A5060", marginTop: 4 }}>Pick from a list of ready-made meals</div>
+                    </button>
+                    <button className="t3d-btn" style={{ padding: "16px", textAlign: "left", fontSize: 11, borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
+                      onClick={() => { setMealBuildMode("ai"); buildAIMeals(); }}>
+                      🤖 AI build my meal plan
+                      <div style={{ fontSize: 9, color: "#3A5060", marginTop: 4 }}>AI creates a plan based on your targets</div>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <div className="t3d-ctitle" style={{ margin: 0 }}>
+                      {mealBuildMode === "ai" ? "AI MEAL PLAN" : mealBuildMode === "common" ? "COMMON MEALS" : "YOUR MEALS"}
+                    </div>
+                    <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setMealBuildMode(null); setPlanMeals([]); }}>CHANGE</button>
+                  </div>
+
+                  {aiMealLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#3A5060" }}>🤖 Building your meal plan...</div>}
+
+                  {mealBuildMode === "common" && (
+                    <div style={{ marginBottom: 14 }}>
+                      {COMMON_MEALS.map((m, i) => {
+                        const selected = planMeals.find(p => p.name === m.name);
+                        return (
+                          <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: `1px solid ${BORDER}`, cursor: "pointer" }}
+                            onClick={() => setPlanMeals(prev => selected ? prev.filter(p => p.name !== m.name) : [...prev, m])}>
+                            <div style={{ width: 20, height: 20, borderRadius: 4, border: `1px solid ${selected ? NEON : BORDER}`, background: selected ? "rgba(0,255,178,.1)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: NEON, flexShrink: 0 }}>{selected ? "✓" : ""}</div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 12 }}>{m.name}</div>
+                              <div style={{ fontSize: 10, color: "#3A5060" }}>{m.calories} kcal · {m.protein}g P</div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Selected/AI meals list */}
+                  {planMeals.length > 0 && (
+                    <div style={{ marginBottom: 14 }}>
+                      {mealBuildMode !== "common" && <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>YOUR MEAL PLAN</div>}
+                      {planMeals.map((m, i) => (
+                        <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                            <div style={{ fontSize: 12 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#3A5060" }}>· {m.time}</span>}</div>
+                            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setPlanMeals(prev => prev.filter((_, j) => j !== i))}>✕</button>
+                          </div>
+                          <div style={{ fontSize: 10, color: "#3A5060" }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
+                        </div>
+                      ))}
+                      {/* Totals */}
+                      <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 10, marginTop: 8 }}>
+                        <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 4 }}>PLAN TOTALS vs TARGETS</div>
+                        {[
+                          { label: "Calories", val: planMeals.reduce((a,m) => a+(m.calories||0),0), target: calculatedMacros.calories, color: NEON, unit: "kcal" },
+                          { label: "Protein", val: planMeals.reduce((a,m) => a+(m.protein||0),0), target: calculatedMacros.protein, color: NEON2, unit: "g" },
+                        ].map(t => (
+                          <div key={t.label} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
+                            <span style={{ color: "#3A5060" }}>{t.label}</span>
+                            <span style={{ color: Math.abs(t.val - t.target) / t.target < 0.1 ? NEON : "#FF8C00" }}>{t.val} / {t.target}{t.unit}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {mealBuildMode === "own" && (
+                    <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 14 }} onClick={() => setAddMealModal(true)}>+ ADD MEAL</button>
+                  )}
+                </div>
+              )}
+
+              {planMeals.length > 0 && (
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(0)}>← BACK</button>
+                  <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => setSetupStep(2)}>REVIEW →</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Step 2: Review */}
+          {setupStep === 2 && (
+            <div>
+              <div className="t3d-ctitle">REVIEW YOUR PLAN</div>
+              {planMeals.map((m, i) => (
+                <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#3A5060" }}>· {m.time}</span>}</div>
+                  {m.ingredients?.map((ing, j) => (
+                    <div key={j} style={{ fontSize: 10, color: "#3A5060" }}>{ing.name} — {ing.weight}{ing.unit}</div>
+                  ))}
+                  <div style={{ fontSize: 10, color: "#4A6070", marginTop: 6 }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(1)}>← BACK</button>
+                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
+                  await savePlan(planMeals, calculatedMacros);
+                  setPlan({ meals: planMeals, ...calculatedMacros, goal });
+                  setView("home");
+                }}>SAVE PLAN ✓</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Add meal modal */}
+        {addMealModal && (
+          <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+            <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "80vh", overflowY: "auto" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>ADD MEAL</div>
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>MEAL NAME</div>
+                <input className="t3d-input" placeholder="e.g. Chicken & Rice" value={newMeal.name} onChange={e => setNewMeal(n => ({ ...n, name: e.target.value }))} />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>TIME (OPTIONAL)</div>
+                <input className="t3d-input" type="time" value={newMeal.time} onChange={e => setNewMeal(n => ({ ...n, time: e.target.value }))} />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 8 }}>INGREDIENTS</div>
+                {newMeal.ingredients.map((ing, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 11, color: "#8AABB8" }}>
+                    <span>{ing.name}</span><span>{ing.weight}{ing.unit}</span>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <input className="t3d-input" placeholder="Ingredient" value={newIngredient.name} onChange={e => setNewIngredient(n => ({ ...n, name: e.target.value }))} style={{ flex: 2 }} />
+                  <input className="t3d-input" type="number" placeholder="100" value={newIngredient.weight} onChange={e => setNewIngredient(n => ({ ...n, weight: e.target.value }))} style={{ flex: 1 }} />
+                  <select value={newIngredient.unit} onChange={e => setNewIngredient(n => ({ ...n, unit: e.target.value }))}
+                    style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 5, color: "#E0EAF0", padding: "8px 4px", fontSize: 11, outline: "none" }}>
+                    <option>g</option><option>ml</option><option>oz</option>
+                  </select>
+                </div>
+                <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8, width: "100%" }} disabled={!newIngredient.name || !newIngredient.weight}
+                  onClick={() => { setNewMeal(n => ({ ...n, ingredients: [...n.ingredients, newIngredient] })); setNewIngredient({ name: "", weight: "", unit: "g" }); }}>
+                  + ADD INGREDIENT
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                {[["calories", "KCAL", NEON], ["protein", "PROTEIN (g)", NEON2], ["carbs", "CARBS (g)", "#FF8C00"], ["fats", "FATS (g)", "#8AABB8"]].map(([key, label, color]) => (
+                  <div key={key} style={{ flex: 1 }}>
+                    <div style={{ fontSize: 8, color, letterSpacing: 1, marginBottom: 4 }}>{label}</div>
+                    <input className="t3d-input" type="number" placeholder="0" value={newMeal[key]} onChange={e => setNewMeal(n => ({ ...n, [key]: e.target.value }))} style={{ padding: "6px 8px", fontSize: 12 }} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setAddMealModal(false); setNewMeal({ name: "", time: "", ingredients: [], calories: "", protein: "", carbs: "", fats: "" }); }}>CANCEL</button>
+                <button className="t3d-btn" style={{ flex: 1 }} disabled={!newMeal.name}
+                  onClick={() => {
+                    setPlanMeals(prev => [...prev, { ...newMeal, calories: parseInt(newMeal.calories)||0, protein: parseInt(newMeal.protein)||0, carbs: parseInt(newMeal.carbs)||0, fats: parseInt(newMeal.fats)||0 }]);
+                    setAddMealModal(false);
+                    setNewMeal({ name: "", time: "", ingredients: [], calories: "", protein: "", carbs: "", fats: "" });
+                  }}>ADD MEAL ✓</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── HOME VIEW ─────────────────────────────────────────────────────────────
+  const todayLog = logs.find(l => l.date === today);
+  const streak = (() => {
+    let s = 0;
+    const d = new Date();
+    while (true) {
+      const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      const log = logs.find(l => l.date === ds);
+      if (!log) break;
+      const completed = Object.values(log.meals_completed || {}).filter(v => v === true).length;
+      const total = plan?.meals?.length || 1;
+      if (completed / total < 0.8) break;
+      s++; d.setDate(d.getDate()-1);
+    }
+    return s;
+  })();
+
+  return (
+    <div className="t3d-fade">
+      {!plan ? (
+        <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
+          <div style={{ fontSize: 40, marginBottom: 16 }}>🥗</div>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>NUTRITION</div>
+          <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 28, lineHeight: 1.7 }}>Build your nutrition plan.<br />Track every meal. Hit every target.</div>
+          <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => { setSetupStep(0); setView("setup"); }}>SET UP MY NUTRITION</button>
+          <div style={{ marginTop: 16, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>Calorie targets are estimates. Consult a dietitian for medical nutrition advice.</div>
+        </div>
+      ) : (
+        <>
+          {/* Stats */}
+          <div className="t3d-grid3">
+            <div className="t3d-card" style={{ textAlign: "center" }}>
+              <div className="t3d-ctitle">DAILY TARGET</div>
+              <div className="t3d-sval" style={{ color: NEON, fontSize: 22 }}>{plan.daily_calories}</div>
+              <div className="t3d-slabel">KCAL</div>
+            </div>
+            <div className="t3d-card" style={{ textAlign: "center" }}>
+              <div className="t3d-ctitle">ON PLAN STREAK</div>
+              <div className="t3d-sval" style={{ color: streak >= 3 ? "#FF8C00" : NEON2 }}>{streak} {streak >= 3 ? "🔥" : ""}</div>
+              <div className="t3d-slabel">DAYS</div>
+            </div>
+            <div className="t3d-card" style={{ textAlign: "center" }}>
+              <div className="t3d-ctitle">PROTEIN TARGET</div>
+              <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 22 }}>{plan.protein_target}g</div>
+              <div className="t3d-slabel">PER DAY</div>
+            </div>
+          </div>
+
+          {/* Today's status */}
+          <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 28 }}>
+            {todayLogged ? (
+              <>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2, marginBottom: 4 }}>TODAY LOGGED</div>
+                <div style={{ fontSize: 11, color: "#3A5060" }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20, letterSpacing: 1 }}>READY TO REVIEW YOUR DAY?</div>
+                <button className="t3d-big-btn"
+                  style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
+                  onClick={() => { setReviewStep(0); setMealResults({}); setOffPlanFood(""); setOffPlanCals(""); setAiFeedback(""); setView("review"); }}>
+                  🥗 DAY REVIEW
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Today's meal plan */}
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY'S MEAL PLAN</div>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.5 }} onClick={() => { setSetupStep(0); setPlanMeals(plan.meals || []); setView("setup"); }}>EDIT</button>
+            </div>
+            {plan.meals?.map((m, i) => (
+              <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <div style={{ fontSize: 12 }}>{m.name}</div>
+                  <div style={{ fontSize: 10, color: "#3A5060" }}>{m.time}</div>
+                </div>
+                {m.ingredients?.map((ing, j) => (
+                  <div key={j} style={{ fontSize: 10, color: "#3A5060", marginBottom: 2 }}>{ing.name} — {ing.weight}{ing.unit}</div>
+                ))}
+                <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 10 }}>
+                  <span style={{ color: NEON }}>{m.calories} kcal</span>
+                  <span style={{ color: NEON2 }}>{m.protein}g P</span>
+                  <span style={{ color: "#FF8C00" }}>{m.carbs}g C</span>
+                  <span style={{ color: "#8AABB8" }}>{m.fats}g F</span>
+                </div>
+              </div>
+            ))}
+            {/* Daily totals */}
+            <div style={{ display: "flex", gap: 16, padding: "12px 0", fontSize: 11 }}>
+              <span style={{ color: NEON, fontFamily: "'Orbitron',monospace", fontSize: 10 }}>{plan.meals?.reduce((a,m) => a+(m.calories||0),0)} kcal</span>
+              <span style={{ color: NEON2 }}>{plan.meals?.reduce((a,m) => a+(m.protein||0),0)}g P</span>
+              <span style={{ color: "#FF8C00" }}>{plan.meals?.reduce((a,m) => a+(m.carbs||0),0)}g C</span>
+              <span style={{ color: "#8AABB8" }}>{plan.meals?.reduce((a,m) => a+(m.fats||0),0)}g F</span>
+            </div>
+          </div>
+
+          {/* 7-day chart */}
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle">7-DAY CALORIES</div>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80, padding: "0 4px" }}>
+              {last7Logs.map((d, i) => {
+                const cals = d.log?.total_calories || 0;
+                const target = plan.daily_calories || 2000;
+                const pct = cals ? Math.min((cals / target) * 100, 130) : 0;
+                const color = !cals ? BORDER : Math.abs(cals - target) / target < 0.1 ? NEON : cals > target * 1.1 ? NEON3 : "#FF8C00";
+                return (
+                  <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                    <div style={{ width: "100%", height: 60, display: "flex", alignItems: "flex-end" }}>
+                      <div style={{ width: "100%", height: `${Math.max(pct, 4)}%`, background: color, borderRadius: "3px 3px 0 0", minHeight: 4, boxShadow: cals ? `0 0 5px ${color}60` : "none" }} />
+                    </div>
+                    <div style={{ fontSize: 9, color: d.date === today ? NEON : "#2A3A48" }}>{d.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Weekly summary */}
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setWeeklyOpen(w => !w)}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SUMMARY</div>
+              <div style={{ color: "#3A5060", fontSize: 14, transform: weeklyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</div>
+            </div>
+            {weeklyOpen && (
+              <div style={{ marginTop: 16 }}>
+                <div className="t3d-grid3">
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON }}>{avgCals}</div>
+                    <div style={{ fontSize: 9, color: "#3A5060" }}>AVG KCAL</div>
+                    <div style={{ fontSize: 8, color: avgCals > 0 && Math.abs(avgCals - plan.daily_calories) / plan.daily_calories < 0.05 ? NEON : "#FF8C00" }}>
+                      target {plan.daily_calories}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON2 }}>{avgProtein}g</div>
+                    <div style={{ fontSize: 9, color: "#3A5060" }}>AVG PROTEIN</div>
+                    <div style={{ fontSize: 8, color: avgProtein >= plan.protein_target ? NEON : "#FF8C00" }}>target {plan.protein_target}g</div>
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#FF8C00" }}>{onPlanDays}/7</div>
+                    <div style={{ fontSize: 9, color: "#3A5060" }}>ON PLAN DAYS</div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* History */}
+          <div className="t3d-card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setHistoryOpen(h => !h)}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>NUTRITION HISTORY</div>
+              <div style={{ color: "#3A5060", fontSize: 14, transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</div>
+            </div>
+            {historyOpen && (
+              <div style={{ marginTop: 16 }}>
+                {logs.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", padding: "16px 0" }}>No history yet — complete your first day review!</div>
+                ) : logs.map((log, i) => {
+                  const completed = Object.values(log.meals_completed || {}).filter(v => v === true).length;
+                  const total = plan?.meals?.length || 1;
+                  return (
+                    <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                        <div style={{ fontSize: 10, color: "#3A5060", fontFamily: "'Orbitron',monospace" }}>{log.date}</div>
+                        <div style={{ fontSize: 10, color: completed/total >= 0.8 ? NEON : "#FF8C00" }}>{completed}/{total} meals</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 12, fontSize: 10, color: "#3A5060" }}>
+                        <span style={{ color: NEON }}>{log.total_calories} kcal</span>
+                        <span style={{ color: NEON2 }}>{log.total_protein}g P</span>
+                        {log.off_plan_food && <span style={{ color: "#FF8C00" }}>+ off plan</span>}
+                      </div>
+                      {log.ai_feedback && <div style={{ fontSize: 10, color: "#4A6070", marginTop: 6, fontStyle: "italic" }}>"{log.ai_feedback.slice(0,80)}..."</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
+
+
 
 // ─── Habits ───────────────────────────────────────────────────────────────────
 function HabitsPage({ habits, setHabits }) {
@@ -1928,11 +2635,6 @@ export default function App() {
               <div className="t3d-date">{TODAY.toUpperCase()}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 16, padding: "6px 12px" }}
-  onClick={() => document.querySelector('.t3d-sidebar').style.display = 
-    document.querySelector('.t3d-sidebar').style.display === 'none' ? 'flex' : 'none'}>
-  ☰
-</button>
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
@@ -1949,9 +2651,19 @@ export default function App() {
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} />}
           {tab === "morning" && <MorningSection user={user} />}
           {tab === "fitness" && <Fitness user={user} />}
-          {tab === "nutrition" && <Nutrition />}
+          {tab === "nutrition" && <Nutrition user={user} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
+
+        {/* Mobile bottom navigation */}
+        <nav className="t3d-bottom-nav">
+          {nav.map(n => (
+            <button key={n.id} className={`t3d-bnav-item ${tab===n.id?"on":""}`} onClick={() => setTab(n.id)}>
+              <span className="t3d-bnav-icon">{n.icon}</span>
+              {n.label.split(" ")[0]}
+            </button>
+          ))}
+        </nav>
       </div>
     </>
   );
