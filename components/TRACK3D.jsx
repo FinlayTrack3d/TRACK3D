@@ -1666,9 +1666,18 @@ Respond ONLY with valid JSON:
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#3A5060", letterSpacing: 2, marginBottom: 8 }}>TODAY</div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON, marginBottom: 8 }}>{todaySession.name}</div>
                 <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 20 }}>{todaySession.exercises?.length} exercises</div>
-                <button className="t3d-big-btn"
-                  style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
-                  onClick={() => startWorkout(todaySession)}>⚡ START WORKOUT</button>
+                {history[0]?.date === today ? (
+                  <>
+                    <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 4 }}>WORKOUT LOGGED</div>
+                    <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 12 }}>{history[0]?.duration_mins} mins · {Math.round(history[0]?.total_volume||0).toLocaleString()} kg volume</div>
+                    <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => startWorkout(todaySession)}>EDIT / REDO</button>
+                  </>
+                ) : (
+                  <button className="t3d-big-btn"
+                    style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
+                    onClick={() => startWorkout(todaySession)}>⚡ START WORKOUT</button>
+                )}
               </>
             ) : (
               <>
@@ -2536,7 +2545,8 @@ function Nutrition({ user, userSessions }) {
               <>
                 <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2, marginBottom: 4 }}>TODAY LOGGED</div>
-                <div style={{ fontSize: 11, color: "#3A5060" }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
+                <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 12 }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
+                <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => { setMealResults(todayLog?.meals_completed||{}); setOffPlanFood(todayLog?.off_plan_food||""); setOffPlanCals(String(todayLog?.off_plan_calories||"")); setReviewStep(0); setAiFeedback(""); setView("review"); }}>EDIT TODAY</button>
               </>
             ) : (
               <>
