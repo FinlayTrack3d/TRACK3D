@@ -1948,7 +1948,7 @@ Respond ONLY with valid JSON:
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SPLIT</div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT DAYS</button>
+                <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setSplit(null); setSessions([]); setSetupStep(0); setView("setup"); }}>CHANGE PLAN</button>
               </div>
             </div>
@@ -1990,24 +1990,49 @@ Respond ONLY with valid JSON:
           {editDaysModal && (
             <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.88)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
               <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "80vh", overflowY: "auto" }}>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>EDIT TRAINING DAYS</div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>EDIT SESSIONS</div>
                 {sessions.map((session, sIdx) => (
-                  <div key={sIdx} style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 8 }}>{session.name}</div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      {DAYS.map(d => {
-                        const selected = session.days?.includes(d);
-                        return (
-                          <button key={d} className="t3d-btn t3d-btn-sm"
-                            style={{ background: selected?"rgba(0,255,178,.15)":"transparent", borderColor: selected?NEON:BORDER, color: selected?NEON:"#3A5060" }}
-                            onClick={() => setSessions(prev => prev.map((s, i) => i === sIdx ? {
-                              ...s, days: selected ? s.days.filter(x => x !== d) : [...(s.days||[]), d]
-                            } : s))}>
-                            {d}
-                          </button>
-                        );
-                      })}
-                    </div>
+                  <div key={sIdx} style={{ marginBottom: 20, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` }}>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON, letterSpacing: 2, marginBottom: 10 }}>{session.name}</div>
+                    {session.exercises?.map((ex, eIdx) => (
+                      <div key={eIdx} style={{ background: SURFACE2, borderRadius: 6, padding: "8px 12px", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <input style={{ background: "transparent", border: "none", color: "#E0EAF0", fontFamily: "'Space Mono',monospace", fontSize: 11, outline: "none", width: "100%" }}
+                            value={ex.name}
+                            onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                              ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, name: e.target.value } : ex2)
+                            } : s))} />
+                          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                            <input style={{ background: "transparent", border: "none", color: "#3A5060", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 40 }}
+                              value={ex.sets} placeholder="sets"
+                              onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                                ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, sets: e.target.value } : ex2)
+                              } : s))} />
+                            <span style={{ color: "#2A3A48", fontSize: 10 }}>sets ×</span>
+                            <input style={{ background: "transparent", border: "none", color: "#3A5060", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 60 }}
+                              value={Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps} placeholder="reps"
+                              onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                                ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, reps: e.target.value } : ex2)
+                              } : s))} />
+                            <span style={{ color: "#2A3A48", fontSize: 10 }}>reps</span>
+                          </div>
+                        </div>
+                        <button style={{ background: "none", border: "none", color: "#3A5060", cursor: "pointer", fontSize: 16, padding: "0 4px" }}
+                          onClick={() => setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                            ...s, exercises: s.exercises.filter((_, j) => j !== eIdx)
+                          } : s))}>×</button>
+                      </div>
+                    ))}
+                    <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginTop: 6, fontSize: 8 }}
+                      onClick={() => {
+                        const name = prompt("Exercise name:");
+                        if (!name) return;
+                        const sets = prompt("Sets?") || "3";
+                        const reps = prompt("Reps? (e.g. 8-10)") || "8-10";
+                        setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                          ...s, exercises: [...(s.exercises||[]), { name, sets: parseInt(sets)||3, reps, tempo: "" }]
+                        } : s));
+                      }}>+ ADD EXERCISE</button>
                   </div>
                 ))}
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -2016,7 +2041,7 @@ Respond ONLY with valid JSON:
                     await saveSplit(sessions);
                     setSplit(prev => ({ ...prev, sessions }));
                     setEditDaysModal(false);
-                  }}>SAVE DAYS ✓</button>
+                  }}>SAVE ✓</button>
                 </div>
               </div>
             </div>
