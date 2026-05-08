@@ -927,10 +927,243 @@ function MorningSection({ user }) {
   return null;
 }
 
+// ─── End of Day Check-in ──────────────────────────────────────────────────────
+function EndOfDayCheckin({ user, onComplete }) {
+  const [step, setStep] = useState(0); // 0=mood, 1=energy, 2=steps, 3=future, 4=complete
+  const [mood, setMood] = useState(null);
+  const [energy, setEnergy] = useState(null);
+  const [steps, setSteps] = useState("");
+  const [futureYou, setFutureYou] = useState(null);
+  const [aiRoundup, setAiRoundup] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const getLocalDate = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  };
+  const today = getLocalDate();
+
+  const EMOJI_SCALE = ["😞","😕","😐","🙂","😄"];
+  const ENERGY_SCALE = ["🪫","😴","⚡","🔋","🚀"];
+
+  const getAIRoundup = async () => {
+    setAiLoading(true);
+    try {
+      // Gather all today's data
+      const [morning, nutrition, fitness, calendar, debrief, eodHistory] = await Promise.all([
+        supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).single(),
+        supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food").eq("user_id", user.id).eq("date", today).single(),
+        supabase.from("workout_logs").select("session_name,total_volume,duration_mins").eq("user_id", user.id).eq("date", today).single(),
+        supabase.from("daily_debrief").select("overall_score,task_scores").eq("user_id", user.id).eq("date", today).single(),
+        supabase.from("calendar_tasks").select("title,status").eq("user_id", user.id).eq("date", today),
+        supabase.from("end_of_day").select("mood,energy,steps,future_you,date").eq("user_id", user.id).order("date", { ascending: false }).limit(7),
+      ]);
+
+      // Build context
+      const morningScore = morning.data?.score || "not completed";
+      const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${Object.values(nutrition.data.meals_completed||{}).filter(v=>v===true).length} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
+      const fitnessData = fitness.data ? `${fitness.data.session_name}, ${fitness.data.duration_mins} mins, ${Math.round(fitness.data.total_volume||0)}kg volume` : "no workout logged";
+      const calendarTasks = debrief.data ? `calendar score ${debrief.data.overall_score}/10` : calendar.data?.length ? `${calendar.data.filter(t=>t.status==="done").length}/${calendar.data.length} tasks done` : "no tasks";
+
+      // Pattern detection from last 7 days
+      const history = eodHistory.data || [];
+      const avgMood = history.length ? (history.reduce((a,d)=>a+(d.mood||0),0)/history.length).toFixed(1) : null;
+      const avgEnergy = history.length ? (history.reduce((a,d)=>a+(d.energy||0),0)/history.length).toFixed(1) : null;
+      const patterns = history.length >= 3 ? `Last ${history.length} days - avg mood: ${avgMood}/5, avg energy: ${avgEnergy}/5` : "not enough history for patterns yet";
+
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, nutrition, fitness, calendar alignment, and mood/energy. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
+          messages: [{ role: "user", content: `Today's data:
+- Morning score: ${morningScore}/10
+- Nutrition: ${nutritionData}
+- Fitness: ${fitnessData}
+- Calendar: ${calendarTasks}
+- Mood today: ${mood}/5
+- Energy today: ${energy}/5
+- Steps: ${steps || "not logged"}
+- Future you happy with today: ${futureYou}
+- Pattern history: ${patterns}
+
+Give me my daily roundup and spot any patterns.` }],
+        }),
+      });
+      const data = await res.json();
+      setAiRoundup(data.content?.map(b=>b.text||"").join("") || "Great effort today. Keep building the habits.");
+    } catch (e) {
+      setAiRoundup("Keep pushing — every day you show up is progress.");
+    }
+    setAiLoading(false);
+  };
+
+  const saveAndFinish = async () => {
+    setSaving(true);
+    await supabase.from("end_of_day").upsert({
+      user_id: user.id, date: today,
+      mood, energy, steps: parseInt(steps)||0,
+      future_you: futureYou, ai_roundup: aiRoundup,
+      created_at: new Date().toISOString(),
+    }, { onConflict: "user_id,date" });
+    setSaving(false);
+    onComplete();
+  };
+
+  const RatingRow = ({ value, setValue, emojis, label }) => (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 12, textAlign: "center" }}>{label}</div>
+      <div style={{ display: "flex", justifyContent: "center", gap: 12 }}>
+        {emojis.map((emoji, i) => (
+          <button key={i} onClick={() => setValue(i+1)}
+            style={{ width: 52, height: 52, borderRadius: 10, border: `2px solid ${value===i+1?NEON:BORDER}`, background: value===i+1?"rgba(0,255,178,.12)":SURFACE2, fontSize: 24, cursor: "pointer", transition: "all .18s", transform: value===i+1?"scale(1.15)":"scale(1)" }}>
+            {emoji}
+          </button>
+        ))}
+      </div>
+      {value && <div style={{ textAlign: "center", fontSize: 10, color: NEON, marginTop: 8, letterSpacing: 1 }}>{value}/5</div>}
+    </div>
+  );
+
+  const steps_arr = [
+    { q: "HOW WAS YOUR MOOD TODAY?", content: <RatingRow value={mood} setValue={setMood} emojis={EMOJI_SCALE} label="1 = very low, 5 = excellent" />, valid: mood !== null, next: () => setStep(1) },
+    { q: "HOW WERE YOUR ENERGY LEVELS?", content: <RatingRow value={energy} setValue={setEnergy} emojis={ENERGY_SCALE} label="1 = exhausted, 5 = full of energy" />, valid: energy !== null, next: () => setStep(2) },
+    { q: "HOW MANY STEPS DID YOU DO?", content: (
+      <div style={{ textAlign: "center" }}>
+        <input className="t3d-input" type="number" placeholder="e.g. 8500"
+          value={steps} onChange={e => setSteps(e.target.value)}
+          style={{ textAlign: "center", fontSize: 28, padding: 16, maxWidth: 200, margin: "0 auto", display: "block" }} />
+        <div style={{ fontSize: 10, color: "#3A5060", marginTop: 10 }}>Goal: 10,000 steps</div>
+        {steps && (
+          <div style={{ marginTop: 8, fontSize: 11, color: parseInt(steps)>=10000?NEON:"#FF8C00" }}>
+            {parseInt(steps)>=10000?"🎯 Goal hit!":"🎯 " + (10000-parseInt(steps)).toLocaleString() + " short of goal"}
+          </div>
+        )}
+      </div>
+    ), valid: true, next: () => setStep(3) },
+    { q: "WOULD FUTURE YOU BE HAPPY WITH TODAY?", content: (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {[
+          { val: "yes", label: "Yes — I gave it my all", icon: "🔥", color: NEON },
+          { val: "mostly", label: "Mostly — a few things I'd change", icon: "👍", color: "#FF8C00" },
+          { val: "no", label: "No — tomorrow I do better", icon: "💪", color: NEON2 },
+        ].map(opt => (
+          <button key={opt.val} onClick={() => setFutureYou(opt.val)}
+            style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", borderRadius: 8, border: `2px solid ${futureYou===opt.val?opt.color:BORDER}`, background: futureYou===opt.val?`${opt.color}15`:SURFACE2, cursor: "pointer", transition: "all .18s" }}>
+            <span style={{ fontSize: 20 }}>{opt.icon}</span>
+            <span style={{ fontSize: 12, color: futureYou===opt.val?opt.color:"#8AABB8" }}>{opt.label}</span>
+          </button>
+        ))}
+      </div>
+    ), valid: futureYou !== null, next: async () => { setStep(4); await getAIRoundup(); } },
+  ];
+
+  const currentStep = steps_arr[step];
+
+  // Complete screen
+  if (step === 4) {
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card" style={{ padding: 28 }}>
+          <div style={{ textAlign: "center", marginBottom: 24 }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>🌙</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 3, marginBottom: 4 }}>DAY COMPLETE</div>
+            <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1 }}>{new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" }).toUpperCase()}</div>
+          </div>
+
+          {/* Summary stats */}
+          <div className="t3d-grid3" style={{ marginBottom: 20 }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 28 }}>{EMOJI_SCALE[mood-1]}</div>
+              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1, marginTop: 4 }}>MOOD {mood}/5</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 28 }}>{ENERGY_SCALE[energy-1]}</div>
+              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1, marginTop: 4 }}>ENERGY {energy}/5</div>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: parseInt(steps)>=10000?NEON:"#FF8C00" }}>{parseInt(steps||0).toLocaleString()}</div>
+              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1, marginTop: 4 }}>STEPS</div>
+            </div>
+          </div>
+
+          {/* Future you */}
+          <div style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 16, textAlign: "center", fontSize: 12, color: "#8AABB8" }}>
+            {futureYou === "yes" ? "🔥 Future you is proud of today!" : futureYou === "mostly" ? "👍 Good day — room to grow tomorrow." : "💪 Tomorrow you come back stronger."}
+          </div>
+
+          {/* AI Roundup */}
+          {aiLoading ? (
+            <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 16, marginBottom: 16, textAlign: "center" }}>
+              <div style={{ fontSize: 11, color: "#3A5060" }}>🤖 Analysing your full day...</div>
+            </div>
+          ) : aiRoundup ? (
+            <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 16, marginBottom: 16 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>AI DAILY ROUNDUP</div>
+              <div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.7 }}>{aiRoundup}</div>
+            </div>
+          ) : null}
+
+          <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={saving || aiLoading}
+            onClick={saveAndFinish}>
+            {saving ? "SAVING..." : "FINISH DAY ✓"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="t3d-fade">
+      <div className="t3d-card">
+        {/* Progress dots */}
+        <div className="t3d-progress-dots" style={{ marginBottom: 20 }}>
+          {steps_arr.map((_, i) => <div key={i} className={`t3d-dot-step ${i===step?"active":i<step?"done":""}`} />)}
+        </div>
+
+        <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>
+          STEP {step+1} OF {steps_arr.length}
+        </div>
+
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#E0EAF0", letterSpacing: 2, textAlign: "center", marginBottom: 28 }}>
+          {currentStep.q}
+        </div>
+
+        <div style={{ marginBottom: 28 }}>
+          {currentStep.content}
+        </div>
+
+        <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
+          disabled={!currentStep.valid}
+          onClick={currentStep.next}>
+          {step === steps_arr.length - 1 ? "SEE MY ROUNDUP →" : "NEXT →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function Dashboard({ habits, setHabits }) {
+function Dashboard({ habits, setHabits, user }) {
   const done = habits.filter(h => h.done).length;
   const score = Math.round((done / habits.length) * 58 + 16);
+  const [eodDone, setEodDone] = useState(false);
+  const [showEod, setShowEod] = useState(false);
+
+  const getLocalDate = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", getLocalDate()).single()
+      .then(({ data }) => { if (data) setEodDone(true); });
+  }, [user]);
+
+  if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   return (
     <div className="t3d-fade">
       <div className="t3d-grid3">
@@ -983,6 +1216,27 @@ function Dashboard({ habits, setHabits }) {
           ))}
         </div>
       </div>
+
+      {/* End of Day Check-in */}
+      <div className="t3d-card" style={{ textAlign: "center", padding: 28 }}>
+        {eodDone ? (
+          <>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>🌙</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 4 }}>DAY CHECKED IN</div>
+            <div style={{ fontSize: 11, color: "#3A5060" }}>Great work today. See you tomorrow!</div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 16, letterSpacing: 1 }}>READY TO CLOSE OUT YOUR DAY?</div>
+            <button className="t3d-big-btn"
+              style={{ background: "linear-gradient(90deg, rgba(0,200,255,.15), rgba(0,255,178,.1))", border: `1px solid ${NEON2}`, color: NEON2, fontSize: 13, letterSpacing: 3 }}
+              onClick={() => setShowEod(true)}>
+              🌙 END OF DAY CHECK-IN
+            </button>
+            <div style={{ fontSize: 10, color: "#2A3A48", marginTop: 12 }}>Complete your other check-ins first</div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -993,6 +1247,7 @@ function Fitness({ user }) {
   const [split, setSplit] = useState(null);
   const [loading, setLoading] = useState(true);
   const [setupStep, setSetupStep] = useState(0);
+  const [editDaysModal, setEditDaysModal] = useState(false);
   const [numSessions, setNumSessions] = useState(3);
   const [sessions, setSessions] = useState([]);
   const [currentSessionIdx, setCurrentSessionIdx] = useState(0);
@@ -1693,8 +1948,8 @@ Respond ONLY with valid JSON:
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SPLIT</div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm" onClick={() => { setSetupStep(0); setView("setup"); }}>EDIT</button>
-                <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.3)", color: NEON2 }} onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setView("ai_builder"); }}>AI REBUILD</button>
+                <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT DAYS</button>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setSplit(null); setSessions([]); setSetupStep(0); setView("setup"); }}>CHANGE PLAN</button>
               </div>
             </div>
             {DAYS.map(day => {
@@ -1730,6 +1985,42 @@ Respond ONLY with valid JSON:
               </div>
             )}
           </div>
+
+          {/* Edit Days Modal */}
+          {editDaysModal && (
+            <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.88)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+              <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "80vh", overflowY: "auto" }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>EDIT TRAINING DAYS</div>
+                {sessions.map((session, sIdx) => (
+                  <div key={sIdx} style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 8 }}>{session.name}</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {DAYS.map(d => {
+                        const selected = session.days?.includes(d);
+                        return (
+                          <button key={d} className="t3d-btn t3d-btn-sm"
+                            style={{ background: selected?"rgba(0,255,178,.15)":"transparent", borderColor: selected?NEON:BORDER, color: selected?NEON:"#3A5060" }}
+                            onClick={() => setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                              ...s, days: selected ? s.days.filter(x => x !== d) : [...(s.days||[]), d]
+                            } : s))}>
+                            {d}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => setEditDaysModal(false)}>CANCEL</button>
+                  <button className="t3d-btn" style={{ flex: 1 }} onClick={async () => {
+                    await saveSplit(sessions);
+                    setSplit(prev => ({ ...prev, sessions }));
+                    setEditDaysModal(false);
+                  }}>SAVE DAYS ✓</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="t3d-card">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setHistoryOpen(h => !h)}>
@@ -3421,7 +3712,7 @@ export default function App() {
             </div>
           </div>
 
-          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} />}
+          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} />}
           {tab === "morning" && <MorningSection user={user} />}
           {tab === "fitness" && <Fitness user={user} />}
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
