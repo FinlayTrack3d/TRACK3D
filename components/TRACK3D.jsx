@@ -1311,7 +1311,28 @@ function Fitness({ user }) {
 
   const saveSplit = async (sessionsData) => {
     if (!user) return;
-    await supabase.from("workout_splits").upsert({ user_id: user.id, sessions: sessionsData, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    try {
+      // First check if a row exists
+      const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
+      
+      let result;
+      if (existing) {
+        // Update existing row
+        result = await supabase.from("workout_splits").update({ sessions: sessionsData, updated_at: new Date().toISOString() }).eq("user_id", user.id);
+      } else {
+        // Insert new row
+        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: sessionsData, split_name: "My Split", updated_at: new Date().toISOString() });
+      }
+      
+      if (result.error) {
+        console.error("saveSplit error:", result.error);
+        alert("Error saving workout plan: " + result.error.message);
+      } else {
+        console.log("Split saved successfully!");
+      }
+    } catch (e) {
+      console.error("saveSplit exception:", e);
+    }
   };
 
   const saveWorkoutLog = async () => {
