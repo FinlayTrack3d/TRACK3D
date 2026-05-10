@@ -1298,14 +1298,25 @@ function Fitness({ user }) {
     return () => clearTimeout(timer);
   }, [restActive, restRemaining]);
 
-  const loadData = async () => {
+  const loadData = async (retryCount = 0) => {
     setLoading(true);
     try {
-      const { data: splitData } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
+      const { data: splitData, error } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
+      if (error && error.code !== "PGRST116" && retryCount < 3) {
+        // Retry after short delay - session may not be fully restored yet
+        setTimeout(() => loadData(retryCount + 1), 1000);
+        return;
+      }
       if (splitData) { setSplit(splitData); setSessions(splitData.sessions || []); }
       const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(20);
       if (logs) setHistory(logs);
-    } catch (e) { console.log("Load error:", e); }
+    } catch (e) { 
+      if (retryCount < 3) {
+        setTimeout(() => loadData(retryCount + 1), 1000);
+        return;
+      }
+      console.log("Load error:", e); 
+    }
     setLoading(false);
   };
 
@@ -2349,14 +2360,21 @@ function Nutrition({ user, userSessions }) {
     setIsTrainingDay(isTraining);
   }, [userSessions]);
 
-  const loadData = async () => {
+  const loadData = async (retryCount = 0) => {
     setLoading(true);
     try {
-      const { data: planData } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
+      const { data: planData, error } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
+      if (error && error.code !== "PGRST116" && retryCount < 3) {
+        setTimeout(() => loadData(retryCount + 1), 1000);
+        return;
+      }
       if (planData) setPlan(planData);
       const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
       if (logData) { setLogs(logData); if (logData.find(l => l.date === today)) setTodayLogged(true); }
-    } catch (e) { console.log("Load error:", e); }
+    } catch (e) { 
+      if (retryCount < 3) { setTimeout(() => loadData(retryCount + 1), 1000); return; }
+      console.log("Load error:", e); 
+    }
     setLoading(false);
   };
 
