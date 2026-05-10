@@ -1289,7 +1289,13 @@ function Fitness({ user }) {
     { id: "favourite_exercises", q: "Any favourite exercises you definitely want included?", type: "text", placeholder: "e.g. bench press, squats or no preference" },
   ];
 
-  useEffect(() => { if (!user) return; loadData(); }, [user]);
+  useEffect(() => { 
+    if (!user) return; 
+    setLoading(true);
+    // Small delay to ensure session is fully restored on mobile
+    const timer = setTimeout(() => loadData(), 300);
+    return () => clearTimeout(timer);
+  }, [user]);
 
   useEffect(() => {
     if (!restActive) return;
@@ -2349,7 +2355,12 @@ function Nutrition({ user, userSessions }) {
   };
   const today = getLocalDate();
 
-  useEffect(() => { if (!user) return; loadData(); }, [user]);
+  useEffect(() => { 
+    if (!user) return;
+    setLoading(true);
+    const timer = setTimeout(() => loadData(), 300);
+    return () => clearTimeout(timer);
+  }, [user]);
 
   // Auto detect training day from fitness split
   useEffect(() => {
