@@ -1289,13 +1289,7 @@ function Fitness({ user }) {
     { id: "favourite_exercises", q: "Any favourite exercises you definitely want included?", type: "text", placeholder: "e.g. bench press, squats or no preference" },
   ];
 
-  useEffect(() => { 
-    if (!user) return; 
-    setLoading(true);
-    // Small delay to ensure session is fully restored on mobile
-    const timer = setTimeout(() => loadData(), 300);
-    return () => clearTimeout(timer);
-  }, [user]);
+  useEffect(() => { if (!user) return; loadData(); }, [user]);
 
   useEffect(() => {
     if (!restActive) return;
@@ -1304,25 +1298,14 @@ function Fitness({ user }) {
     return () => clearTimeout(timer);
   }, [restActive, restRemaining]);
 
-  const loadData = async (retryCount = 0) => {
+  const loadData = async () => {
     setLoading(true);
     try {
-      const { data: splitData, error } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
-      if (error && error.code !== "PGRST116" && retryCount < 3) {
-        // Retry after short delay - session may not be fully restored yet
-        setTimeout(() => loadData(retryCount + 1), 1000);
-        return;
-      }
+      const { data: splitData } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
       if (splitData) { setSplit(splitData); setSessions(splitData.sessions || []); }
       const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(20);
       if (logs) setHistory(logs);
-    } catch (e) { 
-      if (retryCount < 3) {
-        setTimeout(() => loadData(retryCount + 1), 1000);
-        return;
-      }
-      console.log("Load error:", e); 
-    }
+    } catch (e) { console.log("Load error:", e); }
     setLoading(false);
   };
 
@@ -2355,12 +2338,7 @@ function Nutrition({ user, userSessions }) {
   };
   const today = getLocalDate();
 
-  useEffect(() => { 
-    if (!user) return;
-    setLoading(true);
-    const timer = setTimeout(() => loadData(), 300);
-    return () => clearTimeout(timer);
-  }, [user]);
+  useEffect(() => { if (!user) return; loadData(); }, [user]);
 
   // Auto detect training day from fitness split
   useEffect(() => {
@@ -2371,21 +2349,14 @@ function Nutrition({ user, userSessions }) {
     setIsTrainingDay(isTraining);
   }, [userSessions]);
 
-  const loadData = async (retryCount = 0) => {
+  const loadData = async () => {
     setLoading(true);
     try {
-      const { data: planData, error } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
-      if (error && error.code !== "PGRST116" && retryCount < 3) {
-        setTimeout(() => loadData(retryCount + 1), 1000);
-        return;
-      }
+      const { data: planData } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
       if (planData) setPlan(planData);
       const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
       if (logData) { setLogs(logData); if (logData.find(l => l.date === today)) setTodayLogged(true); }
-    } catch (e) { 
-      if (retryCount < 3) { setTimeout(() => loadData(retryCount + 1), 1000); return; }
-      console.log("Load error:", e); 
-    }
+    } catch (e) { console.log("Load error:", e); }
     setLoading(false);
   };
 
