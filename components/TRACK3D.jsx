@@ -1312,23 +1312,19 @@ function Fitness({ user }) {
   const saveSplit = async (sessionsData) => {
     if (!user) return;
     try {
-      // First check if a row exists
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
       
       let result;
       if (existing) {
-        // Update existing row
-        result = await supabase.from("workout_splits").update({ sessions: sessionsData, updated_at: new Date().toISOString() }).eq("user_id", user.id);
+        result = await supabase.from("workout_splits").update({ sessions: sessionsData }).eq("user_id", user.id);
       } else {
-        // Insert new row
-        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: sessionsData, split_name: "My Split", updated_at: new Date().toISOString() });
+        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: sessionsData, split_name: "My Split" });
       }
       
       if (result.error) {
         console.error("saveSplit error:", result.error);
-        alert("Error saving workout plan: " + result.error.message);
       } else {
-        console.log("Split saved successfully!");
+        console.log("Split saved!");
       }
     } catch (e) {
       console.error("saveSplit exception:", e);
@@ -3715,11 +3711,10 @@ export default function App() {
     { id: "morning", icon: "🌅", label: "MORNING" },
     { id: "fitness", icon: "⚡", label: "FITNESS" },
     { id: "nutrition", icon: "◎", label: "NUTRITION" },
-    { id: "calendar", icon: "📅", label: "CALENDAR" },
     { id: "habits", icon: "◇", label: "HABITS" },
   ];
 
-  const titles = { dashboard: "OVERVIEW", morning: "MORNING", fitness: "FITNESS", nutrition: "NUTRITION", calendar: "CALENDAR", habits: "HABITS" };
+  const titles = { dashboard: "OVERVIEW", morning: "MORNING", fitness: "FITNESS", nutrition: "NUTRITION", habits: "HABITS" };
 
   return (
     <>
@@ -3762,7 +3757,6 @@ export default function App() {
           {tab === "morning" && <MorningSection user={user} />}
           {tab === "fitness" && <Fitness user={user} />}
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
-          {tab === "calendar" && <Calendar user={user} fitnessSessions={fitnessSessions} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
 
