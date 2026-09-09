@@ -90,6 +90,13 @@ const css = `
     .t3d-grid12 { grid-template-columns: 1fr; }
     .t3d-grid2 { grid-template-columns: 1fr; }
   }
+  .t3d-set-input { width: 80px; height: 80px; background: #E0EAF0; border: none; border-radius: 8px; font-size: 28px; font-weight: 700; text-align: center; color: #080C10; outline: none; }
+  .t3d-set-confirm { width: 60px; height: 60px; background: #00FFB2; border: none; border-radius: 8px; font-size: 24px; cursor: pointer; color: #080C10; font-weight: 700; }
+  @media (max-width: 768px) {
+    .t3d-workout-card { padding: 16px 10px !important; }
+    .t3d-set-input { width: 38vw; height: 38vw; max-width: 150px; max-height: 150px; font-size: 38px; }
+    .t3d-set-confirm { width: 76px; height: 76px; font-size: 30px; }
+  }
   .t3d-bottom-nav { display: none; }
   @media (max-width: 768px) {
     .t3d-bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; background: #0D1318; border-top: 1px solid #1A2530; padding: 8px 0 12px; z-index: 50; justify-content: space-around; align-items: center; }
@@ -376,12 +383,438 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
 }
 
 // ─── Morning Section ──────────────────────────────────────────────────────────
+function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setScheduledTasks, onSave, onRebuild, onCancel }) {
+  const [newTaskName, setNewTaskName] = useState("");
+  const [newTaskTime, setNewTaskTime] = useState("");
+  const [newTaskDuration, setNewTaskDuration] = useState(10);
+  const [dragIdx, setDragIdx] = useState(null);
+  const durationTimerRef = useRef(null);
+
+  const timeToMinutes = (time) => {
+    if (!time) return 0;
+    const [h, m] = time.split(":").map(Number);
+    return h * 60 + m;
+  };
+
+  const minutesToTime = (minutes) => {
+    const mins = ((minutes % 1440) + 1440) % 1440;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  };
+
+  const changeWakeTime = (newWakeTime) => {
+    const oldMinutes = timeToMinutes(wakeTime);
+    const newMinutes = timeToMinutes(newWakeTime);
+    const difference = newMinutes - oldMinutes;
+
+    setWakeTime(newWakeTime);
+
+    setScheduledTasks(prev =>
+      prev.map(task => ({
+        ...task,
+        scheduledTime: task.scheduledTime
+          ? minutesToTime(timeToMinutes(task.scheduledTime) + difference)
+          : task.scheduledTime
+      }))
+    );
+  };
+
+  const updateTask = (index, field, value) => {
+    setScheduledTasks(prev =>
+      prev.map((task, i) =>
+        i === index
+          ? {
+              ...task,
+              [field]:
+                field === "duration"
+                  ? value === "" ? "" : Number(value)
+                  : value
+            }
+          : task
+      )
+    );
+
+    if (field === "duration" && value !== "" && Number(value) > 0) {
+      setScheduledTasks(current => {
+        const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+        let cursor = wakeH * 60 + wakeM;
+
+        return current.map(task => {
+          const h = Math.floor(cursor / 60) % 24;
+          const m = cursor % 60;
+
+          const scheduledTime =
+            `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+          cursor += Number(task.duration) || 0;
+
+          return {
+            ...task,
+            scheduledTime
+          };
+        });
+      });
+    }
+  };
+
+  const deleteTask = (index) => {
+    setScheduledTasks(prev => {
+      const filtered = prev.filter(
+        (task, i) => i !== index || task.id === "checkin"
+      );
+
+      const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+      let cursor = wakeH * 60 + wakeM;
+
+      return filtered.map(task => {
+        const h = Math.floor(cursor / 60) % 24;
+        const m = cursor % 60;
+
+        const scheduledTime =
+          `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+        cursor += Number(task.duration) || 0;
+
+        return {
+          ...task,
+          scheduledTime
+        };
+      });
+    });
+  };
+
+  const addTask = () => {
+    if (!newTaskName.trim()) return;
+
+    const checkin = scheduledTasks.find(t => t.id === "checkin");
+    const otherTasks = scheduledTasks.filter(t => t.id !== "checkin");
+
+    const newTask = {
+      id: `custom-${Date.now()}`,
+      name: newTaskName.trim(),
+      duration: Number(newTaskDuration) || 10,
+      type: "tick",
+      icon: "▸"
+    };
+
+    const list = checkin
+      ? [...otherTasks, newTask, checkin]
+      : [...otherTasks, newTask];
+
+    const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+    let cursor = wakeH * 60 + wakeM;
+
+    const recalculated = list.map(task => {
+      const h = Math.floor(cursor / 60) % 24;
+      const m = cursor % 60;
+
+      const scheduledTime =
+        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+      cursor += Number(task.duration) || 5;
+
+      return {
+        ...task,
+        scheduledTime
+      };
+    });
+
+    setScheduledTasks(recalculated);
+
+    setNewTaskName("");
+    setNewTaskTime("");
+    setNewTaskDuration(10);
+  };
+
+  const handleDragStart = (index) => {
+    setDragIdx(index);
+  };
+
+  const handleDragOver = (e, index) => {
+    e.preventDefault();
+
+    if (dragIdx === null || dragIdx === index) return;
+
+    const list = [...scheduledTasks];
+
+    if (list[index]?.id === "checkin") return;
+    if (list[dragIdx]?.id === "checkin") return;
+
+    const [moved] = list.splice(dragIdx, 1);
+    list.splice(index, 0, moved);
+
+    const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+    let cursor = wakeH * 60 + wakeM;
+
+    const recalculated = list.map(task => {
+      const h = Math.floor(cursor / 60) % 24;
+      const m = cursor % 60;
+      const scheduledTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+      cursor += Number(task.duration) || 5;
+
+      return {
+        ...task,
+        scheduledTime
+      };
+    });
+
+    setScheduledTasks(recalculated);
+    setDragIdx(index);
+  };
+
+  return (
+    <div className="t3d-fade">
+      <div className="t3d-card">
+
+        <div className="t3d-ctitle" style={{ marginBottom: 20 }}>
+          EDIT MORNING ROUTINE
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          <div style={{
+            fontSize: 10,
+            color: "#E0EAF0",
+            letterSpacing: 1,
+            marginBottom: 8
+          }}>
+            WAKE UP TIME
+          </div>
+
+          <input
+            type="time"
+            value={wakeTime}
+            onChange={e => changeWakeTime(e.target.value)}
+            className="t3d-input"
+            style={{
+              maxWidth: 180,
+              colorScheme: "dark"
+            }}
+          />
+
+          <div style={{
+            fontSize: 9,
+            color: "#8AABB8",
+            marginTop: 7
+          }}>
+            Changing your wake time moves the full routine with it.
+          </div>
+        </div>
+
+        <div style={{
+          fontSize: 10,
+          color: "#E0EAF0",
+          letterSpacing: 1,
+          marginBottom: 10
+        }}>
+          YOUR ROUTINE
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "24px 1fr 100px 80px 40px",
+            gap: 8,
+            alignItems: "center",
+            marginBottom: 6,
+            padding: "0 0 6px"
+          }}
+        >
+          <div />
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TASK</div>
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TIME</div>
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>MINUTES</div>
+          <div />
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          {scheduledTasks.map((task, i) => {
+            const locked = task.id === "checkin";
+
+            return (
+              <div
+                key={task.id || i}
+                draggable={!locked}
+                onDragStart={() => handleDragStart(i)}
+                onDragOver={e => handleDragOver(e, i)}
+                onDragEnd={() => setDragIdx(null)}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "24px 1fr 100px 80px 40px",
+                  gap: 8,
+                  alignItems: "center",
+                  padding: "10px 0",
+                  borderBottom: `1px solid ${BORDER}`,
+                  opacity: locked ? 0.7 : 1
+                }}
+              >
+                <div
+                  style={{
+                    cursor: locked ? "default" : "grab",
+                    color: "#4A6070",
+                    fontSize: 18
+                  }}
+                >
+                  {locked ? "🔒" : "≡"}
+                </div>
+
+                <input
+                  className="t3d-input"
+                  value={task.name}
+                  disabled={locked}
+                  onChange={e => updateTask(i, "name", e.target.value)}
+                  style={{ padding: "9px 10px" }}
+                />
+
+                <input
+                  type="time"
+                  className="t3d-input"
+                  value={task.scheduledTime || ""}
+                  onChange={e => updateTask(i, "scheduledTime", e.target.value)}
+                  style={{
+                    padding: "9px 6px",
+                    colorScheme: "dark"
+                  }}
+                />
+
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="number"
+                    min="1"
+                    className="t3d-input"
+                    value={task.duration ?? ""}
+                    onChange={e => updateTask(i, "duration", e.target.value)}
+                    style={{
+                      padding: "9px 30px 9px 6px",
+                      textAlign: "center"
+                    }}
+                  />
+                  <span
+                    style={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      fontSize: 8,
+                      color: "#4A6070",
+                      pointerEvents: "none"
+                    }}
+                  >
+                    min
+                  </span>
+                </div>
+
+                {!locked ? (
+                  <button
+                    className="t3d-btn t3d-btn-sm t3d-btn-red"
+                    onClick={() => deleteTask(i)}
+                    style={{ padding: 8 }}
+                  >
+                    ×
+                  </button>
+                ) : (
+                  <div />
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{
+          padding: 14,
+          border: `1px solid ${BORDER}`,
+          borderRadius: 7,
+          marginBottom: 20
+        }}>
+          <div className="t3d-ctitle">ADD TASK</div>
+
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 110px",
+            gap: 8,
+            marginBottom: 10
+          }}>
+            <input
+              className="t3d-input"
+              placeholder="Task name..."
+              value={newTaskName}
+              onChange={e => setNewTaskName(e.target.value)}
+            />
+
+            <div style={{ position: "relative" }}>
+              <input
+                type="number"
+                min="1"
+                className="t3d-input"
+                value={newTaskDuration}
+                onChange={e => setNewTaskDuration(e.target.value)}
+                style={{ paddingRight: 32 }}
+              />
+              <span
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  fontSize: 8,
+                  color: "#4A6070",
+                  pointerEvents: "none"
+                }}
+              >
+                min
+              </span>
+            </div>
+          </div>
+
+          <button
+            className="t3d-btn t3d-btn-sm"
+            onClick={addTask}
+            disabled={!newTaskName.trim()}
+          >
+            + ADD TO ROUTINE
+          </button>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="t3d-btn t3d-btn-sm"
+            onClick={onCancel}
+          >
+            ← CANCEL
+          </button>
+
+          <button
+            className="t3d-btn t3d-btn-sm t3d-btn-red"
+            onClick={onRebuild}
+          >
+            CHANGE ROUTINE
+          </button>
+
+          <button
+            className="t3d-btn"
+            style={{
+              flex: 1,
+              background: "rgba(0,255,178,.12)",
+              borderColor: "rgba(0,255,178,.5)"
+            }}
+            onClick={onSave}
+          >
+            SAVE CHANGES
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
 function MorningSection({ user }) {
   const [view, setView] = useState("home");
   const [setupStep, setSetupStep] = useState(0);
   const [wakeTime, setWakeTime] = useState("06:00");
   const [selectedTasks, setSelectedTasks] = useState([]);
   const [customTask, setCustomTask] = useState("");
+  const [customTaskDuration, setCustomTaskDuration] = useState(10);
   const [scheduledTasks, setScheduledTasks] = useState([]);
   const [checkinStep, setCheckinStep] = useState(0);
   const [checkinData, setCheckinData] = useState({});
@@ -395,6 +828,13 @@ function MorningSection({ user }) {
   const [history, setHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  // Live Morning
+  const [liveTaskIndex, setLiveTaskIndex] = useState(0);
+  const [liveSecondsLeft, setLiveSecondsLeft] = useState(0);
+  const [liveStartedAt, setLiveStartedAt] = useState(null);
+  const [liveInputActive, setLiveInputActive] = useState(false);
+
   const fileRef = useRef(null);
 
   const getLocalDate = () => {
@@ -404,9 +844,9 @@ function MorningSection({ user }) {
   const today = getLocalDate();
 
   const NON_NEGS = [
-    { id: "weight", name: "Log body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
-    { id: "sleep", name: "Log sleep duration", type: "sleep", icon: "😴", duration: 1 },
-    { id: "photos", name: "Progress photos", type: "photos3", icon: "📸", duration: 3 },
+    { id: "sleep", name: "Work out sleep duration", type: "sleep", icon: "😴", duration: 1 },
+    { id: "weight", name: "Check body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
+    { id: "photos", name: "Take progress photos", type: "photos3", icon: "📸", duration: 3 },
   ];
   const LOCKED_LAST = { id: "checkin", name: "TRACK3D Morning Check-in", type: "tick", icon: "📱", duration: 2 };
   const PHOTO_ANGLES = ["front", "side", "back"];
@@ -474,40 +914,103 @@ function MorningSection({ user }) {
   };
 
   const calcFinishTime = (wake, tasks) => {
-    const [h, m] = wake.split(":").map(Number);
-    const totalMins = tasks.reduce((a, t) => a + (t.duration || 10), 0);
-    const finishMins = h * 60 + m + totalMins;
-    const fh = Math.floor(finishMins / 60) % 24;
-    const fm = finishMins % 60;
-    return `${String(fh).padStart(2,"0")}:${String(fm).padStart(2,"0")}`;
+    if (!tasks?.length) return wake;
+
+    const taskEnds = tasks
+      .filter(t => t.scheduledTime)
+      .map(t => {
+        const [h, m] = t.scheduledTime.split(":").map(Number);
+        return (h * 60) + m + (Number(t.duration) || 0);
+      });
+
+    if (!taskEnds.length) {
+      const [h, m] = wake.split(":").map(Number);
+      const totalMins = tasks.reduce((a, t) => a + (Number(t.duration) || 10), 0);
+      const finishMins = h * 60 + m + totalMins;
+      return `${String(Math.floor(finishMins / 60) % 24).padStart(2,"0")}:${String(finishMins % 60).padStart(2,"0")}`;
+    }
+
+    const finishMins = Math.max(...taskEnds);
+
+    return `${String(Math.floor(finishMins / 60) % 24).padStart(2,"0")}:${String(finishMins % 60).padStart(2,"0")}`;
   };
 
   const toggleTask = (task) => {
     setSelectedTasks(prev =>
       prev.find(t => t.name === task.name)
         ? prev.filter(t => t.name !== task.name)
-        : [...prev, { ...task, id: task.name }]
+        : [...prev, { ...task, id: task.name, preferredTime: "" }]
+    );
+  };
+
+  const updateSelectedTask = (index, field, value) => {
+    setSelectedTasks(prev =>
+      prev.map((task, i) =>
+        i === index
+          ? {
+              ...task,
+              [field]:
+                field === "duration"
+                  ? value === "" ? "" : Number(value)
+                  : value
+            }
+          : task
+      )
     );
   };
 
   const addCustomTask = () => {
     if (!customTask.trim()) return;
-    setSelectedTasks(prev => [...prev, { id: customTask, name: customTask, duration: 10, type: "tick" }]);
+
+    setSelectedTasks(prev => [
+      ...prev,
+      {
+        id: `custom-${Date.now()}`,
+        name: customTask.trim(),
+        duration: Number(customTaskDuration) || 10,
+        type: "tick",
+        icon: "▸"
+      }
+    ]);
+
     setCustomTask("");
+    setCustomTaskDuration(10);
   };
 
   const buildSchedule = (orderedTasks) => {
     const [h, m] = wakeTime.split(":").map(Number);
     let cursor = h * 60 + m;
-    const all = [...(orderedTasks || [...NON_NEGS, ...selectedTasks]), LOCKED_LAST];
+
+    const all = [
+      ...(orderedTasks || [...NON_NEGS, ...selectedTasks]),
+      LOCKED_LAST
+    ];
+
     return all.map(task => {
+      if (task.preferredTime) {
+        const [preferredH, preferredM] = task.preferredTime.split(":").map(Number);
+        const preferredMinutes = preferredH * 60 + preferredM;
+
+        if (preferredMinutes > cursor) {
+          cursor = preferredMinutes;
+        }
+      }
+
       const th = Math.floor(cursor / 60) % 24;
       const tm = cursor % 60;
-      const time = `${String(th).padStart(2,"0")}:${String(tm).padStart(2,"0")}`;
-      cursor += task.duration || 5;
-      return { ...task, scheduledTime: time };
+
+      const time =
+        `${String(th).padStart(2, "0")}:${String(tm).padStart(2, "0")}`;
+
+      cursor += Number(task.duration) || 5;
+
+      return {
+        ...task,
+        scheduledTime: time
+      };
     });
   };
+           
 
   const recalcTimes = (tasks) => {
     const [h, m] = wakeTime.split(":").map(Number);
@@ -521,8 +1024,128 @@ function MorningSection({ user }) {
     });
   };
 
+  const startRoutineSetup = () => {
+    const lockedIds = new Set([
+      ...NON_NEGS.map(task => task.id),
+      LOCKED_LAST.id
+    ]);
+
+    const existingHabits = scheduledTasks
+      .filter(task => !lockedIds.has(task.id))
+      .map(task => ({
+        ...task,
+        preferredTime: task.scheduledTime || ""
+      }));
+
+    setSelectedTasks(existingHabits);
+    setSetupStep(0);
+    setView("setup");
+  };
+
   const allSteps = scheduledTasks.length > 0 ? scheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
+
+  const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
+  const currentLiveTask = liveRoutineSteps[liveTaskIndex];
+
   const currentStep = allSteps[checkinStep];
+
+  useEffect(() => {
+    if (
+      (view !== "liveMorning" && !liveInputActive) ||
+      !currentLiveTask
+    ) return;
+
+    const timer = setInterval(() => {
+      setLiveSecondsLeft(prev => Math.max(0, prev - 1));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [view, liveInputActive, liveTaskIndex, currentLiveTask?.id]);
+
+  const moveToNextLiveTask = () => {
+    const nextIndex = liveTaskIndex + 1;
+
+    if (nextIndex >= liveRoutineSteps.length) {
+      setCheckinStep(allSteps.findIndex(step => step.id === "checkin"));
+      setCheckinData(prev => {
+        const updated = { ...prev };
+
+        liveRoutineSteps.forEach(step => {
+          const key = step.id || step.name;
+
+          if (updated[key] === undefined && step.type === "tick") {
+            updated[key] = true;
+          }
+        });
+
+        return updated;
+      });
+
+      setTempInput("");
+      setPhotoAngleIdx(0);
+      setPhotoFiles({ front: null, side: null, back: null });
+      setPhotoPreviews({ front: null, side: null, back: null });
+      setView("checkin");
+      return;
+    }
+
+    setLiveTaskIndex(nextIndex);
+    setLiveSecondsLeft(
+      (Number(liveRoutineSteps[nextIndex]?.duration) || 1) * 60
+    );
+  };
+
+  const skipLiveTask = () => {
+    if (!currentLiveTask) return;
+
+    setCheckinData(prev => ({
+      ...prev,
+      [currentLiveTask.id || currentLiveTask.name]: false
+    }));
+
+    moveToNextLiveTask();
+  };
+
+  const completeLiveTask = () => {
+    if (!currentLiveTask) return;
+
+    setCheckinData(prev => ({
+      ...prev,
+      [currentLiveTask.id || currentLiveTask.name]: true
+    }));
+
+    moveToNextLiveTask();
+  };
+
+  const finishLiveInputStep = () => {
+    if (!liveInputActive) {
+      setCheckinStep(s => s + 1);
+      return;
+    }
+
+    setLiveInputActive(false);
+
+    const nextIndex = liveTaskIndex + 1;
+
+    if (nextIndex >= liveRoutineSteps.length) {
+      const checkinIndex = allSteps.findIndex(
+        step => step.id === "checkin"
+      );
+
+      setCheckinStep(checkinIndex);
+      setTempInput("");
+      setView("checkin");
+      return;
+    }
+
+    setLiveTaskIndex(nextIndex);
+    setLiveSecondsLeft(
+      (Number(liveRoutineSteps[nextIndex]?.duration) || 1) * 60
+    );
+
+    setTempInput("");
+    setView("liveMorning");
+  };
 
   const morningScore = (data) => {
     const total = allSteps.length;
@@ -604,15 +1227,67 @@ function MorningSection({ user }) {
                 </>
               ) : (
                 <>
-                  <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, letterSpacing: 1 }}>
+                  <div style={{
+                    fontSize: 12,
+                    color: "#E0EAF0",
+                    marginBottom: 8,
+                    letterSpacing: 1
+                  }}>
                     READY TO START YOUR MORNING?
                   </div>
-                  <button
-                    className="t3d-big-btn"
-                    style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
-                    onClick={() => { setCheckinStep(0); setCheckinData({}); setTempInput(""); setPhotoAngleIdx(0); setPhotoFiles({ front: null, side: null, back: null }); setPhotoPreviews({ front: null, side: null, back: null }); setView("checkin"); }}>
-                    ☀️ MORNING CHECK-IN
-                  </button>
+
+                  <div style={{
+                    fontSize: 10,
+                    color: "#4A6070",
+                    marginBottom: 20,
+                    lineHeight: 1.6
+                  }}>
+                    Follow your routine live or check in normally when you're finished.
+                  </div>
+
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10
+                  }}>
+                    <button
+                      className="t3d-big-btn"
+                      style={{
+                        background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))",
+                        border: `1px solid ${NEON}`,
+                        color: NEON,
+                        fontSize: 13,
+                        letterSpacing: 2
+                      }}
+                      onClick={() => {
+                        setLiveTaskIndex(0);
+                        setLiveSecondsLeft((Number(scheduledTasks[0]?.duration) || 1) * 60);
+                        setLiveStartedAt(Date.now());
+                        setView("liveMorning");
+                      }}
+                    >
+                      ▶ START LIVE MORNING
+                    </button>
+
+                    <button
+                      className="t3d-btn"
+                      style={{
+                        width: "100%",
+                        padding: 14
+                      }}
+                      onClick={() => {
+                        setCheckinStep(0);
+                        setCheckinData({});
+                        setTempInput("");
+                        setPhotoAngleIdx(0);
+                        setPhotoFiles({ front: null, side: null, back: null });
+                        setPhotoPreviews({ front: null, side: null, back: null });
+                        setView("checkin");
+                      }}
+                    >
+                      ✓ NORMAL MORNING CHECK-IN
+                    </button>
+                  </div>
                 </>
               )}
             </div>
@@ -621,7 +1296,21 @@ function MorningSection({ user }) {
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                 <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY'S SCHEDULE</div>
-                <button className="t3d-btn t3d-btn-sm" onClick={() => { setView("setup"); setSetupStep(0); }}>EDIT</button>
+                <div style={{ display: "flex", gap: 8 }}>
+  <button
+    className="t3d-btn t3d-btn-sm"
+    onClick={() => setView("editRoutine")}
+  >
+    EDIT ROUTINE
+  </button>
+
+  <button
+    className="t3d-btn t3d-btn-sm t3d-btn-red"
+    onClick={startRoutineSetup}
+  >
+    CHANGE ROUTINE
+  </button>           
+</div>
               </div>
               {scheduledTasks.map((t, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
@@ -706,6 +1395,24 @@ function MorningSection({ user }) {
     );
   }
 
+  // EDIT ROUTINE view
+  if (view === "editRoutine") {
+    return (
+      <MorningRoutineEditor
+        wakeTime={wakeTime}
+        setWakeTime={setWakeTime}
+        scheduledTasks={scheduledTasks}
+        setScheduledTasks={setScheduledTasks}
+        onCancel={() => setView("home")}
+        onRebuild={startRoutineSetup}          
+        onSave={async () => {
+          await saveRoutine(scheduledTasks);
+          setView("home");
+        }}
+      />
+    );
+  }
+
   // SETUP view
   if (view === "setup") {
     return (
@@ -739,28 +1446,402 @@ function MorningSection({ user }) {
 
           {setupStep === 1 && (
             <div>
-              <div className="t3d-ctitle">CHOOSE YOUR MORNING TASKS</div>
-              <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#E0EAF0" }}>
-                ✓ Body weight, sleep & progress photo included. TRACK3D Check-in always last.
-              </div>
-              <div style={{ marginBottom: 16 }}>
-                {SUGGESTED_TASKS.map((t, i) => (
-                  <span key={i} className={`t3d-task-chip ${selectedTasks.find(s => s.name === t.name) ? "selected" : ""}`}
-                    onClick={() => toggleTask(t)}>
-                    {selectedTasks.find(s => s.name === t.name) ? "✓ " : ""}{t.name} ({t.duration}m)
-                  </span>
+              <div className="t3d-ctitle">CHOOSE YOUR MORNING HABITS</div>
+
+              {/* Selected habits */}
+              <div style={{ display: "none" }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 5
+                }}>
+                  YOUR MORNING HABITS
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: "#4A6070",
+                  marginBottom: 12
+                }}>
+                  Set a duration and an optional start time.
+                </div>
+
+                {selectedTasks.length === 0 && (
+                  <div style={{
+                    border: `1px dashed ${BORDER}`,
+                    borderRadius: 6,
+                    padding: 14,
+                    color: "#4A6070",
+                    fontSize: 10,
+                    marginBottom: 12
+                  }}>
+                    Select habits below or make your own.
+                  </div>
+                )}
+
+                {selectedTasks.map((task, i) => (
+                  <div
+                    key={task.id || i}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      padding: "9px 0",
+                      borderBottom: `1px solid ${BORDER}`
+                    }}
+                  >
+                    <div style={{
+                      flex: "1 1 180px",
+                      fontSize: 11,
+                      color: "#E0EAF0"
+                    }}>
+                      ▸ {task.name}
+                    </div>
+
+                    <input
+                      type="time"
+                      className="t3d-input"
+                      value={task.preferredTime || ""}
+                      onChange={e =>
+                        updateSelectedTask(i, "preferredTime", e.target.value)
+                      }
+                      style={{
+                        width: 115,
+                        colorScheme: "dark"
+                      }}
+                    />
+
+                    <div style={{
+                      position: "relative",
+                      width: 90
+                    }}>
+                      <input
+                        type="number"
+                        min="1"
+                        className="t3d-input"
+                        value={task.duration ?? ""}
+                        onChange={e =>
+                          updateSelectedTask(i, "duration", e.target.value)
+                        }
+                        style={{
+                          paddingRight: 30,
+                          textAlign: "center"
+                        }}
+                      />
+
+                      <span style={{
+                        position: "absolute",
+                        right: 8,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        fontSize: 8,
+                        color: "#4A6070",
+                        pointerEvents: "none"
+                      }}>
+                        min
+                      </span>
+                    </div>
+
+                    <button
+                      className="t3d-btn t3d-btn-sm t3d-btn-red"
+                      onClick={() =>
+                        setSelectedTasks(prev =>
+                          prev.filter((_, index) => index !== i)
+                        )
+                      }
+                      style={{ padding: "8px 10px" }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+
+                {/* Compulsory habits */}
+                <div style={{
+                  marginTop: 18,
+                  fontSize: 9,
+                  color: "#4A6070",
+                  letterSpacing: 1,
+                  marginBottom: 7
+                }}>
+                  INCLUDED WITH EVERY ROUTINE
+                </div>
+
+                {[...NON_NEGS, LOCKED_LAST].map((task, i) => (
+                  <div
+                    key={task.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "9px 0",
+                      borderBottom: `1px solid ${BORDER}`,
+                      opacity: 0.7
+                    }}
+                  >
+                    <div style={{ fontSize: 13 }}>🔒</div>
+
+                    <div style={{
+                      flex: 1,
+                      fontSize: 11,
+                      color: "#8AABB8"
+                    }}>
+                      {task.icon} {task.name}
+                    </div>
+
+                    <div style={{
+                      fontSize: 9,
+                      color: "#4A6070"
+                    }}>
+                      {task.id === "checkin"
+                        ? "ALWAYS LAST"
+                        : `${task.duration} min`}
+                    </div>
+                  </div>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-                <input className="t3d-input" placeholder="Add custom task..." value={customTask}
-                  onChange={e => setCustomTask(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && addCustomTask()} />
-                <button className="t3d-btn t3d-btn-sm" onClick={addCustomTask}>ADD</button>
+
+              {/* Popular habits */}
+              <div style={{ marginBottom: 26 }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 5
+                }}>
+                  POPULAR MORNING HABITS
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: "#4A6070",
+                  marginBottom: 10
+                }}>
+                  Select from the most popular morning habits.
+                </div>
+
+                <div>
+                  {SUGGESTED_TASKS.map((t, i) => (
+                    <span
+                      key={i}
+                      className={`t3d-task-chip ${
+                        selectedTasks.find(s => s.name === t.name)
+                          ? "selected"
+                          : ""
+                      }`}
+                      onClick={() => toggleTask(t)}
+                    >
+                      {selectedTasks.find(s => s.name === t.name)
+                        ? "✓ "
+                        : ""}
+                      {t.name} ({t.duration}m)
+                    </span>
+                  ))}
+                </div>
               </div>
+
+              {/* Custom habit */}
+              <div style={{ marginBottom: 24 }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 5
+                }}>
+                  MAKE YOUR OWN HABIT
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: "#4A6070",
+                  marginBottom: 10
+                }}>
+                  Create a habit that is specific to your morning.
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap"
+                }}>
+                  <input
+                    className="t3d-input"
+                    placeholder="Habit name..."
+                    value={customTask}
+                    onChange={e => setCustomTask(e.target.value)}
+                    onKeyDown={e =>
+                      e.key === "Enter" && addCustomTask()
+                    }
+                    style={{ flex: "1 1 220px" }}
+                  />
+
+
+
+                  <div style={{
+                    position: "relative",
+                    width: 95
+                  }}>
+                    <input
+                      type="number"
+                      min="1"
+                      className="t3d-input"
+                      value={customTaskDuration}
+                      onChange={e =>
+                        setCustomTaskDuration(e.target.value)
+                      }
+                      style={{
+                        paddingRight: 30,
+                        textAlign: "center"
+                      }}
+                    />
+
+                    <span style={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      fontSize: 8,
+                      color: "#4A6070",
+                      pointerEvents: "none"
+                    }}>
+                      min
+                    </span>
+                  </div>
+
+                  <button
+                    className="t3d-btn t3d-btn-sm"
+                    onClick={addCustomTask}
+                    disabled={!customTask.trim()}
+                  >
+                    + ADD
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 8
+                }}>
+                  CURRENTLY SELECTED
+                </div>
+
+                {selectedTasks.length === 0 && (
+                  <div style={{
+                    fontSize: 9,
+                    color: "#4A6070",
+                    marginBottom: 8
+                  }}>
+                    No extra habits selected yet.
+                  </div>
+                )}
+
+                {selectedTasks.map((task, i) => (
+                  <div
+                    key={task.id || i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 0",
+                      borderBottom: `1px solid ${BORDER}`
+                    }}
+                  >
+                    <div style={{
+                      flex: 1,
+                      fontSize: 10,
+                      color: "#E0EAF0"
+                    }}>
+                      ▸ {task.name}
+                    </div>
+
+                    <div style={{
+                      fontSize: 9,
+                      color: "#8AABB8"
+                    }}>
+                      {task.duration} min
+                    </div>
+
+                    <button
+                      className="t3d-btn t3d-btn-sm t3d-btn-red"
+                      onClick={() =>
+                        setSelectedTasks(prev =>
+                          prev.filter((_, index) => index !== i)
+                        )
+                      }
+                      style={{ padding: "4px 8px" }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+
+                {[...NON_NEGS, LOCKED_LAST].map(task => (
+                  <div
+                    key={task.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 0",
+                      borderBottom: `1px solid ${BORDER}`,
+                      opacity: 0.55
+                    }}
+                  >
+                    <div style={{ fontSize: 10 }}>🔒</div>
+
+                    <div style={{
+                      flex: 1,
+                      fontSize: 10,
+                      color: "#8AABB8"
+                    }}>
+                      {task.icon} {task.name}
+                    </div>
+
+                    <div style={{
+                      fontSize: 8,
+                      color: "#4A6070"
+                    }}>
+                      {task.id === "checkin"
+                        ? "LAST"
+                        : `${task.duration} min`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm" onClick={() => setSetupStep(0)}>← BACK</button>
-                <button className="t3d-btn" style={{ flex: 1, padding: 12 }}
-                  onClick={() => { setScheduledTasks(buildSchedule([...NON_NEGS, ...selectedTasks])); setSetupStep(2); }}>
+                <button
+                  className="t3d-btn t3d-btn-sm"
+                  onClick={() => setSetupStep(0)}
+                >
+                  ← BACK
+                </button>
+
+                <button
+                  className="t3d-btn"
+                  style={{ flex: 1, padding: 12 }}
+                  disabled={selectedTasks.some(
+                    task =>
+                      task.duration === "" ||
+                      Number(task.duration) <= 0
+                  )}
+                  onClick={() => {
+                    setScheduledTasks(
+                      buildSchedule([...NON_NEGS, ...selectedTasks])
+                    );
+                    setSetupStep(2);
+                  }}
+                >
                   NEXT →
                 </button>
               </div>
@@ -783,6 +1864,267 @@ function MorningSection({ user }) {
               }}
             />
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // LIVE MORNING view
+  if (view === "liveMorning" && currentLiveTask) {
+    const totalPlannedSeconds = liveRoutineSteps.reduce(
+      (sum, task) => sum + ((Number(task.duration) || 0) * 60),
+      0
+    );
+
+    const completedPlannedSeconds = liveRoutineSteps
+      .slice(0, liveTaskIndex)
+      .reduce(
+        (sum, task) => sum + ((Number(task.duration) || 0) * 60),
+        0
+      );
+
+    const currentTaskPlannedSeconds =
+      (Number(currentLiveTask.duration) || 1) * 60;
+
+    const plannedElapsedSeconds =
+      completedPlannedSeconds +
+      Math.max(0, currentTaskPlannedSeconds - liveSecondsLeft);
+
+    const actualElapsedSeconds = liveStartedAt
+      ? Math.floor((Date.now() - liveStartedAt) / 1000)
+      : 0;
+
+    const differenceSeconds =
+      actualElapsedSeconds - plannedElapsedSeconds;
+
+    const differenceMinutes = Math.floor(
+      Math.abs(differenceSeconds) / 60
+    );
+
+    const status =
+      differenceMinutes < 2
+        ? "ON TRACK ✓"
+        : differenceSeconds > 0
+          ? `${differenceMinutes} MIN BEHIND`
+          : `${differenceMinutes} MIN AHEAD`;
+
+    const remainingRoutineSeconds = Math.max(
+      0,
+      totalPlannedSeconds - plannedElapsedSeconds
+    );
+
+    const formatDuration = seconds => {
+      const mins = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    };
+
+    const currentKey =
+      currentLiveTask.id || currentLiveTask.name;
+
+    const needsInput = ["sleep", "number", "photos3"].includes(
+      currentLiveTask.type
+    );
+
+    const openCurrentInput = () => {
+      const stepIndex = allSteps.findIndex(
+        step =>
+          (step.id || step.name) === currentKey
+      );
+
+      if (stepIndex === -1) return;
+
+      setCheckinStep(stepIndex);
+      setTempInput("");
+      setPhotoAngleIdx(0);
+      setPhotoFiles({ front: null, side: null, back: null });
+      setPhotoPreviews({ front: null, side: null, back: null });
+      setView("checkin");
+    };
+
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card">
+          <div style={{
+            textAlign: "center",
+            marginBottom: 26
+          }}>
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 10,
+              letterSpacing: 3,
+              color: NEON,
+              marginBottom: 8
+            }}>
+              MORNING IN PROGRESS
+            </div>
+
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 32,
+              fontWeight: 700,
+              color: "#E0EAF0",
+              marginBottom: 8
+            }}>
+              {formatDuration(liveSecondsLeft)}
+            </div>
+
+            <div style={{
+              fontSize: 10,
+              color: "#8AABB8",
+              letterSpacing: 1
+            }}>
+              {Math.ceil(remainingRoutineSeconds / 60)} MIN LEFT IN ROUTINE
+            </div>
+          </div>
+
+          <div style={{
+            border: `1px solid ${NEON}`,
+            background: "rgba(0,255,178,.05)",
+            borderRadius: 8,
+            padding: 20,
+            marginBottom: 16
+          }}>
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 9,
+              letterSpacing: 2,
+              color: "#4A6070",
+              marginBottom: 10
+            }}>
+              CURRENT
+            </div>
+
+            <div style={{
+              fontSize: 34,
+              marginBottom: 10
+            }}>
+              {currentLiveTask.icon || "▸"}
+            </div>
+
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 15,
+              color: "#E0EAF0",
+              marginBottom: 6
+            }}>
+              {currentLiveTask.name}
+            </div>
+
+            <div style={{
+              fontSize: 10,
+              color: "#8AABB8"
+            }}>
+              Planned: {currentLiveTask.duration} min
+            </div>
+          </div>
+
+          {liveRoutineSteps[liveTaskIndex + 1] && (
+            <div style={{
+              padding: 14,
+              border: `1px solid ${BORDER}`,
+              borderRadius: 7,
+              marginBottom: 16
+            }}>
+              <div style={{
+                fontFamily: "'Orbitron',monospace",
+                fontSize: 9,
+                letterSpacing: 2,
+                color: "#4A6070",
+                marginBottom: 7
+              }}>
+                NEXT
+              </div>
+
+              <div style={{
+                fontSize: 11,
+                color: "#E0EAF0"
+              }}>
+                {liveRoutineSteps[liveTaskIndex + 1].icon || "▸"}{" "}
+                {liveRoutineSteps[liveTaskIndex + 1].name}
+                {" · "}
+                {liveRoutineSteps[liveTaskIndex + 1].duration} min
+              </div>
+            </div>
+          )}
+
+          <div style={{
+            textAlign: "center",
+            padding: 12,
+            borderRadius: 6,
+            marginBottom: 18,
+            background:
+              status.includes("BEHIND")
+                ? "rgba(255,45,120,.07)"
+                : status.includes("AHEAD")
+                  ? "rgba(0,200,255,.07)"
+                  : "rgba(0,255,178,.07)",
+            border:
+              status.includes("BEHIND")
+                ? "1px solid rgba(255,45,120,.25)"
+                : status.includes("AHEAD")
+                  ? "1px solid rgba(0,200,255,.25)"
+                  : "1px solid rgba(0,255,178,.25)",
+            color:
+              status.includes("BEHIND")
+                ? NEON3
+                : status.includes("AHEAD")
+                  ? NEON2
+                  : NEON
+          }}>
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 11,
+              letterSpacing: 2
+            }}>
+              {status}
+            </div>
+          </div>
+
+          <div style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap"
+          }}>
+            {needsInput ? (
+              <button
+                className="t3d-btn"
+                style={{
+                  flex: 1,
+                  padding: 13,
+                  background: "rgba(0,255,178,.12)",
+                  borderColor: "rgba(0,255,178,.5)"
+                }}
+                onClick={openCurrentInput}
+              >
+                COMPLETE THIS STEP →
+              </button>
+            ) : (
+              <button
+                className="t3d-btn"
+                style={{
+                  flex: 1,
+                  padding: 13,
+                  background: "rgba(0,255,178,.12)",
+                  borderColor: "rgba(0,255,178,.5)"
+                }}
+                onClick={completeLiveTask}
+              >
+                ✓ DONE
+              </button>
+            )}
+
+            <button
+              className="t3d-btn t3d-btn-red"
+              style={{
+                padding: "13px 18px"
+              }}
+              onClick={skipLiveTask}
+            >
+              SKIP
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -816,7 +2158,14 @@ function MorningSection({ user }) {
                   <span style={{ color: "#E0EAF0", fontSize: 14 }}>{currentStep.unit}</span>
                 </div>
                 <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); setCheckinStep(s => s + 1); }}>
+                  onClick={() => {
+  setCheckinData(d => ({
+    ...d,
+    [currentStep.id]: tempInput
+  }));
+  setTempInput("");
+  finishLiveInputStep();
+}}>
                   CONFIRM →
                 </button>
               </div>
@@ -837,8 +2186,10 @@ function MorningSection({ user }) {
             {currentStep.type === "photos3" && (() => {
               const angle = PHOTO_ANGLES[photoAngleIdx];
               const isLast = photoAngleIdx === PHOTO_ANGLES.length - 1;
+
               const finishPhotos = (filesOverride) => {
                 const files = filesOverride || photoFiles;
+
                 setCheckinData(d => ({
                   ...d,
                   photos: {
@@ -847,7 +2198,8 @@ function MorningSection({ user }) {
                     back: files.back ? "captured" : "skipped",
                   },
                 }));
-                setCheckinStep(s => s + 1);
+
+                finishLiveInputStep();
               };
               return (
                 <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
@@ -1567,16 +2919,16 @@ function Dashboard({ habits, setHabits, user }) {
 // ─── Exercise progression line chart ──────────────────────────────────────────
 const SET_LINE_COLORS = [NEON, NEON2, "#FF8C00", NEON3, "#A06CFF", "#FFD23F"];
 
-function ExerciseLineChart({ points, metric }) {
-  const W = 280, H = 170;
-  const pad = { l: 30, r: 10, t: 10, b: 26 };
+function ExerciseLineChart({ points }) {
+  const W = 280, H = 200;
+  const pad = { l: 30, r: 10, t: 26, b: 26 };
   const chartW = W - pad.l - pad.r;
   const chartH = H - pad.t - pad.b;
   const maxSets = points.reduce((m, p) => Math.max(m, p.sets.length), 0);
 
-  const value = (set) => metric === "weight" ? (parseFloat(set.weight) || 0) : (parseInt(set.reps) || 0);
-  const allValues = points.flatMap(p => p.sets.map(value));
-  const maxV = Math.max(...allValues, 1);
+  const weightOf = (set) => parseFloat(set.weight) || 0;
+  const repsOf = (set) => parseInt(set.reps) || 0;
+  const maxV = Math.max(...points.flatMap(p => p.sets.map(weightOf)), 1);
 
   if (points.length === 0 || maxSets === 0) {
     return <div style={{ textAlign: "center", padding: "30px 0", fontSize: 11, color: "#E0EAF0" }}>Not enough history for this exercise yet.</div>;
@@ -1587,7 +2939,7 @@ function ExerciseLineChart({ points, metric }) {
 
   const lines = Array.from({ length: maxSets }, (_, k) => {
     const pts = points
-      .map((p, i) => p.sets[k] ? { x: x(i), y: y(value(p.sets[k])), label: value(p.sets[k]) } : null)
+      .map((p, i) => p.sets[k] ? { x: x(i), y: y(weightOf(p.sets[k])), label: `${weightOf(p.sets[k])}kg × ${repsOf(p.sets[k])}` } : null)
       .filter(Boolean);
     return { setNum: k + 1, color: SET_LINE_COLORS[k % SET_LINE_COLORS.length], pts };
   });
@@ -1598,13 +2950,18 @@ function ExerciseLineChart({ points, metric }) {
         {[0, 0.5, 1].map(f => (
           <line key={f} x1={pad.l} x2={W - pad.r} y1={pad.t + chartH * f} y2={pad.t + chartH * f} stroke={BORDER} strokeWidth="1" />
         ))}
-        <text x={pad.l - 6} y={pad.t + 4} fontSize="8" fill="#E0EAF0" textAnchor="end">{Math.round(maxV)}</text>
+        <text x={pad.l - 6} y={pad.t + 4} fontSize="8" fill="#E0EAF0" textAnchor="end">{Math.round(maxV)}kg</text>
         <text x={pad.l - 6} y={pad.t + chartH + 4} fontSize="8" fill="#E0EAF0" textAnchor="end">0</text>
 
-        {lines.map(line => (
+        {lines.map((line, li) => (
           <g key={line.setNum}>
             <polyline points={line.pts.map(p => `${p.x},${p.y}`).join(" ")} fill="none" stroke={line.color} strokeWidth="2" />
-            {line.pts.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r="3" fill={line.color} />)}
+            {line.pts.map((p, i) => (
+              <g key={i}>
+                <circle cx={p.x} cy={p.y} r="3" fill={line.color} />
+                <text x={p.x} y={p.y - 8 - li * 10} fontSize="7" fill={line.color} textAnchor="middle">{p.label}</text>
+              </g>
+            ))}
           </g>
         ))}
 
@@ -1652,7 +3009,6 @@ function Fitness({ user }) {
   const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], tempo: "" });
   const [viewingSession, setViewingSession] = useState(null); // log entry shown in the history popup
   const [viewingExercise, setViewingExercise] = useState(null); // exercise name shown as a graph within the popup
-  const [graphMetric, setGraphMetric] = useState("weight"); // "weight" | "reps"
 
   // Workout logger state - track sets per exercise independently
   const [activeSession, setActiveSession] = useState(null);
@@ -1662,7 +3018,14 @@ function Fitness({ user }) {
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
   const [workoutStart, setWorkoutStart] = useState(null);
 
-  const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+  const getLocalDate = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const today = getLocalDate();
+
+const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const AI_QUESTIONS = [
     { id: "split_pref", q: "Do you have a preferred training split, or are you open to suggestions?", type: "choice", options: ["I have a preferred split", "Open to suggestions"] },
@@ -1871,7 +3234,7 @@ Respond ONLY with valid JSON:
 
     return (
       <div className="t3d-fade">
-        <div className="t3d-card">
+        <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === 0 ? 0.3 : 1 }}
@@ -2526,17 +3889,7 @@ Respond ONLY with valid JSON:
                       <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => setViewingSession(null)}>✕</div>
                     </div>
                     <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 16 }} onClick={() => setViewingExercise(null)}>← BACK TO SESSION</button>
-                    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-                      {["weight", "reps"].map(m => (
-                        <button key={m} className="t3d-btn t3d-btn-sm" style={{
-                          flex: 1,
-                          background: graphMetric === m ? "rgba(0,255,178,.12)" : "transparent",
-                          borderColor: graphMetric === m ? NEON : BORDER,
-                          color: graphMetric === m ? NEON : "#E0EAF0",
-                        }} onClick={() => setGraphMetric(m)}>{m.toUpperCase()}</button>
-                      ))}
-                    </div>
-                    <ExerciseLineChart points={getExerciseProgression(viewingExercise)} metric={graphMetric} />
+                    <ExerciseLineChart points={getExerciseProgression(viewingExercise)} />
                   </>
                 )}
               </div>
@@ -4227,10 +5580,6 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
-                SIGN OUT
-              </button>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
                 onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
                 SIGN OUT

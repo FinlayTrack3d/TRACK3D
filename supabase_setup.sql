@@ -58,3 +58,17 @@ alter table nutrition_plans add column if not exists fats_target integer;
 alter table nutrition_plans add column if not exists goal text;
 alter table nutrition_plans add column if not exists rest_day_meals jsonb;
 alter table nutrition_plans add column if not exists updated_at timestamptz;
+
+-- 4. End-of-workout check-ins (effort, body feeling, mental state, "more in the tank")
+create table if not exists workout_checkins (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  date date not null,
+  effort smallint,
+  body_feelings jsonb,
+  pain_location text,
+  mental_state text,
+  more_in_tank text,
+  created_at timestamptz not null default now(),
+  unique (user_id, date)
+);
