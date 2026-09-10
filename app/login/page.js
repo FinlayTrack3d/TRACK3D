@@ -1,6 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
+
+import { beginLoginWindow, loginWindowExpiry } from "../../lib/login-window";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -10,6 +12,16 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!cancelled && !error && data.session && loginWindowExpiry(data.session.user.id) > Date.now()) {
+        window.location.replace("/");
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const handleAuth = async () => {
     setLoading(true);
@@ -32,9 +44,9 @@ export default function Login() {
       else setMessage("Check your email to confirm your account!");
     } else {
       // persistSession: true is default in Supabase — keeps users logged in
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) { setMessage(error.message); setIsError(true); }
-      else window.location.href = "/";
+      else { beginLoginWindow(data.user.id); window.location.replace("/"); }
     }
     setLoading(false);
   };

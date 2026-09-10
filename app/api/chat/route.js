@@ -1,6 +1,6 @@
 export async function POST(request) {
   try {
-    const { messages, system } = await request.json();
+    const { messages, system, responseTokens } = await request.json();
     const key = process.env.ANTHROPIC_API_KEY;
     
     if (!key) {
@@ -16,7 +16,7 @@ export async function POST(request) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
-        max_tokens: 1000,
+        max_tokens: Number.isInteger(responseTokens) ? Math.min(6000, Math.max(1000, responseTokens)) : 1000,
         system: system || "You are TRACK3D's AI coach.",
         messages: messages,
       }),

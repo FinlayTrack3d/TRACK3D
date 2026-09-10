@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
+import { useSessionDraft, clearDrafts } from "../lib/session-drafts";
+import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -195,7 +197,7 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits, system }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -237,18 +239,18 @@ User data today:
     setTimeout(scroll, 50);
   };
 
-  const activate = () => { setStarted(true); send(system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."); };
+  const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
 
   return (
     <div className="t3d-card" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div className="t3d-ctitle">{system ? "AI MORNING PLANNER" : "AI COACH"}</div>
+      <div className="t3d-ctitle">{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 0" }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>
           <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 18, textAlign: "center", lineHeight: 1.6, letterSpacing: 1 }}>
-            {system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time."}
+            {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time.")}
           </div>
-          <button className="t3d-btn" onClick={activate}>{system ? "BUILD MY ROUTINE" : "ACTIVATE COACH"}</button>
+          <button className="t3d-btn" onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : "ACTIVATE COACH")}</button>
         </div>
       ) : (
         <>
@@ -288,7 +290,11 @@ User data today:
 function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTimes, calcFinishTime, LOCKED_LAST, onBack, onSave }) {
   const [dragIdx, setDragIdx] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiExplanation, setAiExplanation] = useState("");
+  const [aiConversation, setAiConversation] = useState([]);
+  const [aiFeedback, setAiFeedback] = useState("");
+  const [aiError, setAiError] = useState("");
+  const [aiChangeStatus, setAiChangeStatus] = useState("");
+  const aiRequestActive = useRef(false);
 
   const draggable = scheduledTasks.filter(t => t.id !== "checkin");
   const locked = scheduledTasks.find(t => t.id === "checkin") || LOCKED_LAST;
@@ -296,7 +302,7 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
   const handleDragStart = (i) => setDragIdx(i);
   const handleDragOver = (e, i) => {
     e.preventDefault();
-    if (dragIdx === null || dragIdx === i) return;
+    if (aiLoading || dragIdx === null || dragIdx === i) return;
     const newList = [...draggable];
     const [moved] = newList.splice(dragIdx, 1);
     newList.splice(i, 0, moved);
@@ -305,34 +311,77 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
   };
   const handleDragEnd = () => setDragIdx(null);
 
-  const optimiseWithAI = async () => {
+  const optimiseWithAI = async (feedback = "") => {
+    if (aiRequestActive.current) return;
+    const message = feedback.trim() || "Optimise my routine now using what you know. Apply the best task order and briefly explain the main change. Do not wait for me to answer questions.";
+    const updated = [...aiConversation, { role: "user", content: message, hidden: !feedback.trim() }];
+    aiRequestActive.current = true;
     setAiLoading(true);
-    setAiExplanation("");
-    const taskList = draggable.map(t => t.name + " (" + t.duration + "min)").join(", ");
+    setAiError("");
+
+    const tasks = draggable.map((task, index) => ({
+      key: String(index), name: task.name, duration: task.duration,
+      scheduledTime: task.scheduledTime, preferredTime: task.preferredTime || null,
+    }));
     try {
+      let parsed;
+      for (let attempt = 0; attempt < 2; attempt++) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: "You are a morning routine expert. Reorder the tasks for maximum effectiveness. Respond ONLY with JSON: {order: [task names], explanation: string}",
-          messages: [{ role: "user", content: "Optimise this morning routine: " + taskList }],
+          responseTokens: 2500,
+          system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical ordering immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible order just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. Explain the main concrete change. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach. If no reordering helps, briefly explain why the current order works.
+You can only reorder the supplied tasks. Keep every task exactly once, preserve durations, and leave the final check-in locked last. If the user needs duration, task, or wake-time changes, explain what they should edit using the routine controls. Timings will be recalculated consecutively from wake-up; if a fixed-time constraint cannot be met through reordering, explain that limitation instead of claiming it is satisfied.
+Respond only with valid JSON with double-quoted keys: {"order":["task key"],"explanation":"Your conversational reply, reasoning, and any follow-up question"}. Use the keys from the CURRENT task list below, not earlier keys. Your explanation must match the returned order: never claim you moved a task unless its returned position actually changes.
+Wake-up: ${wakeTime}.
+Current tasks: ${JSON.stringify(tasks)}.
+Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.duration })}.`,
+          messages: updated.map(({ role, content }, index) => ({ role, content: attempt && index === updated.length - 1 ? content + "\nReturn a complete valid JSON object with every current task key once. Use string keys and a brief explanation. Your previous response could not be applied." : content })),
         }),
       });
+      if (!res.ok) throw new Error("Request failed");
       const data = await res.json();
-      const text = data.content?.map(b => b.text || "").join("") || "";
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      if (parsed.order) {
-        const reordered = parsed.order.map(name => draggable.find(t => t.name === name)).filter(Boolean);
-        const remaining = draggable.filter(t => !reordered.find(r => r.name === t.name));
-        setScheduledTasks(recalcTimes([...reordered, ...remaining, locked]));
-        setAiExplanation(parsed.explanation || "");
+      const reply = data.content?.map(block => block.text || "").join("") || "";
+      try {
+        const cleaned = reply.replace(/```json|```/g, "").trim();
+        parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed.order)) {
+          parsed.order = parsed.order.map(key => {
+            const identifier = String(key);
+            if (tasks.some(task => task.key === identifier)) return identifier;
+            const matches = tasks.filter(task => task.name === identifier);
+            return matches.length === 1 ? matches[0].key : identifier;
+          });
+        }
+        const expected = new Set(tasks.map(task => task.key));
+        if (!Array.isArray(parsed.order) || parsed.order.length !== tasks.length ||
+            new Set(parsed.order).size !== tasks.length || parsed.order.some(key => !expected.has(key)) ||
+            typeof parsed.explanation !== "string" || !parsed.explanation.trim()) {
+          throw new Error("Invalid recommendation");
+        }
+        break;
+      } catch {
+        if (attempt === 1) throw new Error("Invalid recommendation");
       }
-    } catch (e) {
-      setAiExplanation("Could not optimise. Try again.");
+      }
+      const reordered = parsed.order.map(key => draggable[Number(key)]);
+      const movedCount = parsed.order.filter((key, index) => key !== String(index)).length;
+      if (movedCount > 0) {
+        setScheduledTasks(recalcTimes([...reordered, locked]));
+        setAiChangeStatus("Draft updated — " + movedCount + " tasks reordered. Review above, then lock it in.");
+      } else {
+        setAiChangeStatus("No order changes recommended — your current draft is unchanged.");
+      }
+      setAiConversation([...updated, { role: "assistant", content: parsed.explanation }]);
+      setAiFeedback("");
+    } catch {
+      setAiError("AI Coach could not revise your routine. The last successful update is still in place. Your message is kept — please try again.");
+    } finally {
+      aiRequestActive.current = false;
+      setAiLoading(false);
     }
-    setAiLoading(false);
   };
-
   return (
     <div>
       <div className="t3d-ctitle">DRAG TO REORDER YOUR ROUTINE</div>
@@ -341,7 +390,7 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
       </div>
       <div style={{ marginBottom: 8 }}>
         {draggable.map((t, i) => (
-          <div key={t.id || i} draggable
+          <div key={t.id || i} draggable={!aiLoading}
             onDragStart={() => handleDragStart(i)}
             onDragOver={(e) => handleDragOver(e, i)}
             onDragEnd={handleDragEnd}
@@ -363,18 +412,38 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
         <span style={{ fontSize: 11, color: "#E0EAF0" }}>ROUTINE FINISHES AT</span>
         <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#00C8FF" }}>{calcFinishTime(wakeTime, scheduledTasks)}</span>
       </div>
-      {aiExplanation && (
-        <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
-          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#00FFB2", letterSpacing: 2, marginBottom: 6 }}>AI SUGGESTION</div>
-          {aiExplanation}
+      {aiChangeStatus && <p role="status" style={{ fontSize: 12, color: NEON, lineHeight: 1.5 }}>{aiChangeStatus}</p>}
+      <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
+        <div className="t3d-ai-tag" style={{ color: NEON }}>AI COACH</div>
+        <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+          Optimise now. Add feedback to make it fit your life.
+        </p>
+        <div role="log" aria-label="Routine planning conversation" aria-live="polite"
+          style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
+          {aiConversation.filter(message => !message.hidden).map((message, index) => (
+            <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2 }}>
+              <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "AI COACH"}</div>
+              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0" }}>{message.content}</div>
+            </div>
+          ))}
+          {aiLoading && <p role="status" style={{ fontSize: 11, color: NEON }}>Thinking about your routine...</p>}
         </div>
-      )}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack}>← TASKS</button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={optimiseWithAI} disabled={aiLoading}>
+        <label style={{ display: "block", fontSize: 11, color: "#E0EAF0" }}>
+          Anything to adjust?
+          <textarea className="t3d-input" rows={2} value={aiFeedback} disabled={aiLoading}
+            style={{ marginTop: 8, resize: "vertical" }}
+            placeholder="e.g. I need breakfast before the school run."
+            onChange={event => setAiFeedback(event.target.value)} />
+        </label>
+        {aiError && <p role="alert" style={{ fontSize: 11, color: NEON3 }}>{aiError}</p>}
+        <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} disabled={aiLoading || !aiFeedback.trim()}
+          onClick={() => optimiseWithAI(aiFeedback)}>SEND TO COACH</button>
+      </div>      <div style={{ display: "flex", gap: 8 }}>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack} disabled={aiLoading}>← TASKS</button>
+        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={() => optimiseWithAI(aiFeedback)} disabled={aiLoading}>
           {aiLoading ? "THINKING..." : "✨ OPTIMISE WITH AI"}
         </button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave}>
+        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave} disabled={aiLoading}>
           LOCK IT IN →
         </button>
       </div>
@@ -808,6 +877,18 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
     </div>
   );
 }
+function wakeTimingSummary(timing) {
+  if (!timing?.actual || !timing?.planned) return "Wake-up time not recorded";
+  const minutes = time => {
+    const [hours, mins] = time.split(":").map(Number);
+    return hours * 60 + mins;
+  };
+  // Compare nearby clock times correctly across midnight.
+  const difference = ((minutes(timing.actual) - minutes(timing.planned) + 2160) % 1440) - 720;
+  const comparison = difference === 0 ? "on time" : difference > 0
+    ? `${difference} min later than planned` : `${Math.abs(difference)} min earlier than planned`;
+  return `Wake-up: ${timing.actual} · Planned: ${timing.planned} · ${comparison}`;
+}
 function MorningSection({ user }) {
   const [view, setView] = useState("home");
   const [setupStep, setSetupStep] = useState(0);
@@ -829,12 +910,41 @@ function MorningSection({ user }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  const [completedAction, setCompletedAction] = useState(null);
+  const [editSubmissionData, setEditSubmissionData] = useState({});
+  const [submissionError, setSubmissionError] = useState("");
   // Live Morning
   const [liveTaskIndex, setLiveTaskIndex] = useState(0);
-  const [liveSecondsLeft, setLiveSecondsLeft] = useState(0);
+  const [liveDeadline, setLiveDeadline] = useState(null);
+  const [liveNow, setLiveNow] = useState(0);
+  const liveSecondsLeft = liveDeadline ? Math.max(0, Math.ceil((liveDeadline - liveNow) / 1000)) : 0;
   const [liveStartedAt, setLiveStartedAt] = useState(null);
   const [liveInputActive, setLiveInputActive] = useState(false);
 
+  const morningDraft = useMemo(() => (
+    ["liveMorning", "checkin", "wakeCheckin"].includes(view) ? {
+      view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
+      liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive,
+    } : null
+  ), [view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
+    liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive]);
+  useSessionDraft(user?.id, "morning", morningDraft, draft => {
+    if (!["liveMorning", "checkin", "wakeCheckin"].includes(draft.view)) return;
+    setCheckinStep(draft.checkinStep || 0);
+    setCheckinData(draft.checkinData || {});
+    setTempInput(draft.tempInput || "");
+    setPhotoAngleIdx(draft.photoAngleIdx || 0);
+    setPhotoFiles(draft.photoFiles || { front: null, side: null, back: null });
+    setPhotoPreviews(Object.fromEntries(["front", "side", "back"].map(angle => [
+      angle, draft.photoFiles?.[angle] ? URL.createObjectURL(draft.photoFiles[angle]) : null,
+    ])));
+    setLiveTaskIndex(draft.liveTaskIndex || 0);
+    setLiveDeadline(draft.liveDeadline || null);
+    setLiveStartedAt(draft.liveStartedAt || null);
+    setLiveInputActive(Boolean(draft.liveInputActive));
+    setLiveNow(Date.now());
+    setView(draft.view);
+  });
   const fileRef = useRef(null);
 
   const getLocalDate = () => {
@@ -1050,22 +1160,40 @@ function MorningSection({ user }) {
   const currentStep = allSteps[checkinStep];
 
   useEffect(() => {
-    if (
-      (view !== "liveMorning" && !liveInputActive) ||
-      !currentLiveTask
-    ) return;
+    if (!liveDeadline) return;
+    const updateClock = () => setLiveNow(Date.now());
+    updateClock();
+    const timer = setInterval(updateClock, 1000);
+    window.addEventListener("focus", updateClock);
+    document.addEventListener("visibilitychange", updateClock);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", updateClock);
+      document.removeEventListener("visibilitychange", updateClock);
+    };
+  }, [liveDeadline]);
 
-    const timer = setInterval(() => {
-      setLiveSecondsLeft(prev => Math.max(0, prev - 1));
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [view, liveInputActive, liveTaskIndex, currentLiveTask?.id]);
-
+  const startLiveTimer = (task) => {
+    const now = Date.now();
+    setLiveNow(now);
+    setLiveDeadline(now + (Number(task?.duration) || 1) * 60000);
+  };
+  const recordLiveWakeTime = () => {
+    const now = new Date();
+    setCheckinData({
+      wakeTiming: {
+        actual: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+        planned: wakeTime,
+        source: "live",
+        startedAt: now.toISOString(),
+      },
+    });
+  };
   const moveToNextLiveTask = () => {
     const nextIndex = liveTaskIndex + 1;
 
     if (nextIndex >= liveRoutineSteps.length) {
+      setLiveDeadline(null);
       setCheckinStep(allSteps.findIndex(step => step.id === "checkin"));
       setCheckinData(prev => {
         const updated = { ...prev };
@@ -1090,9 +1218,7 @@ function MorningSection({ user }) {
     }
 
     setLiveTaskIndex(nextIndex);
-    setLiveSecondsLeft(
-      (Number(liveRoutineSteps[nextIndex]?.duration) || 1) * 60
-    );
+    startLiveTimer(liveRoutineSteps[nextIndex]);
   };
 
   const skipLiveTask = () => {
@@ -1128,6 +1254,7 @@ function MorningSection({ user }) {
     const nextIndex = liveTaskIndex + 1;
 
     if (nextIndex >= liveRoutineSteps.length) {
+      setLiveDeadline(null);
       const checkinIndex = allSteps.findIndex(
         step => step.id === "checkin"
       );
@@ -1139,9 +1266,7 @@ function MorningSection({ user }) {
     }
 
     setLiveTaskIndex(nextIndex);
-    setLiveSecondsLeft(
-      (Number(liveRoutineSteps[nextIndex]?.duration) || 1) * 60
-    );
+    startLiveTimer(liveRoutineSteps[nextIndex]);
 
     setTempInput("");
     setView("liveMorning");
@@ -1181,6 +1306,150 @@ function MorningSection({ user }) {
     </div>
   );
 
+  if (view === "wakeCheckin") {
+    return (
+      <div className="t3d-fade">
+        <form className="t3d-card" onSubmit={event => {
+          event.preventDefault();
+          if (!checkinData.wakeTiming?.actual) return;
+          setView("checkin");
+        }}>
+          <div className="t3d-ctitle">WHAT TIME DID YOU WAKE UP?</div>
+          <p style={{ fontSize: 12, color: "#8AABB8" }}>Your planned wake-up time was {wakeTime}. Enter when you actually woke up.</p>
+          <label style={{ fontSize: 12 }}>
+            Actual wake-up time
+            <input className="t3d-input" type="time" required style={{ marginTop: 8, colorScheme: "dark" }}
+              value={checkinData.wakeTiming?.actual || ""}
+              onChange={event => setCheckinData(data => ({ ...data, wakeTiming: {
+                actual: event.target.value, planned: wakeTime, source: "manual",
+              } }))} />
+          </label>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button className="t3d-btn" type="submit">CONTINUE</button>
+            <button className="t3d-btn" type="button" onClick={() => setView("home")}>CANCEL</button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+  // Correct today's saved answers without changing the routine or stored photos.
+  if (view === "editSubmission") {
+    return (
+      <div className="t3d-fade">
+        <form className="t3d-card" onSubmit={async event => {
+          event.preventDefault();
+          if (savingCheckin) return;
+          setSavingCheckin(true);
+          setSubmissionError("");
+          try {
+            const updatedData = { ...editSubmissionData };
+            const updatedPhotos = { front: "skipped", side: "skipped", back: "skipped", ...editSubmissionData.photos };
+            for (const angle of PHOTO_ANGLES) {
+              const file = photoFiles[angle];
+              if (!file) continue;
+              const extension = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "") || "jpg";
+              const path = `${user.id}/${today}/${angle}-${crypto.randomUUID()}.${extension}`;
+              const { error: uploadError } = await supabase.storage.from("checkin-photos").upload(path, file);
+              if (uploadError) throw uploadError;
+              updatedPhotos[angle] = path;
+            }
+            if (editSubmissionData.photos || PHOTO_ANGLES.some(angle => photoFiles[angle])) {
+              updatedData.photos = updatedPhotos;
+            }            const { error } = await supabase.from("morning_checkins").upsert({
+              user_id: user.id,
+              date: today,
+              score: morningScore(updatedData),
+              data: updatedData,
+            }, { onConflict: "user_id,date" });
+            if (error) throw error;
+            await loadData();
+            setView("home");
+          } catch {
+            setSubmissionError("Your changes could not be saved. Please try again.");
+          } finally {
+            setSavingCheckin(false);
+          }
+        }}>
+          <div className="t3d-ctitle">EDIT TODAY&apos;S SUBMISSION</div>
+          <p style={{ fontSize: 12, color: "#8AABB8" }}>Correct your answers to reflect what actually happened this morning.</p>
+          <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
+            Actual wake-up time
+            <input className="t3d-input" type="time" style={{ marginTop: 8, colorScheme: "dark" }}
+              value={editSubmissionData.wakeTiming?.actual || ""}
+              onChange={event => setEditSubmissionData(data => ({ ...data, wakeTiming: {
+                ...data.wakeTiming,
+                actual: event.target.value,
+                planned: data.wakeTiming?.planned || wakeTime,
+                source: "manual",
+              } }))} />
+          </label>          {allSteps.map(step => {
+            const key = step.id || step.name;
+            const value = editSubmissionData[key];
+            return (
+              <div key={key} style={{ padding: "14px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <label style={{ display: "block", fontSize: 12 }}>
+                  {step.icon || "▸"} {step.name}
+                  {["sleep", "number"].includes(step.type) && (
+                    <input className="t3d-input" style={{ marginTop: 8 }}
+                      type={step.type === "number" ? "number" : "text"}
+                      step={step.type === "number" ? "any" : undefined}
+                      placeholder={step.type === "sleep" ? "e.g. 7h 30m" : step.unit}
+                      value={typeof value === "string" || typeof value === "number" ? value : ""}
+                      onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value }))} />
+                  )}
+                  {step.type === "tick" && (
+                    <select className="t3d-input" style={{ marginTop: 8 }} value={value === true ? "yes" : "no"}
+                      onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value === "yes" }))}>
+                      <option value="yes">Completed</option>
+                      <option value="no">Not completed</option>
+                    </select>
+                  )}
+                </label>
+                {step.type === "photos3" && (
+                  <div style={{ fontSize: 11, color: "#8AABB8", marginTop: 8 }}>
+                    {PHOTO_ANGLES.map(angle => (
+                      <div key={angle} style={{ marginBottom: 16 }}>
+                        <label style={{ display: "block" }}>
+                          {angle.toUpperCase()} — {photoFiles[angle] ? "New photo selected" : value?.[angle] && value[angle] !== "skipped" ? "Photo saved · choose a replacement below" : "No photo saved"}
+                          <input type="file" accept="image/*" disabled={savingCheckin}
+                            style={{ display: "block", marginTop: 8, maxWidth: "100%", fontSize: 11 }}
+                            onChange={event => {
+                              const file = event.target.files?.[0];
+                              if (!file) return;
+                              if (photoPreviews[angle]) URL.revokeObjectURL(photoPreviews[angle]);
+                              setPhotoFiles(files => ({ ...files, [angle]: file }));
+                              setPhotoPreviews(previews => ({ ...previews, [angle]: URL.createObjectURL(file) }));
+                            }} />
+                        </label>
+                        {photoPreviews[angle] && (
+                          <div style={{ marginTop: 8 }}>
+                            <img src={photoPreviews[angle]} alt={`Selected ${angle} progress photo`}
+                              style={{ width: 100, height: 120, objectFit: "cover", borderRadius: 6 }} />
+                            <button className="t3d-btn t3d-btn-sm" type="button" disabled={savingCheckin}
+                              style={{ display: "block", marginTop: 6 }} onClick={() => {
+                                URL.revokeObjectURL(photoPreviews[angle]);
+                                setPhotoFiles(files => ({ ...files, [angle]: null }));
+                                setPhotoPreviews(previews => ({ ...previews, [angle]: null }));
+                              }}>UNDO PHOTO CHANGE</button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    Photos you leave unchanged will be kept. New photos upload when you save.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {submissionError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{submissionError}</p>}
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : "SAVE CHANGES"}</button>
+            <button className="t3d-btn t3d-btn-red" type="button" disabled={savingCheckin} onClick={() => setView("home")}>CANCEL</button>
+          </div>
+        </form>
+      </div>
+    );
+  }
   // HOME view
   if (view === "home") {
     return (
@@ -1224,6 +1493,70 @@ function MorningSection({ user }) {
                   <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>
                     Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
                   </div>
+                  <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
+                    {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
+                  </p>
+                  <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
+                    <button type="button" onClick={() => setCompletedAction("edit")}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
+                      Edit submission
+                    </button>
+                    <button type="button" onClick={() => setCompletedAction("redo")}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
+                      Do again
+                    </button>
+                  </div>
+                  {completedAction && (
+                    <div role="alert" style={{ marginTop: 14, padding: 18, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
+                      <div style={{ color: "#FFB547", fontSize: 12, fontWeight: 700 }}>⚠ Keep your progress honest</div>
+                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.7 }}>
+                        Mistakes happen, and it is okay to correct them. Being honest about your morning helps you reflect, learn, and keep moving forward.
+                        {completedAction === "redo" ? " Choose Live Morning or Normal Check-in to start again. Your current submission will only be replaced when you save the new one." : " Only change your answers to reflect what actually happened."}
+                      </p>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
+                          const action = completedAction;
+                          setCompletedAction(null);
+                          setSubmissionError("");
+                          if (action === "edit") {
+                            setEditSubmissionData({ ...(history.find(entry => entry.date === today)?.data || {}) });
+                            setPhotoFiles({ front: null, side: null, back: null });
+                            setPhotoPreviews({ front: null, side: null, back: null });
+                            setView("editSubmission");
+                          } else {
+                            setCheckinData({});
+                            setCheckinStep(0);
+                            setTempInput("");
+                            setPhotoAngleIdx(0);
+                            setPhotoFiles({ front: null, side: null, back: null });
+                            setPhotoPreviews({ front: null, side: null, back: null });
+                            setLiveInputActive(false);
+                            setLiveTaskIndex(0);
+                            startLiveTimer(liveRoutineSteps[0]);
+                            setLiveStartedAt(Date.now());
+                        recordLiveWakeTime();
+                            setView("liveMorning");
+                          }
+                        }}>{completedAction === "edit" ? "CONTINUE TO EDIT" : "START LIVE MORNING"}</button>
+                        {completedAction === "redo" && (
+                          <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
+                            setCompletedAction(null);
+                            setSubmissionError("");
+                            setCheckinData({});
+                            setCheckinStep(0);
+                            setTempInput("");
+                            setPhotoAngleIdx(0);
+                            setPhotoFiles({ front: null, side: null, back: null });
+                            setPhotoPreviews({ front: null, side: null, back: null });
+                            setLiveInputActive(false);
+                            setLiveDeadline(null);
+                            setLiveStartedAt(null);
+                            setView("wakeCheckin");
+                          }}>NORMAL CHECK-IN</button>
+                        )}                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => setCompletedAction(null)}>CANCEL</button>
+                      </div>
+                    </div>
+                  )}
                 </>
               ) : (
                 <>
@@ -1261,8 +1594,10 @@ function MorningSection({ user }) {
                       }}
                       onClick={() => {
                         setLiveTaskIndex(0);
-                        setLiveSecondsLeft((Number(scheduledTasks[0]?.duration) || 1) * 60);
+                        startLiveTimer(liveRoutineSteps[0]);
+                        setLiveInputActive(false);
                         setLiveStartedAt(Date.now());
+                        recordLiveWakeTime();
                         setView("liveMorning");
                       }}
                     >
@@ -1282,7 +1617,9 @@ function MorningSection({ user }) {
                         setPhotoAngleIdx(0);
                         setPhotoFiles({ front: null, side: null, back: null });
                         setPhotoPreviews({ front: null, side: null, back: null });
-                        setView("checkin");
+                        setLiveInputActive(false);
+                        setLiveDeadline(null);
+                        setView("wakeCheckin");
                       }}
                     >
                       ✓ NORMAL MORNING CHECK-IN
@@ -1367,7 +1704,7 @@ function MorningSection({ user }) {
                         </div>
                         <div style={{ flex: 1 }}>
                           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {entry.data && Object.entries(entry.data).map(([k, v]) => (
+                            {entry.data && Object.entries(entry.data).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
                               <span key={k} style={{
                                 fontSize: 9, padding: "2px 6px", borderRadius: 10,
                                 background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
@@ -1891,7 +2228,7 @@ function MorningSection({ user }) {
       Math.max(0, currentTaskPlannedSeconds - liveSecondsLeft);
 
     const actualElapsedSeconds = liveStartedAt
-      ? Math.floor((Date.now() - liveStartedAt) / 1000)
+      ? Math.floor((liveNow - liveStartedAt) / 1000)
       : 0;
 
     const differenceSeconds =
@@ -1935,6 +2272,8 @@ function MorningSection({ user }) {
 
       if (stepIndex === -1) return;
 
+      setLiveInputActive(true);
+
       setCheckinStep(stepIndex);
       setTempInput("");
       setPhotoAngleIdx(0);
@@ -1975,7 +2314,7 @@ function MorningSection({ user }) {
               color: "#8AABB8",
               letterSpacing: 1
             }}>
-              {Math.ceil(remainingRoutineSeconds / 60)} MIN LEFT IN ROUTINE
+              ESTIMATED FINISH {new Date(liveNow + (remainingRoutineSeconds + (Number(allSteps.find(step => step.id === "checkin")?.duration) || 0) * 60) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
             </div>
           </div>
 
@@ -2177,7 +2516,7 @@ function MorningSection({ user }) {
                   onChange={e => setTempInput(e.target.value)}
                   style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
                 <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); setCheckinStep(s => s + 1); }}>
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); finishLiveInputStep(); }}>
                   CONFIRM →
                 </button>
               </div>
@@ -2273,11 +2612,14 @@ function MorningSection({ user }) {
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>
             MORNING SCORE: {score}/10
           </div>
+          <p style={{ fontSize: 12, color: NEON2, lineHeight: 1.7 }}>
+            {wakeTimingSummary(checkinData.wakeTiming)}
+          </p>
           <div style={{ fontSize: 13, color: "#8AABB8", fontStyle: "italic", marginBottom: 32, lineHeight: 1.7, padding: "0 20px" }}>
             "{quote}"
           </div>
           <div style={{ marginBottom: 24 }}>
-            {Object.entries(checkinData).map(([k, v]) => (
+            {Object.entries(checkinData).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                 <span style={{ color: "#4A6070" }}>{k}</span>
                 <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
@@ -2351,7 +2693,7 @@ function EndOfDayCheckin({ user, onComplete }) {
       ]);
 
       // Build context
-      const morningScore = morning.data?.score || "not completed";
+      const morningScore = morning.data?.score ?? "not completed";
       const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${Object.values(nutrition.data.meals_completed||{}).filter(v=>v===true).length} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
       const fitnessData = fitness.data ? `${fitness.data.session_name}, ${fitness.data.duration_mins} mins, ${Math.round(fitness.data.total_volume||0)}kg volume` : "no workout logged";
       const calendarTasks = debrief.data ? `calendar score ${debrief.data.overall_score}/10` : calendar.data?.length ? `${calendar.data.filter(t=>t.status==="done").length}/${calendar.data.length} tasks done` : "no tasks";
@@ -2365,9 +2707,11 @@ function EndOfDayCheckin({ user, onComplete }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, nutrition, fitness, calendar alignment, and mood/energy. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
+          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, wake-up timing against the planned time when recorded, nutrition, fitness, calendar alignment, and mood/energy. Treat the live start time as the recorded wake-up time, not independently verified waking. Do not assume missing wake-up data or praise earlier waking at the expense of sleep. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
           messages: [{ role: "user", content: `Today's data:
 - Morning score: ${morningScore}/10
+- ${wakeTimingSummary(morning.data?.data?.wakeTiming)}
+- Wake-up time source: ${morning.data?.data?.wakeTiming?.source || "not recorded"}
 - Nutrition: ${nutritionData}
 - Fitness: ${fitnessData}
 - Calendar: ${calendarTasks}
@@ -2999,10 +3343,13 @@ function Fitness({ user }) {
   const [restSeconds, setRestSeconds] = useState(90);
   const [restActive, setRestActive] = useState(false);
   const [restRemaining, setRestRemaining] = useState(0);
+  const [restDeadline, setRestDeadline] = useState(null);
   const [aiAnswers, setAiAnswers] = useState({});
   const [aiStep, setAiStep] = useState(0);
   const [aiBuilding, setAiBuilding] = useState(false);
   const [aiPlan, setAiPlan] = useState(null);
+  const [aiPlanError, setAiPlanError] = useState("");
+  const [aiPlanSaving, setAiPlanSaving] = useState(false);
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
@@ -3018,6 +3365,30 @@ function Fitness({ user }) {
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
   const [workoutStart, setWorkoutStart] = useState(null);
 
+  const fitnessDraft = useMemo(() => (
+    view === "workout" && activeSession ? {
+      activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+      restTimerEnabled, restSeconds, restActive,
+      restDeadline,
+    } : null
+  ), [view, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+    restTimerEnabled, restSeconds, restActive, restDeadline]);
+  useSessionDraft(user?.id, "fitness", fitnessDraft, draft => {
+    if (!draft.activeSession?.exercises?.length) return;
+    setActiveSession(draft.activeSession);
+    setExerciseIdx(draft.exerciseIdx || 0);
+    setSetProgress(draft.setProgress || {});
+    setCompletedSets(draft.completedSets || {});
+    setCurrentInputs(draft.currentInputs || {});
+    setWorkoutStart(draft.workoutStart);
+    setRestTimerEnabled(Boolean(draft.restTimerEnabled));
+    setRestSeconds(draft.restSeconds || 90);
+    const remaining = Math.max(0, Math.ceil(((draft.restDeadline || 0) - Date.now()) / 1000));
+    setRestDeadline(draft.restDeadline || null);
+    setRestRemaining(remaining);
+    setRestActive(remaining > 0);
+    setView("workout");
+  });
   const getLocalDate = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -3028,26 +3399,32 @@ const today = getLocalDate();
 const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const AI_QUESTIONS = [
-    { id: "split_pref", q: "Do you have a preferred training split, or are you open to suggestions?", type: "choice", options: ["I have a preferred split", "Open to suggestions"] },
-    { id: "days_per_week", q: "How many days per week can you train?", type: "choice", options: ["2-3 days", "4 days", "5 days", "6+ days"] },
-    { id: "preferred_days", q: "Do you have preferred training days?", type: "text", placeholder: "e.g. Mon, Wed, Fri or no preference" },
-    { id: "goal", q: "What is your main goal?", type: "choice", options: ["Build muscle", "Lose fat", "Build strength", "Athletic performance", "General fitness"] },
-    { id: "experience", q: "What is your experience level?", type: "choice", options: ["Beginner (0-1 year)", "Intermediate (1-3 years)", "Advanced (3+ years)"] },
-    { id: "session_length", q: "How long can you train per session?", type: "choice", options: ["30 minutes", "45 minutes", "60 minutes", "90+ minutes"] },
-    { id: "equipment", q: "What equipment do you have access to?", type: "choice", options: ["Full commercial gym", "Home gym (weights)", "Dumbbells only", "Bodyweight only"] },
-    { id: "weak_points", q: "Any weak points or areas you want to prioritise?", type: "text", placeholder: "e.g. legs, shoulders, core or none" },
-    { id: "injuries", q: "Any injuries or exercises to avoid?", type: "text", placeholder: "e.g. bad knees, avoid overhead pressing or none" },
-    { id: "favourite_exercises", q: "Any favourite exercises you definitely want included?", type: "text", placeholder: "e.g. bench press, squats or no preference" },
+    { id: "goal", q: "What are we working towards?", type: "choice", options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
+    { id: "experience", q: "Where are you starting from?", type: "choice", options: ["New to training", "Training for a few months", "1–3 years of training", "3+ years of training"], custom: true },
+    { id: "days_per_week", q: "How many days can you realistically train?", type: "choice", options: ["1 day", "2 days", "3 days", "4 days", "5 days", "6 days", "7 days"] },
+    { id: "preferred_days", q: "Which days work best for you?", type: "text", placeholder: "e.g. Monday, Wednesday and Saturday — or flexible" },
+    { id: "session_length", q: "How much time do you have for training?", type: "availability" },
+    { id: "equipment", q: "What equipment can you use?", type: "choice", options: ["Full gym", "Home gym with weights", "Dumbbells only", "Bodyweight only"], custom: true },
+    { id: "split", q: "Do you have a preferred training split?", type: "choice", options: ["Let the coach choose", "Full body", "Upper / lower", "Push / pull / legs"], custom: true },
+    { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference" },
+    { id: "priorities", q: "What would you like to focus on?", type: "text", placeholder: "Muscle groups, skills or performance goals — or balanced progress" },
+    { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments — or none" },
   ];
 
   useEffect(() => { if (!user) return; loadData(); }, [user]);
 
   useEffect(() => {
-    if (!restActive) return;
-    if (restRemaining <= 0) { setRestActive(false); return; }
-    const timer = setTimeout(() => setRestRemaining(r => r - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [restActive, restRemaining]);
+    if (!restActive || !restDeadline) return;
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((restDeadline - Date.now()) / 1000));
+      setRestRemaining(remaining);
+      if (!remaining) setRestActive(false);
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    document.addEventListener("visibilitychange", update);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", update); };
+  }, [restActive, restDeadline]);
 
   const loadData = async () => {
     setLoading(true);
@@ -3171,7 +3548,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
     const totalSets = activeSession.exercises[eIdx]?.sets || 0;
 
-    if (restTimerEnabled) { setRestRemaining(restSeconds); setRestActive(true); }
+    if (restTimerEnabled) { setRestDeadline(Date.now() + restSeconds * 1000); setRestRemaining(restSeconds); setRestActive(true); }
 
     if (sIdx + 1 < totalSets) {
       setSetProgress(prev => ({ ...prev, [eIdx]: sIdx + 1 }));
@@ -3188,6 +3565,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   };
 
   const buildAIPlan = async () => {
+    if (aiBuilding) return;
+    setAiPlanError("");
     setAiBuilding(true);
     const context = Object.entries(aiAnswers).map(([k, v]) => {
       const q = AI_QUESTIONS.find(q => q.id === k);
@@ -3197,18 +3576,31 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       const res = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: `You are an expert personal trainer. Build a complete training programme. 
+          responseTokens: 6000,
+          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, and tempo for every exercise. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest; never replace different budgets with a single generic session length. Honour preferred days and the requested split, favourites, and priorities when feasible. Briefly explain conflicts rather than pretending they are satisfied. If days are flexible, assign the stated session budgets to sensible days. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN, never full day names; if no days are specified, choose a sensible schedule. Keep notes brief.
 SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
 Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["Monday"], "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
+{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
           messages: [{ role: "user", content: `Build me a training programme:\n${context}` }],
         }),
       });
+      if (!res.ok) throw new Error("Could not build programme");
       const data = await res.json();
       const text = data.content?.map(b => b.text || "").join("") || "";
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      if (!Array.isArray(parsed.sessions) || !parsed.sessions.length ||
+          parsed.sessions.length !== parseInt(aiAnswers.days_per_week, 10) ||
+          parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
+            session.days.some(day => !DAYS.includes(day)) ||
+            !Array.isArray(session.exercises) || !session.exercises.length ||
+            session.exercises.some(exercise => !exercise.name || !Number.isInteger(exercise.sets) ||
+              exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
+              exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
+              typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)))) {
+        throw new Error("Incomplete programme");
+      }
       setAiPlan(parsed);
-    } catch (e) { console.error("AI plan error:", e); }
+    } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
     setAiBuilding(false);
   };
 
@@ -3218,6 +3610,21 @@ Respond ONLY with valid JSON:
     </div></div>
   );
 
+  const fitnessCoach = (
+    <div style={{ marginBottom: 16 }}>
+      <AICoach
+        title="AI FITNESS COACH"
+        introduction="Talk through your programme, exercise technique, progress, or changes that fit your goals and schedule."
+        activationLabel="CHAT WITH FITNESS COACH"
+        openingMessage="Review my current training context, then ask what I would like help with. If my goals or constraints are missing, ask rather than assuming."
+        system={`You are TRACK3D's fitness coach. Give practical, concise general training guidance and maintain a two-way conversation. Use the saved programme, recent logs, and current workout below. Ask about goals, experience, equipment, available time, and personal constraints when needed. Consider the user's reasons for agreeing or disagreeing. Do not invent missing history or claim to have changed their plan: this chat only gives advice, and changes must be made through the programme controls. Do not diagnose injuries or encourage training through pain.
+Saved programme: ${JSON.stringify(split?.sessions || [])}
+Current programme shown in the app: ${JSON.stringify(sessions)}
+Recent workout logs: ${JSON.stringify(history.slice(0, 5))}
+Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?.name, exercise: activeSession?.exercises?.[exerciseIdx], completedSets } : null)}`}
+      />
+    </div>
+  );
   // ── WORKOUT VIEW ──────────────────────────────────────────────────────────
   if (view === "workout" && activeSession) {
     const currentExercise = activeSession.exercises[exerciseIdx];
@@ -3234,6 +3641,7 @@ Respond ONLY with valid JSON:
 
     return (
       <div className="t3d-fade">
+        {fitnessCoach}
         <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -3399,7 +3807,10 @@ Respond ONLY with valid JSON:
     if (aiPlan) return (
       <div className="t3d-fade">
         <div className="t3d-card">
-          <div className="t3d-ctitle">YOUR AI PROGRAMME — {aiPlan.split_name}</div>
+          <div className="t3d-ctitle">YOUR AI COACH PROGRAMME — {aiPlan.split_name}</div>
+          <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds. X means an explosive movement.</p>
+          {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
+          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
           {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>{aiPlan.notes}</div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
@@ -3419,11 +3830,23 @@ Respond ONLY with valid JSON:
           <div style={{ display: "flex", gap: 8 }}>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setAiPlan(null)}>REBUILD</button>
             <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
-              await saveSplit(aiPlan.sessions);
-              setSessions(aiPlan.sessions);
-              setSplit({ sessions: aiPlan.sessions });
-              setView("home");
-            }}>SAVE PROGRAMME ✓</button>
+              if (aiPlanSaving) return;
+              setAiPlanSaving(true);
+              setAiPlanError("");
+              try {
+                const programme = { sessions: aiPlan.sessions, split_name: aiPlan.split_name || "My Programme" };
+                const { error } = split
+                  ? await supabase.from("workout_splits").update(programme).eq("user_id", user.id)
+                  : await supabase.from("workout_splits").insert({ user_id: user.id, ...programme });
+                if (error) throw error;
+                setSessions(aiPlan.sessions);
+                setSplit({ sessions: aiPlan.sessions, split_name: aiPlan.split_name });
+                setView("home");
+              } catch {
+                setAiPlanError("Your programme could not be saved. Please try again.");
+              } finally { setAiPlanSaving(false); }
+            }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE PROGRAMME ✓"}</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiPlanSaving} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </div>
       </div>
@@ -3449,25 +3872,57 @@ Respond ONLY with valid JSON:
                   color: aiAnswers[currentQ.id] === opt ? NEON : "#4A6070" }}
                   onClick={() => {
                     setAiAnswers(a => ({ ...a, [currentQ.id]: opt }));
-                    setTimeout(() => { if (aiStep < AI_QUESTIONS.length-1) setAiStep(s => s+1); else buildAIPlan(); }, 300);
+
                   }}>{opt}</button>
               ))}
             </div>
           )}
-          {currentQ.type === "text" && (
+          {currentQ.type === "choice" && currentQ.custom && (
+            <label style={{ display: "block", fontSize: 12, marginBottom: 16 }}>
+              Or describe your own answer
+              <input className="t3d-input" style={{ marginTop: 8 }}
+                value={currentQ.options.includes(aiAnswers[currentQ.id]) ? "" : aiAnswers[currentQ.id] || ""}
+                onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
+            </label>
+          )}
+          {currentQ.type === "availability" && (
+            <div style={{ marginBottom: 20 }}>
+              <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6 }}>
+                Enter any duration or range. If your time varies, tell the coach what works on each day.
+              </p>
+              <label style={{ display: "block", fontSize: 12 }}>
+                Your available time
+                <textarea className="t3d-input" rows={4} style={{ marginTop: 8, resize: "vertical" }}
+                  placeholder={"e.g. 35 minutes every session\nOr Monday 30 minutes, Wednesday 45–60, Saturday 75"}
+                  value={aiAnswers[currentQ.id] || ""}
+                  onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
+              </label>
+              <button className="t3d-btn" style={{ width: "100%", marginTop: 12 }}
+                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
+                onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
+            </div>
+          )}          {currentQ.type === "text" && (
             <div style={{ marginBottom: 20 }}>
               <input className="t3d-input" placeholder={currentQ.placeholder}
                 value={aiAnswers[currentQ.id] || ""}
                 onChange={e => setAiAnswers(a => ({ ...a, [currentQ.id]: e.target.value }))}
                 onKeyDown={e => e.key === "Enter" && aiAnswers[currentQ.id] && (aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan())} />
               <button className="t3d-btn" style={{ width: "100%", padding: 12, marginTop: 12 }}
-                disabled={!aiAnswers[currentQ.id]}
+                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
                 onClick={() => aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan()}>
                 {aiStep < AI_QUESTIONS.length-1 ? "NEXT →" : "BUILD MY PROGRAMME"}
               </button>
             </div>
           )}
-          {aiStep > 0 && <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setAiStep(s => s-1)}>← BACK</button>}
+          {currentQ.type === "choice" && (
+            <button className="t3d-btn" style={{ width: "100%", marginBottom: 12 }}
+              disabled={!String(aiAnswers[currentQ.id] || "").trim()} onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
+          )}
+          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+          <div style={{ display: "flex", gap: 10 }}>
+            {aiStep > 0 && <button className="t3d-btn t3d-btn-sm" onClick={() => setAiStep(step => step - 1)}>← BACK</button>}
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setView("home")}>CANCEL</button>
+          </div>
         </div>
       </div>
     );
@@ -3481,6 +3936,9 @@ Respond ONLY with valid JSON:
           {setupStep === 0 && (
             <div>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => {
+                setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder");
+              }}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
                 {[2,3,4,5,6].map(n => (
                   <button key={n} className="t3d-btn" style={{ width: 50, height: 50, fontSize: 18, padding: 0,
@@ -3662,6 +4120,11 @@ Respond ONLY with valid JSON:
 
   return (
     <div className="t3d-fade">
+      <div className="t3d-card" style={{ marginBottom: 16 }}>
+        <div className="t3d-ctitle">BUILD WITH AI COACH</div>
+        <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6 }}>10 quick questions, with room for your own answers. A programme built around you — exercises, sets, rep ranges, and tempo.</p>
+        <button className="t3d-btn" onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder"); }}>LET&apos;S BUILD MY PLAN →</button>
+      </div>
       {!split ? (
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>⚡</div>
@@ -5515,6 +5978,9 @@ function HabitsPage({ habits, setHabits }) {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [activeSessions, setActiveSessions] = useState({});
+  const [draftError, setDraftError] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [fitnessSessions, setFitnessSessions] = useState([]);
@@ -5526,21 +5992,84 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
+    let cancelled = false;
+    let recovering = false;
+    let expiryTimer;
+    let retryTimer;
+    const expire = async () => {
+      clearLoginWindow();
+      await supabase.auth.signOut({ scope: "local" });
+      if (!cancelled) window.location.replace("/login");
+    };
+    const accept = session => {
+      if (cancelled) return;
+      if (!session) { window.location.replace("/login"); return; }
+      const expiresAt = loginWindowExpiry(session.user.id) ?? beginLoginWindow(session.user.id);
+      if (expiresAt <= Date.now()) { void expire(); return; }
+      clearTimeout(expiryTimer);
+      expiryTimer = setTimeout(expire, expiresAt - Date.now());
+      setUser(previous => previous?.id === session.user.id ? previous : session.user);
+      setAuthError("");
       setAuthLoading(false);
-      if (!session) window.location.href = "/login";
+    };
+    const recover = async () => {
+      if (cancelled || recovering || document.visibilityState === "hidden") return;
+      recovering = true;
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (cancelled) return;
+        if (error) throw error;
+        accept(data.session);
+      } catch {
+        if (!cancelled) {
+          setAuthError("Reconnecting to your account. Your active session is kept on this browser.");
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(recover, 5000);
+        }
+      } finally { recovering = false; }
+    };
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (cancelled) return;
+      // Defer work out of Supabase's auth callback/lock.
+      if (event === "SIGNED_OUT") {
+        clearLoginWindow();
+        window.location.replace("/login");
+      } else if (session) {
+        setTimeout(() => accept(session), 0);
+      }
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (!session) window.location.href = "/login";
-    });
-    return () => subscription.unsubscribe();
+    void recover();
+    window.addEventListener("online", recover);
+    window.addEventListener("focus", recover);
+    document.addEventListener("visibilitychange", recover);
+    return () => {
+      cancelled = true;
+      clearTimeout(expiryTimer);
+      clearTimeout(retryTimer);
+      subscription.unsubscribe();
+      window.removeEventListener("online", recover);
+      window.removeEventListener("focus", recover);
+      document.removeEventListener("visibilitychange", recover);
+    };
   }, []);
 
+  useEffect(() => {
+    const active = event => {
+      if (event.detail.userId === user?.id) {
+        setActiveSessions(previous => ({ ...previous, [event.detail.kind]: event.detail.active }));
+      }
+    };
+    const failed = event => { if (event.detail.userId === user?.id) setDraftError(true); };
+    window.addEventListener("track3d-active-session", active);
+    window.addEventListener("track3d-draft-error", failed);
+    return () => {
+      window.removeEventListener("track3d-active-session", active);
+      window.removeEventListener("track3d-draft-error", failed);
+    };
+  }, [user?.id]);
   if (authLoading) return (
     <div style={{ minHeight: "100vh", background: "#080C10", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Orbitron',monospace", color: "#00FFB2", letterSpacing: 4, fontSize: 12 }}>
-      LOADING...
+      {authError || "LOADING..."}
     </div>
   );
 
@@ -5581,15 +6110,23 @@ export default function App() {
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
+                onClick={async () => { if (user) await clearDrafts(user.id).catch(() => {}); clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
                 SIGN OUT
               </button>
             </div>
           </div>
 
+          {authError && <p role="status" style={{ color: "#FFB547", fontSize: 12 }}>{authError}</p>}
+          {draftError && <p role="alert" style={{ color: "#FFB547", fontSize: 12 }}>This browser could not save your progress. Keep this page open until you finish.</p>}
+          {Object.entries(activeSessions).filter(([kind, active]) => active && kind !== tab).map(([kind]) => (
+            <button key={kind} className="t3d-btn" onClick={() => setTab(kind)}
+              style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON }}>
+              ACTIVE {kind === "morning" ? "MORNING ROUTINE" : "WORKOUT"} — CLICK TO CONTINUE →
+            </button>
+          ))}
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} />}
-          {tab === "morning" && <MorningSection user={user} />}
-          {tab === "fitness" && <Fitness user={user} />}
+          <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
+          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
