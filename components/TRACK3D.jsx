@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
+import { useSessionDraft, clearDrafts } from "../lib/session-drafts";
+import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -41,10 +43,6 @@ const TOTAL_P = MEALS.reduce((a, m) => a + m.p, 0);
 const TOTAL_C = MEALS.reduce((a, m) => a + m.c, 0);
 const TOTAL_F = MEALS.reduce((a, m) => a + m.f, 0);
 
-const heatData = Array.from({ length: 28 }, () => ({
-  val: Math.random() > 0.2 ? Math.floor(Math.random() * 4) + 1 : 0,
-}));
-
 const heatColor = (v) => {
   if (v === 0) return BORDER;
   if (v === 1) return "rgba(0,255,178,0.15)";
@@ -81,7 +79,7 @@ const css = `
   .t3d-sidebar { width: 210px; background: #0D1318; border-right: 1px solid #1A2530; display: flex; flex-direction: column; padding: 28px 0; flex-shrink: 0; }
   .t3d-logo { font-family: 'Orbitron', monospace; font-weight: 900; font-size: 20px; letter-spacing: 4px; padding: 0 22px 28px; background: linear-gradient(90deg,#00FFB2,#00C8FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
   .t3d-logo small { font-size: 9px; letter-spacing: 1px; display: block; -webkit-text-fill-color: #FFFFFF; color: #FFFFFF; margin-top: 4px; font-weight: 400; text-align: center; }
-  .t3d-nav { display: flex; align-items: center; gap: 10px; padding: 12px 22px; cursor: pointer; font-size: 11px; letter-spacing: 1px; color: #3A5060; border-left: 2px solid transparent; transition: all .18s; }
+  .t3d-nav { display: flex; align-items: center; gap: 10px; padding: 12px 22px; cursor: pointer; font-size: 11px; letter-spacing: 1px; color: #E0EAF0; border-left: 2px solid transparent; transition: all .18s; }
   .t3d-nav:hover { color: #8AABB8; background: rgba(0,255,178,.04); }
   .t3d-nav.on { color: #00FFB2; border-left-color: #00FFB2; background: rgba(0,255,178,.06); }
   .t3d-nav-icon { width: 18px; text-align: center; font-size: 14px; }
@@ -94,16 +92,23 @@ const css = `
     .t3d-grid12 { grid-template-columns: 1fr; }
     .t3d-grid2 { grid-template-columns: 1fr; }
   }
+  .t3d-set-input { width: 80px; height: 80px; background: #E0EAF0; border: none; border-radius: 8px; font-size: 28px; font-weight: 700; text-align: center; color: #080C10; outline: none; }
+  .t3d-set-confirm { width: 60px; height: 60px; background: #00FFB2; border: none; border-radius: 8px; font-size: 24px; cursor: pointer; color: #080C10; font-weight: 700; }
+  @media (max-width: 768px) {
+    .t3d-workout-card { padding: 16px 10px !important; }
+    .t3d-set-input { width: 38vw; height: 38vw; max-width: 150px; max-height: 150px; font-size: 38px; }
+    .t3d-set-confirm { width: 76px; height: 76px; font-size: 30px; }
+  }
   .t3d-bottom-nav { display: none; }
   @media (max-width: 768px) {
     .t3d-bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; background: #0D1318; border-top: 1px solid #1A2530; padding: 8px 0 12px; z-index: 50; justify-content: space-around; align-items: center; }
   }
-  .t3d-bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; padding: 4px 12px; border-radius: 8px; transition: all .18s; color: #3A5060; font-family: 'Orbitron', monospace; font-size: 7px; letter-spacing: 1px; border: none; background: transparent; }
+  .t3d-bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; padding: 4px 12px; border-radius: 8px; transition: all .18s; color: #E0EAF0; font-family: 'Orbitron', monospace; font-size: 7px; letter-spacing: 1px; border: none; background: transparent; }
   .t3d-bnav-item.on { color: #00FFB2; }
   .t3d-bnav-icon { font-size: 20px; }
   .t3d-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; }
   .t3d-title { font-family: 'Orbitron', monospace; font-size: 18px; font-weight: 700; letter-spacing: 3px; }
-  .t3d-date { font-size: 10px; color: #3A5060; letter-spacing: 2px; margin-top: 4px; }
+  .t3d-date { font-size: 10px; color: #E0EAF0; letter-spacing: 2px; margin-top: 4px; }
   .t3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #00FFB2; box-shadow: 0 0 8px #00FFB2; animation: t3dpulse 2s infinite; }
   @keyframes t3dpulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   @keyframes t3dfade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
@@ -115,7 +120,7 @@ const css = `
   .t3d-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(0,255,178,.25),transparent); }
   .t3d-ctitle { font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 3px; color: #2A3A48; text-transform: uppercase; margin-bottom: 14px; }
   .t3d-sval { font-family: 'Orbitron', monospace; font-size: 30px; font-weight: 700; margin: 6px 0 3px; }
-  .t3d-slabel { font-size: 10px; color: #3A5060; letter-spacing: 1px; }
+  .t3d-slabel { font-size: 10px; color: #E0EAF0; letter-spacing: 1px; }
   .t3d-sdelta { font-size: 10px; margin-top: 8px; }
   .t3d-up { color: #00FFB2; } .t3d-dn { color: #FF2D78; }
   .t3d-pbar { height: 4px; background: #1A2530; border-radius: 2px; overflow: hidden; margin-top: 10px; }
@@ -125,7 +130,7 @@ const css = `
   .t3d-hcheck { width: 20px; height: 20px; border-radius: 4px; border: 1px solid #1A2530; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; transition: all .18s; }
   .t3d-hcheck.done { background: rgba(0,255,178,.1); border-color: #00FFB2; color: #00FFB2; }
   .t3d-hname { flex: 1; font-size: 11px; }
-  .t3d-hstreak { font-family: 'Orbitron', monospace; font-size: 10px; color: #3A5060; }
+  .t3d-hstreak { font-family: 'Orbitron', monospace; font-size: 10px; color: #E0EAF0; }
   .t3d-hstreak.fire { color: #FF8C00; }
   .t3d-hmap { display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; margin-top: 8px; }
   .t3d-hcell { aspect-ratio:1; border-radius: 2px; transition: transform .15s; cursor: pointer; }
@@ -161,7 +166,7 @@ const css = `
   .t3d-cross-btn:hover { background: rgba(255,45,120,.2); transform: scale(1.05); }
   .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 10px; letter-spacing: 1px; cursor: pointer; border: 1px solid #1A2530; background: #111921; color: #4A6070; margin: 4px; transition: all .18s; }
   .t3d-task-chip.selected { border-color: #00FFB2; background: rgba(0,255,178,.08); color: #00FFB2; }
-  .t3d-task-chip:hover { border-color: #3A5060; color: #8AABB8; }
+  .t3d-task-chip:hover { border-color: #E0EAF0; color: #8AABB8; }
   .t3d-progress-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 24px; }
   .t3d-dot-step { width: 8px; height: 8px; border-radius: 50%; background: #1A2530; transition: all .3s; }
   .t3d-dot-step.active { background: #00FFB2; box-shadow: 0 0 6px #00FFB2; }
@@ -185,14 +190,14 @@ function ScoreRing({ score, size = 108 }) {
       </svg>
       <div style={{ marginTop: -(size / 2) - 8, paddingBottom: 6 }}>
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 28, fontWeight: 700, color }}>{score}</div>
-        <div style={{ fontSize: 9, letterSpacing: 2, color: "#3A5060" }}>SCORE</div>
+        <div style={{ fontSize: 9, letterSpacing: 2, color: "#E0EAF0" }}>SCORE</div>
       </div>
     </div>
   );
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits, system }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -216,12 +221,10 @@ User data today:
     setInput("");
     setTimeout(scroll, 50);
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
           system: system || defaultSystem,
           messages: updated,
         }),
@@ -236,18 +239,18 @@ User data today:
     setTimeout(scroll, 50);
   };
 
-  const activate = () => { setStarted(true); send(system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."); };
+  const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
 
   return (
     <div className="t3d-card" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div className="t3d-ctitle">{system ? "AI MORNING PLANNER" : "AI COACH"}</div>
+      <div className="t3d-ctitle">{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 0" }}>
           <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>
-          <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 18, textAlign: "center", lineHeight: 1.6, letterSpacing: 1 }}>
-            {system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time."}
+          <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 18, textAlign: "center", lineHeight: 1.6, letterSpacing: 1 }}>
+            {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time.")}
           </div>
-          <button className="t3d-btn" onClick={activate}>{system ? "BUILD MY ROUTINE" : "ACTIVATE COACH"}</button>
+          <button className="t3d-btn" onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : "ACTIVATE COACH")}</button>
         </div>
       ) : (
         <>
@@ -266,7 +269,7 @@ User data today:
             {loading && (
               <div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}>
                 <div className="t3d-ai-tag" style={{ color: NEON }}>AI</div>
-                <span className="t3d-cursor" style={{ color: "#3A5060", fontSize: 11 }}>Thinking</span>
+                <span className="t3d-cursor" style={{ color: "#E0EAF0", fontSize: 11 }}>Thinking</span>
               </div>
             )}
             <div ref={endRef} />
@@ -287,7 +290,11 @@ User data today:
 function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTimes, calcFinishTime, LOCKED_LAST, onBack, onSave }) {
   const [dragIdx, setDragIdx] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiExplanation, setAiExplanation] = useState("");
+  const [aiConversation, setAiConversation] = useState([]);
+  const [aiFeedback, setAiFeedback] = useState("");
+  const [aiError, setAiError] = useState("");
+  const [aiChangeStatus, setAiChangeStatus] = useState("");
+  const aiRequestActive = useRef(false);
 
   const draggable = scheduledTasks.filter(t => t.id !== "checkin");
   const locked = scheduledTasks.find(t => t.id === "checkin") || LOCKED_LAST;
@@ -295,7 +302,7 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
   const handleDragStart = (i) => setDragIdx(i);
   const handleDragOver = (e, i) => {
     e.preventDefault();
-    if (dragIdx === null || dragIdx === i) return;
+    if (aiLoading || dragIdx === null || dragIdx === i) return;
     const newList = [...draggable];
     const [moved] = newList.splice(dragIdx, 1);
     newList.splice(i, 0, moved);
@@ -304,45 +311,86 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
   };
   const handleDragEnd = () => setDragIdx(null);
 
-  const optimiseWithAI = async () => {
+  const optimiseWithAI = async (feedback = "") => {
+    if (aiRequestActive.current) return;
+    const message = feedback.trim() || "Optimise my routine now using what you know. Apply the best task order and briefly explain the main change. Do not wait for me to answer questions.";
+    const updated = [...aiConversation, { role: "user", content: message, hidden: !feedback.trim() }];
+    aiRequestActive.current = true;
     setAiLoading(true);
-    setAiExplanation("");
-    const taskList = draggable.map(t => t.name + " (" + t.duration + "min)").join(", ");
+    setAiError("");
+
+    const tasks = draggable.map((task, index) => ({
+      key: String(index), name: task.name, duration: task.duration,
+      scheduledTime: task.scheduledTime, preferredTime: task.preferredTime || null,
+    }));
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      let parsed;
+      for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: "You are a morning routine expert. Reorder the tasks for maximum effectiveness. Respond ONLY with JSON: {order: [task names], explanation: string}",
-          messages: [{ role: "user", content: "Optimise this morning routine: " + taskList }],
+          responseTokens: 2500,
+          system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical ordering immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible order just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. Explain the main concrete change. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach. If no reordering helps, briefly explain why the current order works.
+You can only reorder the supplied tasks. Keep every task exactly once, preserve durations, and leave the final check-in locked last. If the user needs duration, task, or wake-time changes, explain what they should edit using the routine controls. Timings will be recalculated consecutively from wake-up; if a fixed-time constraint cannot be met through reordering, explain that limitation instead of claiming it is satisfied.
+Respond only with valid JSON with double-quoted keys: {"order":["task key"],"explanation":"Your conversational reply, reasoning, and any follow-up question"}. Use the keys from the CURRENT task list below, not earlier keys. Your explanation must match the returned order: never claim you moved a task unless its returned position actually changes.
+Wake-up: ${wakeTime}.
+Current tasks: ${JSON.stringify(tasks)}.
+Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.duration })}.`,
+          messages: updated.map(({ role, content }, index) => ({ role, content: attempt && index === updated.length - 1 ? content + "\nReturn a complete valid JSON object with every current task key once. Use string keys and a brief explanation. Your previous response could not be applied." : content })),
         }),
       });
+      if (!res.ok) throw new Error("Request failed");
       const data = await res.json();
-      const text = data.content?.map(b => b.text || "").join("") || "";
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      if (parsed.order) {
-        const reordered = parsed.order.map(name => draggable.find(t => t.name === name)).filter(Boolean);
-        const remaining = draggable.filter(t => !reordered.find(r => r.name === t.name));
-        setScheduledTasks(recalcTimes([...reordered, ...remaining, locked]));
-        setAiExplanation(parsed.explanation || "");
+      const reply = data.content?.map(block => block.text || "").join("") || "";
+      try {
+        const cleaned = reply.replace(/```json|```/g, "").trim();
+        parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed.order)) {
+          parsed.order = parsed.order.map(key => {
+            const identifier = String(key);
+            if (tasks.some(task => task.key === identifier)) return identifier;
+            const matches = tasks.filter(task => task.name === identifier);
+            return matches.length === 1 ? matches[0].key : identifier;
+          });
+        }
+        const expected = new Set(tasks.map(task => task.key));
+        if (!Array.isArray(parsed.order) || parsed.order.length !== tasks.length ||
+            new Set(parsed.order).size !== tasks.length || parsed.order.some(key => !expected.has(key)) ||
+            typeof parsed.explanation !== "string" || !parsed.explanation.trim()) {
+          throw new Error("Invalid recommendation");
+        }
+        break;
+      } catch {
+        if (attempt === 1) throw new Error("Invalid recommendation");
       }
-    } catch (e) {
-      setAiExplanation("Could not optimise. Try again.");
+      }
+      const reordered = parsed.order.map(key => draggable[Number(key)]);
+      const movedCount = parsed.order.filter((key, index) => key !== String(index)).length;
+      if (movedCount > 0) {
+        setScheduledTasks(recalcTimes([...reordered, locked]));
+        setAiChangeStatus("Draft updated — " + movedCount + " tasks reordered. Review above, then lock it in.");
+      } else {
+        setAiChangeStatus("No order changes recommended — your current draft is unchanged.");
+      }
+      setAiConversation([...updated, { role: "assistant", content: parsed.explanation }]);
+      setAiFeedback("");
+    } catch {
+      setAiError("AI Coach could not revise your routine. The last successful update is still in place. Your message is kept — please try again.");
+    } finally {
+      aiRequestActive.current = false;
+      setAiLoading(false);
     }
-    setAiLoading(false);
   };
-
   return (
     <div>
       <div className="t3d-ctitle">DRAG TO REORDER YOUR ROUTINE</div>
-      <div style={{ marginBottom: 12, fontSize: 10, color: "#3A5060", letterSpacing: 1 }}>
+      <div style={{ marginBottom: 12, fontSize: 10, color: "#E0EAF0", letterSpacing: 1 }}>
         Hold and drag using the lines to reorder. Check-in is locked last.
       </div>
       <div style={{ marginBottom: 8 }}>
         {draggable.map((t, i) => (
-          <div key={t.id || i} draggable
+          <div key={t.id || i} draggable={!aiLoading}
             onDragStart={() => handleDragStart(i)}
             onDragOver={(e) => handleDragOver(e, i)}
             onDragEnd={handleDragEnd}
@@ -350,7 +398,7 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
             <div style={{ color: "#2A3A48", fontSize: 18, userSelect: "none" }}>≡</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 45 }}>{t.scheduledTime}</div>
             <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
-            <div style={{ fontSize: 10, color: "#3A5060" }}>{t.duration}min</div>
+            <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
           </div>
         ))}
       </div>
@@ -358,24 +406,44 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
         <div style={{ fontSize: 14 }}>🔒</div>
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 45 }}>{locked.scheduledTime}</div>
         <div style={{ flex: 1, fontSize: 12, color: "#4A6070" }}>{locked.icon} {locked.name}</div>
-        <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>LOCKED</div>
+        <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>LOCKED</div>
       </div>
       <div style={{ background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6, padding: 12, marginBottom: 16, display: "flex", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 11, color: "#3A5060" }}>ROUTINE FINISHES AT</span>
+        <span style={{ fontSize: 11, color: "#E0EAF0" }}>ROUTINE FINISHES AT</span>
         <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#00C8FF" }}>{calcFinishTime(wakeTime, scheduledTasks)}</span>
       </div>
-      {aiExplanation && (
-        <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
-          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#00FFB2", letterSpacing: 2, marginBottom: 6 }}>AI SUGGESTION</div>
-          {aiExplanation}
+      {aiChangeStatus && <p role="status" style={{ fontSize: 12, color: NEON, lineHeight: 1.5 }}>{aiChangeStatus}</p>}
+      <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
+        <div className="t3d-ai-tag" style={{ color: NEON }}>AI COACH</div>
+        <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+          Optimise now. Add feedback to make it fit your life.
+        </p>
+        <div role="log" aria-label="Routine planning conversation" aria-live="polite"
+          style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
+          {aiConversation.filter(message => !message.hidden).map((message, index) => (
+            <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2 }}>
+              <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "AI COACH"}</div>
+              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0" }}>{message.content}</div>
+            </div>
+          ))}
+          {aiLoading && <p role="status" style={{ fontSize: 11, color: NEON }}>Thinking about your routine...</p>}
         </div>
-      )}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack}>← TASKS</button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={optimiseWithAI} disabled={aiLoading}>
+        <label style={{ display: "block", fontSize: 11, color: "#E0EAF0" }}>
+          Anything to adjust?
+          <textarea className="t3d-input" rows={2} value={aiFeedback} disabled={aiLoading}
+            style={{ marginTop: 8, resize: "vertical" }}
+            placeholder="e.g. I need breakfast before the school run."
+            onChange={event => setAiFeedback(event.target.value)} />
+        </label>
+        {aiError && <p role="alert" style={{ fontSize: 11, color: NEON3 }}>{aiError}</p>}
+        <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} disabled={aiLoading || !aiFeedback.trim()}
+          onClick={() => optimiseWithAI(aiFeedback)}>SEND TO COACH</button>
+      </div>      <div style={{ display: "flex", gap: 8 }}>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack} disabled={aiLoading}>← TASKS</button>
+        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={() => optimiseWithAI(aiFeedback)} disabled={aiLoading}>
           {aiLoading ? "THINKING..." : "✨ OPTIMISE WITH AI"}
         </button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave}>
+        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave} disabled={aiLoading}>
           LOCK IT IN →
         </button>
       </div>
@@ -384,22 +452,499 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
 }
 
 // ─── Morning Section ──────────────────────────────────────────────────────────
+function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setScheduledTasks, onSave, onRebuild, onCancel }) {
+  const [newTaskName, setNewTaskName] = useState("");
+  const [newTaskTime, setNewTaskTime] = useState("");
+  const [newTaskDuration, setNewTaskDuration] = useState(10);
+  const [dragIdx, setDragIdx] = useState(null);
+  const durationTimerRef = useRef(null);
+
+  const timeToMinutes = (time) => {
+    if (!time) return 0;
+    const [h, m] = time.split(":").map(Number);
+    return h * 60 + m;
+  };
+
+  const minutesToTime = (minutes) => {
+    const mins = ((minutes % 1440) + 1440) % 1440;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  };
+
+  const changeWakeTime = (newWakeTime) => {
+    const oldMinutes = timeToMinutes(wakeTime);
+    const newMinutes = timeToMinutes(newWakeTime);
+    const difference = newMinutes - oldMinutes;
+
+    setWakeTime(newWakeTime);
+
+    setScheduledTasks(prev =>
+      prev.map(task => ({
+        ...task,
+        scheduledTime: task.scheduledTime
+          ? minutesToTime(timeToMinutes(task.scheduledTime) + difference)
+          : task.scheduledTime
+      }))
+    );
+  };
+
+  const updateTask = (index, field, value) => {
+    setScheduledTasks(prev =>
+      prev.map((task, i) =>
+        i === index
+          ? {
+              ...task,
+              [field]:
+                field === "duration"
+                  ? value === "" ? "" : Number(value)
+                  : value
+            }
+          : task
+      )
+    );
+
+    if (field === "duration" && value !== "" && Number(value) > 0) {
+      setScheduledTasks(current => {
+        const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+        let cursor = wakeH * 60 + wakeM;
+
+        return current.map(task => {
+          const h = Math.floor(cursor / 60) % 24;
+          const m = cursor % 60;
+
+          const scheduledTime =
+            `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+          cursor += Number(task.duration) || 0;
+
+          return {
+            ...task,
+            scheduledTime
+          };
+        });
+      });
+    }
+  };
+
+  const deleteTask = (index) => {
+    setScheduledTasks(prev => {
+      const filtered = prev.filter(
+        (task, i) => i !== index || task.id === "checkin"
+      );
+
+      const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+      let cursor = wakeH * 60 + wakeM;
+
+      return filtered.map(task => {
+        const h = Math.floor(cursor / 60) % 24;
+        const m = cursor % 60;
+
+        const scheduledTime =
+          `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+        cursor += Number(task.duration) || 0;
+
+        return {
+          ...task,
+          scheduledTime
+        };
+      });
+    });
+  };
+
+  const addTask = () => {
+    if (!newTaskName.trim()) return;
+
+    const checkin = scheduledTasks.find(t => t.id === "checkin");
+    const otherTasks = scheduledTasks.filter(t => t.id !== "checkin");
+
+    const newTask = {
+      id: `custom-${Date.now()}`,
+      name: newTaskName.trim(),
+      duration: Number(newTaskDuration) || 10,
+      type: "tick",
+      icon: "▸"
+    };
+
+    const list = checkin
+      ? [...otherTasks, newTask, checkin]
+      : [...otherTasks, newTask];
+
+    const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+    let cursor = wakeH * 60 + wakeM;
+
+    const recalculated = list.map(task => {
+      const h = Math.floor(cursor / 60) % 24;
+      const m = cursor % 60;
+
+      const scheduledTime =
+        `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+      cursor += Number(task.duration) || 5;
+
+      return {
+        ...task,
+        scheduledTime
+      };
+    });
+
+    setScheduledTasks(recalculated);
+
+    setNewTaskName("");
+    setNewTaskTime("");
+    setNewTaskDuration(10);
+  };
+
+  const handleDragStart = (index) => {
+    setDragIdx(index);
+  };
+
+  const handleDragOver = (e, index) => {
+    e.preventDefault();
+
+    if (dragIdx === null || dragIdx === index) return;
+
+    const list = [...scheduledTasks];
+
+    if (list[index]?.id === "checkin") return;
+    if (list[dragIdx]?.id === "checkin") return;
+
+    const [moved] = list.splice(dragIdx, 1);
+    list.splice(index, 0, moved);
+
+    const [wakeH, wakeM] = wakeTime.split(":").map(Number);
+    let cursor = wakeH * 60 + wakeM;
+
+    const recalculated = list.map(task => {
+      const h = Math.floor(cursor / 60) % 24;
+      const m = cursor % 60;
+      const scheduledTime = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+
+      cursor += Number(task.duration) || 5;
+
+      return {
+        ...task,
+        scheduledTime
+      };
+    });
+
+    setScheduledTasks(recalculated);
+    setDragIdx(index);
+  };
+
+  return (
+    <div className="t3d-fade">
+      <div className="t3d-card">
+
+        <div className="t3d-ctitle" style={{ marginBottom: 20 }}>
+          EDIT MORNING ROUTINE
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          <div style={{
+            fontSize: 10,
+            color: "#E0EAF0",
+            letterSpacing: 1,
+            marginBottom: 8
+          }}>
+            WAKE UP TIME
+          </div>
+
+          <input
+            type="time"
+            value={wakeTime}
+            onChange={e => changeWakeTime(e.target.value)}
+            className="t3d-input"
+            style={{
+              maxWidth: 180,
+              colorScheme: "dark"
+            }}
+          />
+
+          <div style={{
+            fontSize: 9,
+            color: "#8AABB8",
+            marginTop: 7
+          }}>
+            Changing your wake time moves the full routine with it.
+          </div>
+        </div>
+
+        <div style={{
+          fontSize: 10,
+          color: "#E0EAF0",
+          letterSpacing: 1,
+          marginBottom: 10
+        }}>
+          YOUR ROUTINE
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "24px 1fr 100px 80px 40px",
+            gap: 8,
+            alignItems: "center",
+            marginBottom: 6,
+            padding: "0 0 6px"
+          }}
+        >
+          <div />
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TASK</div>
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TIME</div>
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>MINUTES</div>
+          <div />
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          {scheduledTasks.map((task, i) => {
+            const locked = task.id === "checkin";
+
+            return (
+              <div
+                key={task.id || i}
+                draggable={!locked}
+                onDragStart={() => handleDragStart(i)}
+                onDragOver={e => handleDragOver(e, i)}
+                onDragEnd={() => setDragIdx(null)}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "24px 1fr 100px 80px 40px",
+                  gap: 8,
+                  alignItems: "center",
+                  padding: "10px 0",
+                  borderBottom: `1px solid ${BORDER}`,
+                  opacity: locked ? 0.7 : 1
+                }}
+              >
+                <div
+                  style={{
+                    cursor: locked ? "default" : "grab",
+                    color: "#4A6070",
+                    fontSize: 18
+                  }}
+                >
+                  {locked ? "🔒" : "≡"}
+                </div>
+
+                <input
+                  className="t3d-input"
+                  value={task.name}
+                  disabled={locked}
+                  onChange={e => updateTask(i, "name", e.target.value)}
+                  style={{ padding: "9px 10px" }}
+                />
+
+                <input
+                  type="time"
+                  className="t3d-input"
+                  value={task.scheduledTime || ""}
+                  onChange={e => updateTask(i, "scheduledTime", e.target.value)}
+                  style={{
+                    padding: "9px 6px",
+                    colorScheme: "dark"
+                  }}
+                />
+
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="number"
+                    min="1"
+                    className="t3d-input"
+                    value={task.duration ?? ""}
+                    onChange={e => updateTask(i, "duration", e.target.value)}
+                    style={{
+                      padding: "9px 30px 9px 6px",
+                      textAlign: "center"
+                    }}
+                  />
+                  <span
+                    style={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      fontSize: 8,
+                      color: "#4A6070",
+                      pointerEvents: "none"
+                    }}
+                  >
+                    min
+                  </span>
+                </div>
+
+                {!locked ? (
+                  <button
+                    className="t3d-btn t3d-btn-sm t3d-btn-red"
+                    onClick={() => deleteTask(i)}
+                    style={{ padding: 8 }}
+                  >
+                    ×
+                  </button>
+                ) : (
+                  <div />
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{
+          padding: 14,
+          border: `1px solid ${BORDER}`,
+          borderRadius: 7,
+          marginBottom: 20
+        }}>
+          <div className="t3d-ctitle">ADD TASK</div>
+
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 110px",
+            gap: 8,
+            marginBottom: 10
+          }}>
+            <input
+              className="t3d-input"
+              placeholder="Task name..."
+              value={newTaskName}
+              onChange={e => setNewTaskName(e.target.value)}
+            />
+
+            <div style={{ position: "relative" }}>
+              <input
+                type="number"
+                min="1"
+                className="t3d-input"
+                value={newTaskDuration}
+                onChange={e => setNewTaskDuration(e.target.value)}
+                style={{ paddingRight: 32 }}
+              />
+              <span
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  fontSize: 8,
+                  color: "#4A6070",
+                  pointerEvents: "none"
+                }}
+              >
+                min
+              </span>
+            </div>
+          </div>
+
+          <button
+            className="t3d-btn t3d-btn-sm"
+            onClick={addTask}
+            disabled={!newTaskName.trim()}
+          >
+            + ADD TO ROUTINE
+          </button>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="t3d-btn t3d-btn-sm"
+            onClick={onCancel}
+          >
+            ← CANCEL
+          </button>
+
+          <button
+            className="t3d-btn t3d-btn-sm t3d-btn-red"
+            onClick={onRebuild}
+          >
+            CHANGE ROUTINE
+          </button>
+
+          <button
+            className="t3d-btn"
+            style={{
+              flex: 1,
+              background: "rgba(0,255,178,.12)",
+              borderColor: "rgba(0,255,178,.5)"
+            }}
+            onClick={onSave}
+          >
+            SAVE CHANGES
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+function wakeTimingSummary(timing) {
+  if (!timing?.actual || !timing?.planned) return "Wake-up time not recorded";
+  const minutes = time => {
+    const [hours, mins] = time.split(":").map(Number);
+    return hours * 60 + mins;
+  };
+  // Compare nearby clock times correctly across midnight.
+  const difference = ((minutes(timing.actual) - minutes(timing.planned) + 2160) % 1440) - 720;
+  const comparison = difference === 0 ? "on time" : difference > 0
+    ? `${difference} min later than planned` : `${Math.abs(difference)} min earlier than planned`;
+  return `Wake-up: ${timing.actual} · Planned: ${timing.planned} · ${comparison}`;
+}
 function MorningSection({ user }) {
   const [view, setView] = useState("home");
   const [setupStep, setSetupStep] = useState(0);
   const [wakeTime, setWakeTime] = useState("06:00");
   const [selectedTasks, setSelectedTasks] = useState([]);
   const [customTask, setCustomTask] = useState("");
+  const [customTaskDuration, setCustomTaskDuration] = useState(10);
   const [scheduledTasks, setScheduledTasks] = useState([]);
   const [checkinStep, setCheckinStep] = useState(0);
   const [checkinData, setCheckinData] = useState({});
   const [tempInput, setTempInput] = useState("");
-  const [photoPreview, setPhotoPreview] = useState(null);
+  const [photoAngleIdx, setPhotoAngleIdx] = useState(0);
+  const [photoFiles, setPhotoFiles] = useState({ front: null, side: null, back: null });
+  const [photoPreviews, setPhotoPreviews] = useState({ front: null, side: null, back: null });
+  const [savingCheckin, setSavingCheckin] = useState(false);
   const [isSetup, setIsSetup] = useState(false);
   const [completedToday, setCompletedToday] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  const [completedAction, setCompletedAction] = useState(null);
+  const [editSubmissionData, setEditSubmissionData] = useState({});
+  const [submissionError, setSubmissionError] = useState("");
+  // Live Morning
+  const [liveTaskIndex, setLiveTaskIndex] = useState(0);
+  const [liveDeadline, setLiveDeadline] = useState(null);
+  const [liveNow, setLiveNow] = useState(0);
+  const liveSecondsLeft = liveDeadline ? Math.max(0, Math.ceil((liveDeadline - liveNow) / 1000)) : 0;
+  const [liveStartedAt, setLiveStartedAt] = useState(null);
+  const [liveInputActive, setLiveInputActive] = useState(false);
+
+  const morningDraft = useMemo(() => (
+    ["liveMorning", "checkin", "wakeCheckin"].includes(view) ? {
+      view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
+      liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive,
+    } : null
+  ), [view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
+    liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive]);
+  useSessionDraft(user?.id, "morning", morningDraft, draft => {
+    if (!["liveMorning", "checkin", "wakeCheckin"].includes(draft.view)) return;
+    setCheckinStep(draft.checkinStep || 0);
+    setCheckinData(draft.checkinData || {});
+    setTempInput(draft.tempInput || "");
+    setPhotoAngleIdx(draft.photoAngleIdx || 0);
+    setPhotoFiles(draft.photoFiles || { front: null, side: null, back: null });
+    setPhotoPreviews(Object.fromEntries(["front", "side", "back"].map(angle => [
+      angle, draft.photoFiles?.[angle] ? URL.createObjectURL(draft.photoFiles[angle]) : null,
+    ])));
+    setLiveTaskIndex(draft.liveTaskIndex || 0);
+    setLiveDeadline(draft.liveDeadline || null);
+    setLiveStartedAt(draft.liveStartedAt || null);
+    setLiveInputActive(Boolean(draft.liveInputActive));
+    setLiveNow(Date.now());
+    setView(draft.view);
+  });
   const fileRef = useRef(null);
 
   const getLocalDate = () => {
@@ -409,11 +954,12 @@ function MorningSection({ user }) {
   const today = getLocalDate();
 
   const NON_NEGS = [
-    { id: "weight", name: "Log body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
-    { id: "sleep", name: "Log sleep duration", type: "sleep", icon: "😴", duration: 1 },
-    { id: "photo", name: "Progress photo", type: "photo", icon: "📸", duration: 2 },
+    { id: "sleep", name: "Work out sleep duration", type: "sleep", icon: "😴", duration: 1 },
+    { id: "weight", name: "Check body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
+    { id: "photos", name: "Take progress photos", type: "photos3", icon: "📸", duration: 3 },
   ];
   const LOCKED_LAST = { id: "checkin", name: "TRACK3D Morning Check-in", type: "tick", icon: "📱", duration: 2 };
+  const PHOTO_ANGLES = ["front", "side", "back"];
 
   // Load routine and history from Supabase on mount
   useEffect(() => {
@@ -478,40 +1024,103 @@ function MorningSection({ user }) {
   };
 
   const calcFinishTime = (wake, tasks) => {
-    const [h, m] = wake.split(":").map(Number);
-    const totalMins = tasks.reduce((a, t) => a + (t.duration || 10), 0);
-    const finishMins = h * 60 + m + totalMins;
-    const fh = Math.floor(finishMins / 60) % 24;
-    const fm = finishMins % 60;
-    return `${String(fh).padStart(2,"0")}:${String(fm).padStart(2,"0")}`;
+    if (!tasks?.length) return wake;
+
+    const taskEnds = tasks
+      .filter(t => t.scheduledTime)
+      .map(t => {
+        const [h, m] = t.scheduledTime.split(":").map(Number);
+        return (h * 60) + m + (Number(t.duration) || 0);
+      });
+
+    if (!taskEnds.length) {
+      const [h, m] = wake.split(":").map(Number);
+      const totalMins = tasks.reduce((a, t) => a + (Number(t.duration) || 10), 0);
+      const finishMins = h * 60 + m + totalMins;
+      return `${String(Math.floor(finishMins / 60) % 24).padStart(2,"0")}:${String(finishMins % 60).padStart(2,"0")}`;
+    }
+
+    const finishMins = Math.max(...taskEnds);
+
+    return `${String(Math.floor(finishMins / 60) % 24).padStart(2,"0")}:${String(finishMins % 60).padStart(2,"0")}`;
   };
 
   const toggleTask = (task) => {
     setSelectedTasks(prev =>
       prev.find(t => t.name === task.name)
         ? prev.filter(t => t.name !== task.name)
-        : [...prev, { ...task, id: task.name }]
+        : [...prev, { ...task, id: task.name, preferredTime: "" }]
+    );
+  };
+
+  const updateSelectedTask = (index, field, value) => {
+    setSelectedTasks(prev =>
+      prev.map((task, i) =>
+        i === index
+          ? {
+              ...task,
+              [field]:
+                field === "duration"
+                  ? value === "" ? "" : Number(value)
+                  : value
+            }
+          : task
+      )
     );
   };
 
   const addCustomTask = () => {
     if (!customTask.trim()) return;
-    setSelectedTasks(prev => [...prev, { id: customTask, name: customTask, duration: 10, type: "tick" }]);
+
+    setSelectedTasks(prev => [
+      ...prev,
+      {
+        id: `custom-${Date.now()}`,
+        name: customTask.trim(),
+        duration: Number(customTaskDuration) || 10,
+        type: "tick",
+        icon: "▸"
+      }
+    ]);
+
     setCustomTask("");
+    setCustomTaskDuration(10);
   };
 
   const buildSchedule = (orderedTasks) => {
     const [h, m] = wakeTime.split(":").map(Number);
     let cursor = h * 60 + m;
-    const all = [...(orderedTasks || [...NON_NEGS, ...selectedTasks]), LOCKED_LAST];
+
+    const all = [
+      ...(orderedTasks || [...NON_NEGS, ...selectedTasks]),
+      LOCKED_LAST
+    ];
+
     return all.map(task => {
+      if (task.preferredTime) {
+        const [preferredH, preferredM] = task.preferredTime.split(":").map(Number);
+        const preferredMinutes = preferredH * 60 + preferredM;
+
+        if (preferredMinutes > cursor) {
+          cursor = preferredMinutes;
+        }
+      }
+
       const th = Math.floor(cursor / 60) % 24;
       const tm = cursor % 60;
-      const time = `${String(th).padStart(2,"0")}:${String(tm).padStart(2,"0")}`;
-      cursor += task.duration || 5;
-      return { ...task, scheduledTime: time };
+
+      const time =
+        `${String(th).padStart(2, "0")}:${String(tm).padStart(2, "0")}`;
+
+      cursor += Number(task.duration) || 5;
+
+      return {
+        ...task,
+        scheduledTime: time
+      };
     });
   };
+           
 
   const recalcTimes = (tasks) => {
     const [h, m] = wakeTime.split(":").map(Number);
@@ -525,8 +1134,143 @@ function MorningSection({ user }) {
     });
   };
 
+  const startRoutineSetup = () => {
+    const lockedIds = new Set([
+      ...NON_NEGS.map(task => task.id),
+      LOCKED_LAST.id
+    ]);
+
+    const existingHabits = scheduledTasks
+      .filter(task => !lockedIds.has(task.id))
+      .map(task => ({
+        ...task,
+        preferredTime: task.scheduledTime || ""
+      }));
+
+    setSelectedTasks(existingHabits);
+    setSetupStep(0);
+    setView("setup");
+  };
+
   const allSteps = scheduledTasks.length > 0 ? scheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
+
+  const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
+  const currentLiveTask = liveRoutineSteps[liveTaskIndex];
+
   const currentStep = allSteps[checkinStep];
+
+  useEffect(() => {
+    if (!liveDeadline) return;
+    const updateClock = () => setLiveNow(Date.now());
+    updateClock();
+    const timer = setInterval(updateClock, 1000);
+    window.addEventListener("focus", updateClock);
+    document.addEventListener("visibilitychange", updateClock);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", updateClock);
+      document.removeEventListener("visibilitychange", updateClock);
+    };
+  }, [liveDeadline]);
+
+  const startLiveTimer = (task) => {
+    const now = Date.now();
+    setLiveNow(now);
+    setLiveDeadline(now + (Number(task?.duration) || 1) * 60000);
+  };
+  const recordLiveWakeTime = () => {
+    const now = new Date();
+    setCheckinData({
+      wakeTiming: {
+        actual: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+        planned: wakeTime,
+        source: "live",
+        startedAt: now.toISOString(),
+      },
+    });
+  };
+  const moveToNextLiveTask = () => {
+    const nextIndex = liveTaskIndex + 1;
+
+    if (nextIndex >= liveRoutineSteps.length) {
+      setLiveDeadline(null);
+      setCheckinStep(allSteps.findIndex(step => step.id === "checkin"));
+      setCheckinData(prev => {
+        const updated = { ...prev };
+
+        liveRoutineSteps.forEach(step => {
+          const key = step.id || step.name;
+
+          if (updated[key] === undefined && step.type === "tick") {
+            updated[key] = true;
+          }
+        });
+
+        return updated;
+      });
+
+      setTempInput("");
+      setPhotoAngleIdx(0);
+      setPhotoFiles({ front: null, side: null, back: null });
+      setPhotoPreviews({ front: null, side: null, back: null });
+      setView("checkin");
+      return;
+    }
+
+    setLiveTaskIndex(nextIndex);
+    startLiveTimer(liveRoutineSteps[nextIndex]);
+  };
+
+  const skipLiveTask = () => {
+    if (!currentLiveTask) return;
+
+    setCheckinData(prev => ({
+      ...prev,
+      [currentLiveTask.id || currentLiveTask.name]: false
+    }));
+
+    moveToNextLiveTask();
+  };
+
+  const completeLiveTask = () => {
+    if (!currentLiveTask) return;
+
+    setCheckinData(prev => ({
+      ...prev,
+      [currentLiveTask.id || currentLiveTask.name]: true
+    }));
+
+    moveToNextLiveTask();
+  };
+
+  const finishLiveInputStep = () => {
+    if (!liveInputActive) {
+      setCheckinStep(s => s + 1);
+      return;
+    }
+
+    setLiveInputActive(false);
+
+    const nextIndex = liveTaskIndex + 1;
+
+    if (nextIndex >= liveRoutineSteps.length) {
+      setLiveDeadline(null);
+      const checkinIndex = allSteps.findIndex(
+        step => step.id === "checkin"
+      );
+
+      setCheckinStep(checkinIndex);
+      setTempInput("");
+      setView("checkin");
+      return;
+    }
+
+    setLiveTaskIndex(nextIndex);
+    startLiveTimer(liveRoutineSteps[nextIndex]);
+
+    setTempInput("");
+    setView("liveMorning");
+  };
 
   const morningScore = (data) => {
     const total = allSteps.length;
@@ -537,7 +1281,7 @@ function MorningSection({ user }) {
       const val = data[key];
       if (step.type === "number" && val && val !== "") points++;
       else if (step.type === "sleep" && val && val !== "") points++;
-      else if (step.type === "photo" && val && val !== "skipped") points++;
+      else if (step.type === "photos3" && val && Object.values(val).some(v => v && v !== "skipped")) points++;
       else if (step.type === "tick" && val === true) points++;
     });
     return Math.round((points / total) * 10);
@@ -557,11 +1301,155 @@ function MorningSection({ user }) {
   if (loading) return (
     <div className="t3d-fade">
       <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
-        <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2 }}>LOADING MORNING DATA...</div>
+        <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 2 }}>LOADING MORNING DATA...</div>
       </div>
     </div>
   );
 
+  if (view === "wakeCheckin") {
+    return (
+      <div className="t3d-fade">
+        <form className="t3d-card" onSubmit={event => {
+          event.preventDefault();
+          if (!checkinData.wakeTiming?.actual) return;
+          setView("checkin");
+        }}>
+          <div className="t3d-ctitle">WHAT TIME DID YOU WAKE UP?</div>
+          <p style={{ fontSize: 12, color: "#8AABB8" }}>Your planned wake-up time was {wakeTime}. Enter when you actually woke up.</p>
+          <label style={{ fontSize: 12 }}>
+            Actual wake-up time
+            <input className="t3d-input" type="time" required style={{ marginTop: 8, colorScheme: "dark" }}
+              value={checkinData.wakeTiming?.actual || ""}
+              onChange={event => setCheckinData(data => ({ ...data, wakeTiming: {
+                actual: event.target.value, planned: wakeTime, source: "manual",
+              } }))} />
+          </label>
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button className="t3d-btn" type="submit">CONTINUE</button>
+            <button className="t3d-btn" type="button" onClick={() => setView("home")}>CANCEL</button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+  // Correct today's saved answers without changing the routine or stored photos.
+  if (view === "editSubmission") {
+    return (
+      <div className="t3d-fade">
+        <form className="t3d-card" onSubmit={async event => {
+          event.preventDefault();
+          if (savingCheckin) return;
+          setSavingCheckin(true);
+          setSubmissionError("");
+          try {
+            const updatedData = { ...editSubmissionData };
+            const updatedPhotos = { front: "skipped", side: "skipped", back: "skipped", ...editSubmissionData.photos };
+            for (const angle of PHOTO_ANGLES) {
+              const file = photoFiles[angle];
+              if (!file) continue;
+              const extension = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "") || "jpg";
+              const path = `${user.id}/${today}/${angle}-${crypto.randomUUID()}.${extension}`;
+              const { error: uploadError } = await supabase.storage.from("checkin-photos").upload(path, file);
+              if (uploadError) throw uploadError;
+              updatedPhotos[angle] = path;
+            }
+            if (editSubmissionData.photos || PHOTO_ANGLES.some(angle => photoFiles[angle])) {
+              updatedData.photos = updatedPhotos;
+            }            const { error } = await supabase.from("morning_checkins").upsert({
+              user_id: user.id,
+              date: today,
+              score: morningScore(updatedData),
+              data: updatedData,
+            }, { onConflict: "user_id,date" });
+            if (error) throw error;
+            await loadData();
+            setView("home");
+          } catch {
+            setSubmissionError("Your changes could not be saved. Please try again.");
+          } finally {
+            setSavingCheckin(false);
+          }
+        }}>
+          <div className="t3d-ctitle">EDIT TODAY&apos;S SUBMISSION</div>
+          <p style={{ fontSize: 12, color: "#8AABB8" }}>Correct your answers to reflect what actually happened this morning.</p>
+          <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
+            Actual wake-up time
+            <input className="t3d-input" type="time" style={{ marginTop: 8, colorScheme: "dark" }}
+              value={editSubmissionData.wakeTiming?.actual || ""}
+              onChange={event => setEditSubmissionData(data => ({ ...data, wakeTiming: {
+                ...data.wakeTiming,
+                actual: event.target.value,
+                planned: data.wakeTiming?.planned || wakeTime,
+                source: "manual",
+              } }))} />
+          </label>          {allSteps.map(step => {
+            const key = step.id || step.name;
+            const value = editSubmissionData[key];
+            return (
+              <div key={key} style={{ padding: "14px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <label style={{ display: "block", fontSize: 12 }}>
+                  {step.icon || "▸"} {step.name}
+                  {["sleep", "number"].includes(step.type) && (
+                    <input className="t3d-input" style={{ marginTop: 8 }}
+                      type={step.type === "number" ? "number" : "text"}
+                      step={step.type === "number" ? "any" : undefined}
+                      placeholder={step.type === "sleep" ? "e.g. 7h 30m" : step.unit}
+                      value={typeof value === "string" || typeof value === "number" ? value : ""}
+                      onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value }))} />
+                  )}
+                  {step.type === "tick" && (
+                    <select className="t3d-input" style={{ marginTop: 8 }} value={value === true ? "yes" : "no"}
+                      onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value === "yes" }))}>
+                      <option value="yes">Completed</option>
+                      <option value="no">Not completed</option>
+                    </select>
+                  )}
+                </label>
+                {step.type === "photos3" && (
+                  <div style={{ fontSize: 11, color: "#8AABB8", marginTop: 8 }}>
+                    {PHOTO_ANGLES.map(angle => (
+                      <div key={angle} style={{ marginBottom: 16 }}>
+                        <label style={{ display: "block" }}>
+                          {angle.toUpperCase()} — {photoFiles[angle] ? "New photo selected" : value?.[angle] && value[angle] !== "skipped" ? "Photo saved · choose a replacement below" : "No photo saved"}
+                          <input type="file" accept="image/*" disabled={savingCheckin}
+                            style={{ display: "block", marginTop: 8, maxWidth: "100%", fontSize: 11 }}
+                            onChange={event => {
+                              const file = event.target.files?.[0];
+                              if (!file) return;
+                              if (photoPreviews[angle]) URL.revokeObjectURL(photoPreviews[angle]);
+                              setPhotoFiles(files => ({ ...files, [angle]: file }));
+                              setPhotoPreviews(previews => ({ ...previews, [angle]: URL.createObjectURL(file) }));
+                            }} />
+                        </label>
+                        {photoPreviews[angle] && (
+                          <div style={{ marginTop: 8 }}>
+                            <img src={photoPreviews[angle]} alt={`Selected ${angle} progress photo`}
+                              style={{ width: 100, height: 120, objectFit: "cover", borderRadius: 6 }} />
+                            <button className="t3d-btn t3d-btn-sm" type="button" disabled={savingCheckin}
+                              style={{ display: "block", marginTop: 6 }} onClick={() => {
+                                URL.revokeObjectURL(photoPreviews[angle]);
+                                setPhotoFiles(files => ({ ...files, [angle]: null }));
+                                setPhotoPreviews(previews => ({ ...previews, [angle]: null }));
+                              }}>UNDO PHOTO CHANGE</button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    Photos you leave unchanged will be kept. New photos upload when you save.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {submissionError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{submissionError}</p>}
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : "SAVE CHANGES"}</button>
+            <button className="t3d-btn t3d-btn-red" type="button" disabled={savingCheckin} onClick={() => setView("home")}>CANCEL</button>
+          </div>
+        </form>
+      </div>
+    );
+  }
   // HOME view
   if (view === "home") {
     return (
@@ -570,7 +1458,7 @@ function MorningSection({ user }) {
           <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
             <div style={{ fontSize: 40, marginBottom: 16 }}>🌅</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>MORNING ROUTINE</div>
-            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 28, lineHeight: 1.7 }}>
+            <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>
               Build your optimal morning routine.<br />Track it every day. Win every morning.
             </div>
             <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => setView("setup")}>
@@ -602,21 +1490,141 @@ function MorningSection({ user }) {
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 2, marginBottom: 8 }}>
                     MORNING COMPLETE
                   </div>
-                  <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 1 }}>
+                  <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>
                     Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
                   </div>
+                  <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
+                    {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
+                  </p>
+                  <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
+                    <button type="button" onClick={() => setCompletedAction("edit")}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
+                      Edit submission
+                    </button>
+                    <button type="button" onClick={() => setCompletedAction("redo")}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
+                      Do again
+                    </button>
+                  </div>
+                  {completedAction && (
+                    <div role="alert" style={{ marginTop: 14, padding: 18, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
+                      <div style={{ color: "#FFB547", fontSize: 12, fontWeight: 700 }}>⚠ Keep your progress honest</div>
+                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.7 }}>
+                        Mistakes happen, and it is okay to correct them. Being honest about your morning helps you reflect, learn, and keep moving forward.
+                        {completedAction === "redo" ? " Choose Live Morning or Normal Check-in to start again. Your current submission will only be replaced when you save the new one." : " Only change your answers to reflect what actually happened."}
+                      </p>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
+                          const action = completedAction;
+                          setCompletedAction(null);
+                          setSubmissionError("");
+                          if (action === "edit") {
+                            setEditSubmissionData({ ...(history.find(entry => entry.date === today)?.data || {}) });
+                            setPhotoFiles({ front: null, side: null, back: null });
+                            setPhotoPreviews({ front: null, side: null, back: null });
+                            setView("editSubmission");
+                          } else {
+                            setCheckinData({});
+                            setCheckinStep(0);
+                            setTempInput("");
+                            setPhotoAngleIdx(0);
+                            setPhotoFiles({ front: null, side: null, back: null });
+                            setPhotoPreviews({ front: null, side: null, back: null });
+                            setLiveInputActive(false);
+                            setLiveTaskIndex(0);
+                            startLiveTimer(liveRoutineSteps[0]);
+                            setLiveStartedAt(Date.now());
+                        recordLiveWakeTime();
+                            setView("liveMorning");
+                          }
+                        }}>{completedAction === "edit" ? "CONTINUE TO EDIT" : "START LIVE MORNING"}</button>
+                        {completedAction === "redo" && (
+                          <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
+                            setCompletedAction(null);
+                            setSubmissionError("");
+                            setCheckinData({});
+                            setCheckinStep(0);
+                            setTempInput("");
+                            setPhotoAngleIdx(0);
+                            setPhotoFiles({ front: null, side: null, back: null });
+                            setPhotoPreviews({ front: null, side: null, back: null });
+                            setLiveInputActive(false);
+                            setLiveDeadline(null);
+                            setLiveStartedAt(null);
+                            setView("wakeCheckin");
+                          }}>NORMAL CHECK-IN</button>
+                        )}                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => setCompletedAction(null)}>CANCEL</button>
+                      </div>
+                    </div>
+                  )}
                 </>
               ) : (
                 <>
-                  <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20, letterSpacing: 1 }}>
+                  <div style={{
+                    fontSize: 12,
+                    color: "#E0EAF0",
+                    marginBottom: 8,
+                    letterSpacing: 1
+                  }}>
                     READY TO START YOUR MORNING?
                   </div>
-                  <button
-                    className="t3d-big-btn"
-                    style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
-                    onClick={() => { setCheckinStep(0); setCheckinData({}); setTempInput(""); setView("checkin"); }}>
-                    ☀️ MORNING CHECK-IN
-                  </button>
+
+                  <div style={{
+                    fontSize: 10,
+                    color: "#4A6070",
+                    marginBottom: 20,
+                    lineHeight: 1.6
+                  }}>
+                    Follow your routine live or check in normally when you're finished.
+                  </div>
+
+                  <div style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10
+                  }}>
+                    <button
+                      className="t3d-big-btn"
+                      style={{
+                        background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))",
+                        border: `1px solid ${NEON}`,
+                        color: NEON,
+                        fontSize: 13,
+                        letterSpacing: 2
+                      }}
+                      onClick={() => {
+                        setLiveTaskIndex(0);
+                        startLiveTimer(liveRoutineSteps[0]);
+                        setLiveInputActive(false);
+                        setLiveStartedAt(Date.now());
+                        recordLiveWakeTime();
+                        setView("liveMorning");
+                      }}
+                    >
+                      ▶ START LIVE MORNING
+                    </button>
+
+                    <button
+                      className="t3d-btn"
+                      style={{
+                        width: "100%",
+                        padding: 14
+                      }}
+                      onClick={() => {
+                        setCheckinStep(0);
+                        setCheckinData({});
+                        setTempInput("");
+                        setPhotoAngleIdx(0);
+                        setPhotoFiles({ front: null, side: null, back: null });
+                        setPhotoPreviews({ front: null, side: null, back: null });
+                        setLiveInputActive(false);
+                        setLiveDeadline(null);
+                        setView("wakeCheckin");
+                      }}
+                    >
+                      ✓ NORMAL MORNING CHECK-IN
+                    </button>
+                  </div>
                 </>
               )}
             </div>
@@ -625,13 +1633,27 @@ function MorningSection({ user }) {
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                 <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY'S SCHEDULE</div>
-                <button className="t3d-btn t3d-btn-sm" onClick={() => { setView("setup"); setSetupStep(0); }}>EDIT</button>
+                <div style={{ display: "flex", gap: 8 }}>
+  <button
+    className="t3d-btn t3d-btn-sm"
+    onClick={() => setView("editRoutine")}
+  >
+    EDIT ROUTINE
+  </button>
+
+  <button
+    className="t3d-btn t3d-btn-sm t3d-btn-red"
+    onClick={startRoutineSetup}
+  >
+    CHANGE ROUTINE
+  </button>           
+</div>
               </div>
               {scheduledTasks.map((t, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, width: 45 }}>{t.scheduledTime}</div>
                   <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
-                  <div style={{ fontSize: 10, color: "#3A5060" }}>{t.duration}min</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
                 </div>
               ))}
             </div>
@@ -656,7 +1678,7 @@ function MorningSection({ user }) {
                       }} />
                     </div>
                     <div style={{ fontSize: 9, color: d.date === today ? NEON : "#2A3A48", letterSpacing: 0.5 }}>{d.label}</div>
-                    {d.score !== null && <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#3A5060" }}>{d.score}</div>}
+                    {d.score !== null && <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#E0EAF0" }}>{d.score}</div>}
                   </div>
                 ))}
               </div>
@@ -668,21 +1690,21 @@ function MorningSection({ user }) {
                 style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
                 onClick={() => setHistoryOpen(h => !h)}>
                 <div className="t3d-ctitle" style={{ margin: 0 }}>MORNING HISTORY</div>
-                <div style={{ color: "#3A5060", fontSize: 14, transition: "transform .2s", transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▾</div>
+                <div style={{ color: "#E0EAF0", fontSize: 14, transition: "transform .2s", transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▾</div>
               </div>
               {historyOpen && (
                 <div style={{ marginTop: 16 }}>
                   {history.length === 0 ? (
-                    <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", padding: "16px 0" }}>No history yet — complete your first morning check-in!</div>
+                    <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No history yet — complete your first morning check-in!</div>
                   ) : (
                     history.map((entry, i) => (
                       <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
-                        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#3A5060", width: 80 }}>
+                        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#E0EAF0", width: 80 }}>
                           {new Date(entry.date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
                         </div>
                         <div style={{ flex: 1 }}>
                           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {entry.data && Object.entries(entry.data).map(([k, v]) => (
+                            {entry.data && Object.entries(entry.data).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
                               <span key={k} style={{
                                 fontSize: 9, padding: "2px 6px", borderRadius: 10,
                                 background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
@@ -710,6 +1732,24 @@ function MorningSection({ user }) {
     );
   }
 
+  // EDIT ROUTINE view
+  if (view === "editRoutine") {
+    return (
+      <MorningRoutineEditor
+        wakeTime={wakeTime}
+        setWakeTime={setWakeTime}
+        scheduledTasks={scheduledTasks}
+        setScheduledTasks={setScheduledTasks}
+        onCancel={() => setView("home")}
+        onRebuild={startRoutineSetup}          
+        onSave={async () => {
+          await saveRoutine(scheduledTasks);
+          setView("home");
+        }}
+      />
+    );
+  }
+
   // SETUP view
   if (view === "setup") {
     return (
@@ -722,7 +1762,7 @@ function MorningSection({ user }) {
                 letterSpacing: 1, fontFamily: "'Orbitron',monospace",
                 background: setupStep === i ? "rgba(0,255,178,.08)" : "transparent",
                 border: `1px solid ${setupStep === i ? NEON : BORDER}`,
-                color: setupStep === i ? NEON : "#3A5060"
+                color: setupStep === i ? NEON : "#E0EAF0"
               }}>{s}</div>
             ))}
           </div>
@@ -734,7 +1774,7 @@ function MorningSection({ user }) {
                 <input type="time" value={wakeTime} onChange={e => setWakeTime(e.target.value)}
                   style={{ background: SURFACE2, border: `1px solid ${NEON}`, borderRadius: 8, padding: "16px 24px", color: NEON, fontSize: 28, outline: "none", textAlign: "center", colorScheme: "dark", minWidth: 180 }} />
               </div>
-              <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", marginBottom: 24 }}>
+              <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", marginBottom: 24 }}>
                 Your morning routine will be scheduled from this time
               </div>
               <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={() => setSetupStep(1)}>NEXT →</button>
@@ -743,28 +1783,402 @@ function MorningSection({ user }) {
 
           {setupStep === 1 && (
             <div>
-              <div className="t3d-ctitle">CHOOSE YOUR MORNING TASKS</div>
-              <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#3A5060" }}>
-                ✓ Body weight, sleep & progress photo included. TRACK3D Check-in always last.
-              </div>
-              <div style={{ marginBottom: 16 }}>
-                {SUGGESTED_TASKS.map((t, i) => (
-                  <span key={i} className={`t3d-task-chip ${selectedTasks.find(s => s.name === t.name) ? "selected" : ""}`}
-                    onClick={() => toggleTask(t)}>
-                    {selectedTasks.find(s => s.name === t.name) ? "✓ " : ""}{t.name} ({t.duration}m)
-                  </span>
+              <div className="t3d-ctitle">CHOOSE YOUR MORNING HABITS</div>
+
+              {/* Selected habits */}
+              <div style={{ display: "none" }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 5
+                }}>
+                  YOUR MORNING HABITS
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: "#4A6070",
+                  marginBottom: 12
+                }}>
+                  Set a duration and an optional start time.
+                </div>
+
+                {selectedTasks.length === 0 && (
+                  <div style={{
+                    border: `1px dashed ${BORDER}`,
+                    borderRadius: 6,
+                    padding: 14,
+                    color: "#4A6070",
+                    fontSize: 10,
+                    marginBottom: 12
+                  }}>
+                    Select habits below or make your own.
+                  </div>
+                )}
+
+                {selectedTasks.map((task, i) => (
+                  <div
+                    key={task.id || i}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      padding: "9px 0",
+                      borderBottom: `1px solid ${BORDER}`
+                    }}
+                  >
+                    <div style={{
+                      flex: "1 1 180px",
+                      fontSize: 11,
+                      color: "#E0EAF0"
+                    }}>
+                      ▸ {task.name}
+                    </div>
+
+                    <input
+                      type="time"
+                      className="t3d-input"
+                      value={task.preferredTime || ""}
+                      onChange={e =>
+                        updateSelectedTask(i, "preferredTime", e.target.value)
+                      }
+                      style={{
+                        width: 115,
+                        colorScheme: "dark"
+                      }}
+                    />
+
+                    <div style={{
+                      position: "relative",
+                      width: 90
+                    }}>
+                      <input
+                        type="number"
+                        min="1"
+                        className="t3d-input"
+                        value={task.duration ?? ""}
+                        onChange={e =>
+                          updateSelectedTask(i, "duration", e.target.value)
+                        }
+                        style={{
+                          paddingRight: 30,
+                          textAlign: "center"
+                        }}
+                      />
+
+                      <span style={{
+                        position: "absolute",
+                        right: 8,
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        fontSize: 8,
+                        color: "#4A6070",
+                        pointerEvents: "none"
+                      }}>
+                        min
+                      </span>
+                    </div>
+
+                    <button
+                      className="t3d-btn t3d-btn-sm t3d-btn-red"
+                      onClick={() =>
+                        setSelectedTasks(prev =>
+                          prev.filter((_, index) => index !== i)
+                        )
+                      }
+                      style={{ padding: "8px 10px" }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+
+                {/* Compulsory habits */}
+                <div style={{
+                  marginTop: 18,
+                  fontSize: 9,
+                  color: "#4A6070",
+                  letterSpacing: 1,
+                  marginBottom: 7
+                }}>
+                  INCLUDED WITH EVERY ROUTINE
+                </div>
+
+                {[...NON_NEGS, LOCKED_LAST].map((task, i) => (
+                  <div
+                    key={task.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "9px 0",
+                      borderBottom: `1px solid ${BORDER}`,
+                      opacity: 0.7
+                    }}
+                  >
+                    <div style={{ fontSize: 13 }}>🔒</div>
+
+                    <div style={{
+                      flex: 1,
+                      fontSize: 11,
+                      color: "#8AABB8"
+                    }}>
+                      {task.icon} {task.name}
+                    </div>
+
+                    <div style={{
+                      fontSize: 9,
+                      color: "#4A6070"
+                    }}>
+                      {task.id === "checkin"
+                        ? "ALWAYS LAST"
+                        : `${task.duration} min`}
+                    </div>
+                  </div>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-                <input className="t3d-input" placeholder="Add custom task..." value={customTask}
-                  onChange={e => setCustomTask(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && addCustomTask()} />
-                <button className="t3d-btn t3d-btn-sm" onClick={addCustomTask}>ADD</button>
+
+              {/* Popular habits */}
+              <div style={{ marginBottom: 26 }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 5
+                }}>
+                  POPULAR MORNING HABITS
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: "#4A6070",
+                  marginBottom: 10
+                }}>
+                  Select from the most popular morning habits.
+                </div>
+
+                <div>
+                  {SUGGESTED_TASKS.map((t, i) => (
+                    <span
+                      key={i}
+                      className={`t3d-task-chip ${
+                        selectedTasks.find(s => s.name === t.name)
+                          ? "selected"
+                          : ""
+                      }`}
+                      onClick={() => toggleTask(t)}
+                    >
+                      {selectedTasks.find(s => s.name === t.name)
+                        ? "✓ "
+                        : ""}
+                      {t.name} ({t.duration}m)
+                    </span>
+                  ))}
+                </div>
               </div>
+
+              {/* Custom habit */}
+              <div style={{ marginBottom: 24 }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 5
+                }}>
+                  MAKE YOUR OWN HABIT
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: "#4A6070",
+                  marginBottom: 10
+                }}>
+                  Create a habit that is specific to your morning.
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap"
+                }}>
+                  <input
+                    className="t3d-input"
+                    placeholder="Habit name..."
+                    value={customTask}
+                    onChange={e => setCustomTask(e.target.value)}
+                    onKeyDown={e =>
+                      e.key === "Enter" && addCustomTask()
+                    }
+                    style={{ flex: "1 1 220px" }}
+                  />
+
+
+
+                  <div style={{
+                    position: "relative",
+                    width: 95
+                  }}>
+                    <input
+                      type="number"
+                      min="1"
+                      className="t3d-input"
+                      value={customTaskDuration}
+                      onChange={e =>
+                        setCustomTaskDuration(e.target.value)
+                      }
+                      style={{
+                        paddingRight: 30,
+                        textAlign: "center"
+                      }}
+                    />
+
+                    <span style={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      fontSize: 8,
+                      color: "#4A6070",
+                      pointerEvents: "none"
+                    }}>
+                      min
+                    </span>
+                  </div>
+
+                  <button
+                    className="t3d-btn t3d-btn-sm"
+                    onClick={addCustomTask}
+                    disabled={!customTask.trim()}
+                  >
+                    + ADD
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <div style={{
+                  fontFamily: "'Orbitron',monospace",
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  color: "#E0EAF0",
+                  marginBottom: 8
+                }}>
+                  CURRENTLY SELECTED
+                </div>
+
+                {selectedTasks.length === 0 && (
+                  <div style={{
+                    fontSize: 9,
+                    color: "#4A6070",
+                    marginBottom: 8
+                  }}>
+                    No extra habits selected yet.
+                  </div>
+                )}
+
+                {selectedTasks.map((task, i) => (
+                  <div
+                    key={task.id || i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 0",
+                      borderBottom: `1px solid ${BORDER}`
+                    }}
+                  >
+                    <div style={{
+                      flex: 1,
+                      fontSize: 10,
+                      color: "#E0EAF0"
+                    }}>
+                      ▸ {task.name}
+                    </div>
+
+                    <div style={{
+                      fontSize: 9,
+                      color: "#8AABB8"
+                    }}>
+                      {task.duration} min
+                    </div>
+
+                    <button
+                      className="t3d-btn t3d-btn-sm t3d-btn-red"
+                      onClick={() =>
+                        setSelectedTasks(prev =>
+                          prev.filter((_, index) => index !== i)
+                        )
+                      }
+                      style={{ padding: "4px 8px" }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+
+                {[...NON_NEGS, LOCKED_LAST].map(task => (
+                  <div
+                    key={task.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 0",
+                      borderBottom: `1px solid ${BORDER}`,
+                      opacity: 0.55
+                    }}
+                  >
+                    <div style={{ fontSize: 10 }}>🔒</div>
+
+                    <div style={{
+                      flex: 1,
+                      fontSize: 10,
+                      color: "#8AABB8"
+                    }}>
+                      {task.icon} {task.name}
+                    </div>
+
+                    <div style={{
+                      fontSize: 8,
+                      color: "#4A6070"
+                    }}>
+                      {task.id === "checkin"
+                        ? "LAST"
+                        : `${task.duration} min`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm" onClick={() => setSetupStep(0)}>← BACK</button>
-                <button className="t3d-btn" style={{ flex: 1, padding: 12 }}
-                  onClick={() => { setScheduledTasks(buildSchedule([...NON_NEGS, ...selectedTasks])); setSetupStep(2); }}>
+                <button
+                  className="t3d-btn t3d-btn-sm"
+                  onClick={() => setSetupStep(0)}
+                >
+                  ← BACK
+                </button>
+
+                <button
+                  className="t3d-btn"
+                  style={{ flex: 1, padding: 12 }}
+                  disabled={selectedTasks.some(
+                    task =>
+                      task.duration === "" ||
+                      Number(task.duration) <= 0
+                  )}
+                  onClick={() => {
+                    setScheduledTasks(
+                      buildSchedule([...NON_NEGS, ...selectedTasks])
+                    );
+                    setSetupStep(2);
+                  }}
+                >
                   NEXT →
                 </button>
               </div>
@@ -792,6 +2206,269 @@ function MorningSection({ user }) {
     );
   }
 
+  // LIVE MORNING view
+  if (view === "liveMorning" && currentLiveTask) {
+    const totalPlannedSeconds = liveRoutineSteps.reduce(
+      (sum, task) => sum + ((Number(task.duration) || 0) * 60),
+      0
+    );
+
+    const completedPlannedSeconds = liveRoutineSteps
+      .slice(0, liveTaskIndex)
+      .reduce(
+        (sum, task) => sum + ((Number(task.duration) || 0) * 60),
+        0
+      );
+
+    const currentTaskPlannedSeconds =
+      (Number(currentLiveTask.duration) || 1) * 60;
+
+    const plannedElapsedSeconds =
+      completedPlannedSeconds +
+      Math.max(0, currentTaskPlannedSeconds - liveSecondsLeft);
+
+    const actualElapsedSeconds = liveStartedAt
+      ? Math.floor((liveNow - liveStartedAt) / 1000)
+      : 0;
+
+    const differenceSeconds =
+      actualElapsedSeconds - plannedElapsedSeconds;
+
+    const differenceMinutes = Math.floor(
+      Math.abs(differenceSeconds) / 60
+    );
+
+    const status =
+      differenceMinutes < 2
+        ? "ON TRACK ✓"
+        : differenceSeconds > 0
+          ? `${differenceMinutes} MIN BEHIND`
+          : `${differenceMinutes} MIN AHEAD`;
+
+    const remainingRoutineSeconds = Math.max(
+      0,
+      totalPlannedSeconds - plannedElapsedSeconds
+    );
+
+    const formatDuration = seconds => {
+      const mins = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    };
+
+    const currentKey =
+      currentLiveTask.id || currentLiveTask.name;
+
+    const needsInput = ["sleep", "number", "photos3"].includes(
+      currentLiveTask.type
+    );
+
+    const openCurrentInput = () => {
+      const stepIndex = allSteps.findIndex(
+        step =>
+          (step.id || step.name) === currentKey
+      );
+
+      if (stepIndex === -1) return;
+
+      setLiveInputActive(true);
+
+      setCheckinStep(stepIndex);
+      setTempInput("");
+      setPhotoAngleIdx(0);
+      setPhotoFiles({ front: null, side: null, back: null });
+      setPhotoPreviews({ front: null, side: null, back: null });
+      setView("checkin");
+    };
+
+    return (
+      <div className="t3d-fade">
+        <div className="t3d-card">
+          <div style={{
+            textAlign: "center",
+            marginBottom: 26
+          }}>
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 10,
+              letterSpacing: 3,
+              color: NEON,
+              marginBottom: 8
+            }}>
+              MORNING IN PROGRESS
+            </div>
+
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 32,
+              fontWeight: 700,
+              color: "#E0EAF0",
+              marginBottom: 8
+            }}>
+              {formatDuration(liveSecondsLeft)}
+            </div>
+
+            <div style={{
+              fontSize: 10,
+              color: "#8AABB8",
+              letterSpacing: 1
+            }}>
+              ESTIMATED FINISH {new Date(liveNow + (remainingRoutineSeconds + (Number(allSteps.find(step => step.id === "checkin")?.duration) || 0) * 60) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </div>
+          </div>
+
+          <div style={{
+            border: `1px solid ${NEON}`,
+            background: "rgba(0,255,178,.05)",
+            borderRadius: 8,
+            padding: 20,
+            marginBottom: 16
+          }}>
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 9,
+              letterSpacing: 2,
+              color: "#4A6070",
+              marginBottom: 10
+            }}>
+              CURRENT
+            </div>
+
+            <div style={{
+              fontSize: 34,
+              marginBottom: 10
+            }}>
+              {currentLiveTask.icon || "▸"}
+            </div>
+
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 15,
+              color: "#E0EAF0",
+              marginBottom: 6
+            }}>
+              {currentLiveTask.name}
+            </div>
+
+            <div style={{
+              fontSize: 10,
+              color: "#8AABB8"
+            }}>
+              Planned: {currentLiveTask.duration} min
+            </div>
+          </div>
+
+          {liveRoutineSteps[liveTaskIndex + 1] && (
+            <div style={{
+              padding: 14,
+              border: `1px solid ${BORDER}`,
+              borderRadius: 7,
+              marginBottom: 16
+            }}>
+              <div style={{
+                fontFamily: "'Orbitron',monospace",
+                fontSize: 9,
+                letterSpacing: 2,
+                color: "#4A6070",
+                marginBottom: 7
+              }}>
+                NEXT
+              </div>
+
+              <div style={{
+                fontSize: 11,
+                color: "#E0EAF0"
+              }}>
+                {liveRoutineSteps[liveTaskIndex + 1].icon || "▸"}{" "}
+                {liveRoutineSteps[liveTaskIndex + 1].name}
+                {" · "}
+                {liveRoutineSteps[liveTaskIndex + 1].duration} min
+              </div>
+            </div>
+          )}
+
+          <div style={{
+            textAlign: "center",
+            padding: 12,
+            borderRadius: 6,
+            marginBottom: 18,
+            background:
+              status.includes("BEHIND")
+                ? "rgba(255,45,120,.07)"
+                : status.includes("AHEAD")
+                  ? "rgba(0,200,255,.07)"
+                  : "rgba(0,255,178,.07)",
+            border:
+              status.includes("BEHIND")
+                ? "1px solid rgba(255,45,120,.25)"
+                : status.includes("AHEAD")
+                  ? "1px solid rgba(0,200,255,.25)"
+                  : "1px solid rgba(0,255,178,.25)",
+            color:
+              status.includes("BEHIND")
+                ? NEON3
+                : status.includes("AHEAD")
+                  ? NEON2
+                  : NEON
+          }}>
+            <div style={{
+              fontFamily: "'Orbitron',monospace",
+              fontSize: 11,
+              letterSpacing: 2
+            }}>
+              {status}
+            </div>
+          </div>
+
+          <div style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap"
+          }}>
+            {needsInput ? (
+              <button
+                className="t3d-btn"
+                style={{
+                  flex: 1,
+                  padding: 13,
+                  background: "rgba(0,255,178,.12)",
+                  borderColor: "rgba(0,255,178,.5)"
+                }}
+                onClick={openCurrentInput}
+              >
+                COMPLETE THIS STEP →
+              </button>
+            ) : (
+              <button
+                className="t3d-btn"
+                style={{
+                  flex: 1,
+                  padding: 13,
+                  background: "rgba(0,255,178,.12)",
+                  borderColor: "rgba(0,255,178,.5)"
+                }}
+                onClick={completeLiveTask}
+              >
+                ✓ DONE
+              </button>
+            )}
+
+            <button
+              className="t3d-btn t3d-btn-red"
+              style={{
+                padding: "13px 18px"
+              }}
+              onClick={skipLiveTask}
+            >
+              SKIP
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // CHECK-IN view
   if (view === "checkin" && currentStep) {
     return (
@@ -802,7 +2479,7 @@ function MorningSection({ user }) {
               <div key={i} className={`t3d-dot-step ${i === checkinStep ? "active" : i < checkinStep ? "done" : ""}`} />
             ))}
           </div>
-          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>
+          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>
             STEP {checkinStep + 1} OF {allSteps.length}
           </div>
           <div className="t3d-checkin-step">
@@ -817,10 +2494,17 @@ function MorningSection({ user }) {
                   <input className="t3d-input" type="number" placeholder={`Enter ${currentStep.unit}...`}
                     value={tempInput} onChange={e => setTempInput(e.target.value)}
                     style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
-                  <span style={{ color: "#3A5060", fontSize: 14 }}>{currentStep.unit}</span>
+                  <span style={{ color: "#E0EAF0", fontSize: 14 }}>{currentStep.unit}</span>
                 </div>
                 <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); setCheckinStep(s => s + 1); }}>
+                  onClick={() => {
+  setCheckinData(d => ({
+    ...d,
+    [currentStep.id]: tempInput
+  }));
+  setTempInput("");
+  finishLiveInputStep();
+}}>
                   CONFIRM →
                 </button>
               </div>
@@ -832,35 +2516,65 @@ function MorningSection({ user }) {
                   onChange={e => setTempInput(e.target.value)}
                   style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
                 <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); setCheckinStep(s => s + 1); }}>
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); finishLiveInputStep(); }}>
                   CONFIRM →
                 </button>
               </div>
             )}
 
-            {currentStep.type === "photo" && (
-              <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
-                <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
-                  onChange={e => { const f = e.target.files[0]; if (f) { setPhotoPreview(URL.createObjectURL(f)); setCheckinData(d => ({ ...d, photo: f.name })); } }} />
-                {photoPreview ? (
-                  <div>
-                    <img src={photoPreview} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt="progress" />
-                    <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
-                      onClick={() => setCheckinStep(s => s + 1)}>
-                      CONFIRM →
-                    </button>
+            {currentStep.type === "photos3" && (() => {
+              const angle = PHOTO_ANGLES[photoAngleIdx];
+              const isLast = photoAngleIdx === PHOTO_ANGLES.length - 1;
+
+              const finishPhotos = (filesOverride) => {
+                const files = filesOverride || photoFiles;
+
+                setCheckinData(d => ({
+                  ...d,
+                  photos: {
+                    front: files.front ? "captured" : "skipped",
+                    side: files.side ? "captured" : "skipped",
+                    back: files.back ? "captured" : "skipped",
+                  },
+                }));
+
+                finishLiveInputStep();
+              };
+              return (
+                <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 2, marginBottom: 12 }}>
+                    PHOTO {photoAngleIdx + 1} OF 3 — {angle.toUpperCase()} ON
                   </div>
-                ) : (
-                  <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
-                    📸 UPLOAD PHOTO
+                  <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+                    onChange={e => {
+                      const f = e.target.files[0];
+                      if (!f) return;
+                      setPhotoFiles(p => ({ ...p, [angle]: f }));
+                      setPhotoPreviews(p => ({ ...p, [angle]: URL.createObjectURL(f) }));
+                    }} />
+                  {photoPreviews[angle] ? (
+                    <div>
+                      <img src={photoPreviews[angle]} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt={angle} />
+                      <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
+                        onClick={() => isLast ? finishPhotos() : setPhotoAngleIdx(i => i + 1)}>
+                        {isLast ? "CONFIRM →" : "NEXT ANGLE →"}
+                      </button>
+                    </div>
+                  ) : (
+                    <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
+                      📸 UPLOAD {angle.toUpperCase()} PHOTO
+                    </button>
+                  )}
+                  <div style={{ fontSize: 10, color: "#E0EAF0", margin: "16px 0 6px", lineHeight: 1.5 }}>
+                    Skipping makes it harder to track your visual progress over time.
+                  </div>
+                  <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", opacity: 0.6 }}
+                    onClick={() => finishPhotos()}>
+                    SKIP REMAINING PHOTOS
                   </button>
-                )}
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ width: "100%" }}
-                  onClick={() => { setCheckinData(d => ({ ...d, photo: "skipped" })); setCheckinStep(s => s + 1); }}>
-                  SKIP TODAY
-                </button>
-              </div>
-            )}
+                </div>
+              );
+            })()}
 
             {currentStep.type === "tick" && (
               <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
@@ -895,29 +2609,47 @@ function MorningSection({ user }) {
           <div style={{ margin: "24px auto" }}>
             <ScoreRing score={score * 10} size={120} />
           </div>
-          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#3A5060", letterSpacing: 2, marginBottom: 8 }}>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>
             MORNING SCORE: {score}/10
           </div>
+          <p style={{ fontSize: 12, color: NEON2, lineHeight: 1.7 }}>
+            {wakeTimingSummary(checkinData.wakeTiming)}
+          </p>
           <div style={{ fontSize: 13, color: "#8AABB8", fontStyle: "italic", marginBottom: 32, lineHeight: 1.7, padding: "0 20px" }}>
             "{quote}"
           </div>
           <div style={{ marginBottom: 24 }}>
-            {Object.entries(checkinData).map(([k, v]) => (
+            {Object.entries(checkinData).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                 <span style={{ color: "#4A6070" }}>{k}</span>
                 <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
-                  {v === true ? "✓" : v === false ? "✗" : v}
+                  {v === true ? "✓" : v === false ? "✗" :
+                    (v && typeof v === "object") ? `${Object.values(v).filter(p => p === "captured").length}/3 captured` : v}
                 </span>
               </div>
             ))}
           </div>
-          <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => {
-            await saveCheckin(checkinData, score);
+          <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={savingCheckin} onClick={async () => {
+            setSavingCheckin(true);
+            const finalData = { ...checkinData };
+            if (finalData.photos) {
+              const uploaded = {};
+              for (const angle of PHOTO_ANGLES) {
+                const file = photoFiles[angle];
+                if (!file) { uploaded[angle] = "skipped"; continue; }
+                const path = `${user.id}/${today}/${angle}.jpg`;
+                const { error } = await supabase.storage.from("checkin-photos").upload(path, file, { upsert: true });
+                uploaded[angle] = error ? "skipped" : path;
+              }
+              finalData.photos = uploaded;
+            }
+            await saveCheckin(finalData, score);
+            setSavingCheckin(false);
             setCompletedToday(true);
             await loadData();
             setView("home");
           }}>
-            BACK TO MORNING
+            {savingCheckin ? "SAVING..." : "BACK TO MORNING"}
           </button>
         </div>
       </div>
@@ -961,7 +2693,7 @@ function EndOfDayCheckin({ user, onComplete }) {
       ]);
 
       // Build context
-      const morningScore = morning.data?.score || "not completed";
+      const morningScore = morning.data?.score ?? "not completed";
       const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${Object.values(nutrition.data.meals_completed||{}).filter(v=>v===true).length} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
       const fitnessData = fitness.data ? `${fitness.data.session_name}, ${fitness.data.duration_mins} mins, ${Math.round(fitness.data.total_volume||0)}kg volume` : "no workout logged";
       const calendarTasks = debrief.data ? `calendar score ${debrief.data.overall_score}/10` : calendar.data?.length ? `${calendar.data.filter(t=>t.status==="done").length}/${calendar.data.length} tasks done` : "no tasks";
@@ -975,9 +2707,11 @@ function EndOfDayCheckin({ user, onComplete }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, nutrition, fitness, calendar alignment, and mood/energy. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
+          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, wake-up timing against the planned time when recorded, nutrition, fitness, calendar alignment, and mood/energy. Treat the live start time as the recorded wake-up time, not independently verified waking. Do not assume missing wake-up data or praise earlier waking at the expense of sleep. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
           messages: [{ role: "user", content: `Today's data:
 - Morning score: ${morningScore}/10
+- ${wakeTimingSummary(morning.data?.data?.wakeTiming)}
+- Wake-up time source: ${morning.data?.data?.wakeTiming?.source || "not recorded"}
 - Nutrition: ${nutritionData}
 - Fitness: ${fitnessData}
 - Calendar: ${calendarTasks}
@@ -1012,7 +2746,7 @@ Give me my daily roundup and spot any patterns.` }],
 
   const RatingRow = ({ value, setValue, emojis, label }) => (
     <div style={{ marginBottom: 8 }}>
-      <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 12, textAlign: "center" }}>{label}</div>
+      <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 12, textAlign: "center" }}>{label}</div>
       <div style={{ display: "flex", justifyContent: "center", gap: 12 }}>
         {emojis.map((emoji, i) => (
           <button key={i} onClick={() => setValue(i+1)}
@@ -1033,7 +2767,7 @@ Give me my daily roundup and spot any patterns.` }],
         <input className="t3d-input" type="number" placeholder="e.g. 8500"
           value={steps} onChange={e => setSteps(e.target.value)}
           style={{ textAlign: "center", fontSize: 28, padding: 16, maxWidth: 200, margin: "0 auto", display: "block" }} />
-        <div style={{ fontSize: 10, color: "#3A5060", marginTop: 10 }}>Goal: 10,000 steps</div>
+        <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 10 }}>Goal: 10,000 steps</div>
         {steps && (
           <div style={{ marginTop: 8, fontSize: 11, color: parseInt(steps)>=10000?NEON:"#FF8C00" }}>
             {parseInt(steps)>=10000?"🎯 Goal hit!":"🎯 " + (10000-parseInt(steps)).toLocaleString() + " short of goal"}
@@ -1068,22 +2802,22 @@ Give me my daily roundup and spot any patterns.` }],
           <div style={{ textAlign: "center", marginBottom: 24 }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}>🌙</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 3, marginBottom: 4 }}>DAY COMPLETE</div>
-            <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1 }}>{new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" }).toUpperCase()}</div>
+            <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1 }}>{new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" }).toUpperCase()}</div>
           </div>
 
           {/* Summary stats */}
           <div className="t3d-grid3" style={{ marginBottom: 20 }}>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: 28 }}>{EMOJI_SCALE[mood-1]}</div>
-              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1, marginTop: 4 }}>MOOD {mood}/5</div>
+              <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginTop: 4 }}>MOOD {mood}/5</div>
             </div>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: 28 }}>{ENERGY_SCALE[energy-1]}</div>
-              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1, marginTop: 4 }}>ENERGY {energy}/5</div>
+              <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginTop: 4 }}>ENERGY {energy}/5</div>
             </div>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: parseInt(steps)>=10000?NEON:"#FF8C00" }}>{parseInt(steps||0).toLocaleString()}</div>
-              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1, marginTop: 4 }}>STEPS</div>
+              <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginTop: 4 }}>STEPS</div>
             </div>
           </div>
 
@@ -1095,7 +2829,7 @@ Give me my daily roundup and spot any patterns.` }],
           {/* AI Roundup */}
           {aiLoading ? (
             <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 16, marginBottom: 16, textAlign: "center" }}>
-              <div style={{ fontSize: 11, color: "#3A5060" }}>🤖 Analysing your full day...</div>
+              <div style={{ fontSize: 11, color: "#E0EAF0" }}>🤖 Analysing your full day...</div>
             </div>
           ) : aiRoundup ? (
             <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 16, marginBottom: 16 }}>
@@ -1121,7 +2855,7 @@ Give me my daily roundup and spot any patterns.` }],
           {steps_arr.map((_, i) => <div key={i} className={`t3d-dot-step ${i===step?"active":i<step?"done":""}`} />)}
         </div>
 
-        <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>
+        <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>
           STEP {step+1} OF {steps_arr.length}
         </div>
 
@@ -1145,12 +2879,293 @@ Give me my daily roundup and spot any patterns.` }],
 
 
 
+// ─── Daily activity helper (shared by heatmap, history view & weekly report) ──
+const DAY_NAMES = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+
+async function fetchDailyActivity(userId, days) {
+  const dates = Array.from({ length: days }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (days - 1 - i));
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  });
+  const earliest = dates[0];
+  const [morning, nutrition, workout, eod] = await Promise.all([
+    supabase.from("morning_checkins").select("date,score").eq("user_id", userId).gte("date", earliest),
+    supabase.from("nutrition_logs").select("date").eq("user_id", userId).gte("date", earliest),
+    supabase.from("workout_logs").select("date").eq("user_id", userId).gte("date", earliest),
+    supabase.from("end_of_day").select("date").eq("user_id", userId).gte("date", earliest),
+  ]);
+  const morningMap = Object.fromEntries((morning.data || []).map(r => [r.date, r.score]));
+  const nutritionSet = new Set((nutrition.data || []).map(r => r.date));
+  const workoutSet = new Set((workout.data || []).map(r => r.date));
+  const eodSet = new Set((eod.data || []).map(r => r.date));
+  return dates.map(date => {
+    const flags = [date in morningMap, nutritionSet.has(date), workoutSet.has(date), eodSet.has(date)];
+    return {
+      date,
+      morningScore: date in morningMap ? morningMap[date] : null,
+      nutrition: nutritionSet.has(date),
+      workout: workoutSet.has(date),
+      eod: eodSet.has(date),
+      activity: flags.filter(Boolean).length,
+    };
+  });
+}
+
+// ─── Progress Photos gallery ───────────────────────────────────────────────────
+function ProgressPhotos({ user }) {
+  const [angle, setAngle] = useState("front");
+  const [entries, setEntries] = useState([]);
+  const [idx, setIdx] = useState(0);
+  const [urlCache, setUrlCache] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => { if (!user) return; load(); }, [user]);
+  useEffect(() => { setIdx(0); }, [angle]);
+
+  const load = async () => {
+    setLoading(true);
+    const { data } = await supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(90);
+    setEntries((data || []).filter(e => e.data?.photos));
+    setLoading(false);
+  };
+
+  const filtered = entries.filter(e => e.data.photos[angle] && e.data.photos[angle] !== "skipped");
+  const current = filtered[idx];
+
+  useEffect(() => {
+    if (!current) return;
+    const path = current.data.photos[angle];
+    if (urlCache[path]) return;
+    supabase.storage.from("checkin-photos").createSignedUrl(path, 3600).then(({ data }) => {
+      if (data?.signedUrl) setUrlCache(c => ({ ...c, [path]: data.signedUrl }));
+    });
+  }, [current, angle]);
+
+  if (loading) return (
+    <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 24 }}>
+      <div style={{ fontSize: 11, color: "#E0EAF0" }}>LOADING PHOTOS...</div>
+    </div>
+  );
+
+  return (
+    <div className="t3d-card" style={{ marginBottom: 16 }}>
+      <div className="t3d-ctitle">PROGRESS PHOTOS</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        {["front", "side", "back"].map(a => (
+          <button key={a} className="t3d-btn t3d-btn-sm" style={{
+            flex: 1,
+            background: angle === a ? "rgba(0,255,178,.12)" : "transparent",
+            borderColor: angle === a ? NEON : BORDER,
+            color: angle === a ? NEON : "#E0EAF0",
+          }} onClick={() => setAngle(a)}>{a.toUpperCase()}</button>
+        ))}
+      </div>
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "24px 0", fontSize: 11, color: "#E0EAF0" }}>
+          No {angle} photos yet — they'll show up here after your first morning check-in.
+        </div>
+      ) : (
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 10 }}>
+            {new Date(current.date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+          </div>
+          <div style={{ width: "100%", maxWidth: 280, height: 340, margin: "0 auto 14px", borderRadius: 8, overflow: "hidden", border: `1px solid ${BORDER}`, display: "flex", alignItems: "center", justifyContent: "center", background: SURFACE2 }}>
+            {urlCache[current.data.photos[angle]] ? (
+              <img src={urlCache[current.data.photos[angle]]} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              <div style={{ fontSize: 10, color: "#E0EAF0" }}>LOADING...</div>
+            )}
+          </div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 16, alignItems: "center" }}>
+            <button className="t3d-btn t3d-btn-sm" disabled={idx >= filtered.length - 1} onClick={() => setIdx(i => i + 1)}>◀ OLDER</button>
+            <div style={{ fontSize: 10, color: "#E0EAF0" }}>{idx + 1} / {filtered.length}</div>
+            <button className="t3d-btn t3d-btn-sm" disabled={idx <= 0} onClick={() => setIdx(i => i - 1)}>NEWER ▶</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Dashboard History sub-view ────────────────────────────────────────────────
+function DashboardHistory({ user, onBack }) {
+  const [activity, setActivity] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchDailyActivity(user.id, 90).then(a => { setActivity(a); setLoading(false); });
+  }, [user]);
+
+  if (loading) return (
+    <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
+      <div style={{ fontSize: 11, color: "#E0EAF0" }}>LOADING HISTORY...</div>
+    </div></div>
+  );
+
+  return (
+    <div className="t3d-fade">
+      <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 16 }} onClick={onBack}>← BACK</button>
+      <div className="t3d-card" style={{ marginBottom: 16 }}>
+        <div className="t3d-ctitle">90-DAY ACTIVITY</div>
+        <div className="t3d-hmap">
+          {activity.map((d, i) => (
+            <div key={i} className="t3d-hcell" title={d.date} style={{ background: heatColor(d.activity) }} />
+          ))}
+        </div>
+      </div>
+      <div className="t3d-card">
+        <div className="t3d-ctitle">DAY BY DAY</div>
+        {activity.slice().reverse().map((d, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#E0EAF0", width: 80 }}>
+              {new Date(d.date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+            </div>
+            <div style={{ flex: 1, display: "flex", gap: 6 }}>
+              <span style={{ color: d.morningScore != null ? NEON : "#2A3A48" }}>☀ {d.morningScore != null ? `${d.morningScore}/10` : "—"}</span>
+              <span style={{ color: d.nutrition ? NEON2 : "#2A3A48" }}>◎ {d.nutrition ? "✓" : "—"}</span>
+              <span style={{ color: d.workout ? "#FF8C00" : "#2A3A48" }}>⚡ {d.workout ? "✓" : "—"}</span>
+              <span style={{ color: d.eod ? NEON3 : "#2A3A48" }}>🌙 {d.eod ? "✓" : "—"}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Weekly Report ──────────────────────────────────────────────────────────────
+function WeeklyReport({ user }) {
+  const [reportDay, setReportDay] = useState(0);
+  const [report, setReport] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+
+  const getLocalDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+
+  useEffect(() => { if (!user) return; init(); }, [user]);
+
+  const init = async () => {
+    setLoading(true);
+    const { data: settings } = await supabase.from("user_settings").select("report_day").eq("user_id", user.id).single();
+    const day = settings?.report_day ?? 0;
+    setReportDay(day);
+
+    const { data: latest } = await supabase.from("weekly_reports").select("*").eq("user_id", user.id).order("report_date", { ascending: false }).limit(1).single();
+    setReport(latest || null);
+
+    const todayStr = getLocalDate();
+    if (new Date().getDay() === day && latest?.report_date !== todayStr) {
+      await generateReport();
+    }
+    setLoading(false);
+  };
+
+  const saveReportDay = async (day) => {
+    setReportDay(day);
+    await supabase.from("user_settings").upsert({ user_id: user.id, report_day: day, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+  };
+
+  const generateReport = async () => {
+    setGenerating(true);
+    try {
+      const activity = await fetchDailyActivity(user.id, 7);
+      const morningScores = activity.map(a => a.morningScore).filter(v => v != null);
+      const avgMorning = morningScores.length ? (morningScores.reduce((a,b) => a+b, 0) / morningScores.length).toFixed(1) : "n/a";
+      const daysActive = activity.filter(a => a.activity > 0).length;
+      const weekStart = activity[0].date;
+      const weekEnd = activity[activity.length - 1].date;
+
+      const [nutrition, workouts, planRes] = await Promise.all([
+        supabase.from("nutrition_logs").select("total_calories,total_protein").eq("user_id", user.id).gte("date", weekStart),
+        supabase.from("workout_logs").select("date").eq("user_id", user.id).gte("date", weekStart),
+        supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).single(),
+      ]);
+      const nutLogs = nutrition.data || [];
+      const avgCals = nutLogs.length ? Math.round(nutLogs.reduce((a,n) => a+(n.total_calories||0), 0) / nutLogs.length) : null;
+      const avgProtein = nutLogs.length ? Math.round(nutLogs.reduce((a,n) => a+(n.total_protein||0), 0) / nutLogs.length) : null;
+      const plan = planRes.data;
+
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system: "You are TRACK3D's weekly coach. Reply in exactly two labelled sections, each 3-5 sentences: 'PATTERNS:' (trends you notice across the week) and 'DIET SUGGESTIONS:' (only suggest a change if the data clearly supports it, otherwise say nutrition looks on track). Be direct and specific. Never give medical advice.",
+          messages: [{ role: "user", content: `Last 7 days for this user:
+- Morning check-ins completed: ${morningScores.length}/7, avg score ${avgMorning}/10
+- Days with any activity logged: ${daysActive}/7
+- Nutrition logged on ${nutLogs.length}/7 days, avg ${avgCals ?? "n/a"} kcal / ${avgProtein ?? "n/a"}g protein vs target ${plan?.daily_calories ?? "unknown"} kcal / ${plan?.protein_target ?? "unknown"}g protein
+- Workouts logged: ${workouts.data?.length || 0}/7 days
+
+Give me my weekly patterns and diet suggestions.` }],
+        }),
+      });
+      const json = await res.json();
+      const text = json.content?.map(b => b.text || "").join("") || "";
+      const parts = text.split("DIET SUGGESTIONS:");
+      const patterns = (parts[0] || "").replace("PATTERNS:", "").trim();
+      const dietSuggestions = (parts[1] || "").trim();
+
+      const { data: saved } = await supabase.from("weekly_reports").upsert({
+        user_id: user.id, report_date: getLocalDate(), week_start: weekStart, week_end: weekEnd,
+        patterns, diet_suggestions: dietSuggestions,
+      }, { onConflict: "user_id,report_date" }).select().single();
+      setReport(saved || { report_date: getLocalDate(), week_start: weekStart, week_end: weekEnd, patterns, diet_suggestions: dietSuggestions });
+    } catch (e) {
+      console.log("Weekly report error:", e);
+    }
+    setGenerating(false);
+  };
+
+  if (loading) return (
+    <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 24 }}>
+      <div style={{ fontSize: 11, color: "#E0EAF0" }}>LOADING WEEKLY REPORT...</div>
+    </div>
+  );
+
+  return (
+    <div className="t3d-card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY REPORT</div>
+        <select value={reportDay} onChange={e => saveReportDay(parseInt(e.target.value))}
+          style={{ background: SURFACE2, border: `1px solid ${BORDER}`, color: "#8AABB8", fontSize: 10, borderRadius: 5, padding: "4px 8px" }}>
+          {DAY_NAMES.map((n, i) => <option key={i} value={i}>{n}</option>)}
+        </select>
+      </div>
+      {generating ? (
+        <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>Generating this week's report...</div>
+      ) : report ? (
+        <div>
+          <div style={{ fontSize: 9, color: "#2A3A48", letterSpacing: 1, marginBottom: 12 }}>
+            {new Date(report.week_start).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – {new Date(report.week_end).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 10, color: NEON2, letterSpacing: 1, marginBottom: 6 }}>PATTERNS</div>
+            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}>{report.patterns || "Not enough data yet."}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "#FF8C00", letterSpacing: 1, marginBottom: 6 }}>DIET SUGGESTIONS</div>
+            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}>{report.diet_suggestions || "Nothing to flag this week."}</div>
+            <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Suggestions only — update your plan in Nutrition if you agree.</div>
+          </div>
+        </div>
+      ) : (
+        <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>
+          Next report: {DAY_NAMES[reportDay]}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 function Dashboard({ habits, setHabits, user }) {
   const done = habits.filter(h => h.done).length;
   const score = Math.round((done / habits.length) * 58 + 16);
   const [eodDone, setEodDone] = useState(false);
   const [showEod, setShowEod] = useState(false);
+  const [view, setView] = useState("home");
+  const [activity7, setActivity7] = useState([]);
 
   const getLocalDate = () => {
     const d = new Date();
@@ -1161,8 +3176,10 @@ function Dashboard({ habits, setHabits, user }) {
     if (!user) return;
     supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", getLocalDate()).single()
       .then(({ data }) => { if (data) setEodDone(true); });
+    fetchDailyActivity(user.id, 7).then(setActivity7);
   }, [user]);
 
+  if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   return (
     <div className="t3d-fade">
@@ -1175,7 +3192,7 @@ function Dashboard({ habits, setHabits, user }) {
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">HABITS TODAY</div>
-          <div className="t3d-sval" style={{ color: NEON }}>{done}<span style={{ fontSize: 15, color: "#3A5060" }}>/{habits.length}</span></div>
+          <div className="t3d-sval" style={{ color: NEON }}>{done}<span style={{ fontSize: 15, color: "#E0EAF0" }}>/{habits.length}</span></div>
           <div className="t3d-slabel">COMPLETED</div>
           <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${(done/habits.length)*100}%`, background: "linear-gradient(90deg,#00FFB2,#00C8FF)" }} /></div>
           <div className="t3d-sdelta t3d-up" style={{ marginTop: 10 }}>▲ 2 more than yesterday</div>
@@ -1185,7 +3202,7 @@ function Dashboard({ habits, setHabits, user }) {
           <div className="t3d-sval" style={{ color: NEON2 }}>{TOTAL_CALS}</div>
           <div className="t3d-slabel">KCAL TODAY</div>
           <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${(TOTAL_CALS/2400)*100}%`, background: "linear-gradient(90deg,#00C8FF,#0080FF)" }} /></div>
-          <div style={{ fontSize: 10, color: "#3A5060", marginTop: 10 }}>Goal: 2,400 kcal</div>
+          <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 10 }}>Goal: 2,400 kcal</div>
         </div>
       </div>
 
@@ -1203,16 +3220,17 @@ function Dashboard({ habits, setHabits, user }) {
         <AICoach habits={habits} />
       </div>
 
+      <ProgressPhotos user={user} />
+      <WeeklyReport user={user} />
+
       <div className="t3d-card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <div className="t3d-ctitle" style={{ margin: 0 }}>28-DAY ACTIVITY</div>
-          <div style={{ display: "flex", gap: 10, fontSize: 9, color: "#2A3A48", letterSpacing: 1 }}>
-            {["SUN","MON","TUE","WED","THU","FRI","SAT"].map(d => <span key={d}>{d}</span>)}
-          </div>
+          <div className="t3d-ctitle" style={{ margin: 0 }}>LAST 7 DAYS</div>
+          <button className="t3d-btn t3d-btn-sm" onClick={() => setView("history")}>VIEW MORE →</button>
         </div>
         <div className="t3d-hmap">
-          {heatData.map((d, i) => (
-            <div key={i} className="t3d-hcell" style={{ background: heatColor(d.val) }} />
+          {activity7.map((d, i) => (
+            <div key={i} className="t3d-hcell" title={d.date} style={{ background: heatColor(d.activity) }} />
           ))}
         </div>
       </div>
@@ -1223,11 +3241,11 @@ function Dashboard({ habits, setHabits, user }) {
           <>
             <div style={{ fontSize: 28, marginBottom: 8 }}>🌙</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 4 }}>DAY CHECKED IN</div>
-            <div style={{ fontSize: 11, color: "#3A5060" }}>Great work today. See you tomorrow!</div>
+            <div style={{ fontSize: 11, color: "#E0EAF0" }}>Great work today. See you tomorrow!</div>
           </>
         ) : (
           <>
-            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 16, letterSpacing: 1 }}>READY TO CLOSE OUT YOUR DAY?</div>
+            <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 16, letterSpacing: 1 }}>READY TO CLOSE OUT YOUR DAY?</div>
             <button className="t3d-big-btn"
               style={{ background: "linear-gradient(90deg, rgba(0,200,255,.15), rgba(0,255,178,.1))", border: `1px solid ${NEON2}`, color: NEON2, fontSize: 13, letterSpacing: 3 }}
               onClick={() => setShowEod(true)}>
@@ -1242,6 +3260,74 @@ function Dashboard({ habits, setHabits, user }) {
 }
 
 // ─── Fitness Section ──────────────────────────────────────────────────────────
+// ─── Exercise progression line chart ──────────────────────────────────────────
+const SET_LINE_COLORS = [NEON, NEON2, "#FF8C00", NEON3, "#A06CFF", "#FFD23F"];
+
+function ExerciseLineChart({ points }) {
+  const W = 280, H = 200;
+  const pad = { l: 30, r: 10, t: 26, b: 26 };
+  const chartW = W - pad.l - pad.r;
+  const chartH = H - pad.t - pad.b;
+  const maxSets = points.reduce((m, p) => Math.max(m, p.sets.length), 0);
+
+  const weightOf = (set) => parseFloat(set.weight) || 0;
+  const repsOf = (set) => parseInt(set.reps) || 0;
+  const maxV = Math.max(...points.flatMap(p => p.sets.map(weightOf)), 1);
+
+  if (points.length === 0 || maxSets === 0) {
+    return <div style={{ textAlign: "center", padding: "30px 0", fontSize: 11, color: "#E0EAF0" }}>Not enough history for this exercise yet.</div>;
+  }
+
+  const x = (i) => points.length > 1 ? pad.l + (i * chartW) / (points.length - 1) : pad.l + chartW / 2;
+  const y = (v) => pad.t + chartH * (1 - v / maxV);
+
+  const lines = Array.from({ length: maxSets }, (_, k) => {
+    const pts = points
+      .map((p, i) => p.sets[k] ? { x: x(i), y: y(weightOf(p.sets[k])), label: `${weightOf(p.sets[k])}kg × ${repsOf(p.sets[k])}` } : null)
+      .filter(Boolean);
+    return { setNum: k + 1, color: SET_LINE_COLORS[k % SET_LINE_COLORS.length], pts };
+  });
+
+  return (
+    <div>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        {[0, 0.5, 1].map(f => (
+          <line key={f} x1={pad.l} x2={W - pad.r} y1={pad.t + chartH * f} y2={pad.t + chartH * f} stroke={BORDER} strokeWidth="1" />
+        ))}
+        <text x={pad.l - 6} y={pad.t + 4} fontSize="8" fill="#E0EAF0" textAnchor="end">{Math.round(maxV)}kg</text>
+        <text x={pad.l - 6} y={pad.t + chartH + 4} fontSize="8" fill="#E0EAF0" textAnchor="end">0</text>
+
+        {lines.map((line, li) => (
+          <g key={line.setNum}>
+            <polyline points={line.pts.map(p => `${p.x},${p.y}`).join(" ")} fill="none" stroke={line.color} strokeWidth="2" />
+            {line.pts.map((p, i) => (
+              <g key={i}>
+                <circle cx={p.x} cy={p.y} r="3" fill={line.color} />
+                <text x={p.x} y={p.y - 8 - li * 10} fontSize="7" fill={line.color} textAnchor="middle">{p.label}</text>
+              </g>
+            ))}
+          </g>
+        ))}
+
+        <text x={pad.l} y={H - 6} fontSize="8" fill="#E0EAF0" textAnchor="start">
+          {new Date(points[0].date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+        </text>
+        <text x={W - pad.r} y={H - 6} fontSize="8" fill="#E0EAF0" textAnchor="end">
+          {new Date(points[points.length - 1].date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+        </text>
+      </svg>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center", marginTop: 10 }}>
+        {lines.map(line => (
+          <div key={line.setNum} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>
+            <div style={{ width: 8, height: 8, borderRadius: 2, background: line.color }} />
+            SET {line.setNum}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Fitness({ user }) {
   const [view, setView] = useState("home");
   const [split, setSplit] = useState(null);
@@ -1257,14 +3343,19 @@ function Fitness({ user }) {
   const [restSeconds, setRestSeconds] = useState(90);
   const [restActive, setRestActive] = useState(false);
   const [restRemaining, setRestRemaining] = useState(0);
+  const [restDeadline, setRestDeadline] = useState(null);
   const [aiAnswers, setAiAnswers] = useState({});
   const [aiStep, setAiStep] = useState(0);
   const [aiBuilding, setAiBuilding] = useState(false);
   const [aiPlan, setAiPlan] = useState(null);
+  const [aiPlanError, setAiPlanError] = useState("");
+  const [aiPlanSaving, setAiPlanSaving] = useState(false);
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
   const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], tempo: "" });
+  const [viewingSession, setViewingSession] = useState(null); // log entry shown in the history popup
+  const [viewingExercise, setViewingExercise] = useState(null); // exercise name shown as a graph within the popup
 
   // Workout logger state - track sets per exercise independently
   const [activeSession, setActiveSession] = useState(null);
@@ -1274,29 +3365,66 @@ function Fitness({ user }) {
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
   const [workoutStart, setWorkoutStart] = useState(null);
 
-  const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+  const fitnessDraft = useMemo(() => (
+    view === "workout" && activeSession ? {
+      activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+      restTimerEnabled, restSeconds, restActive,
+      restDeadline,
+    } : null
+  ), [view, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+    restTimerEnabled, restSeconds, restActive, restDeadline]);
+  useSessionDraft(user?.id, "fitness", fitnessDraft, draft => {
+    if (!draft.activeSession?.exercises?.length) return;
+    setActiveSession(draft.activeSession);
+    setExerciseIdx(draft.exerciseIdx || 0);
+    setSetProgress(draft.setProgress || {});
+    setCompletedSets(draft.completedSets || {});
+    setCurrentInputs(draft.currentInputs || {});
+    setWorkoutStart(draft.workoutStart);
+    setRestTimerEnabled(Boolean(draft.restTimerEnabled));
+    setRestSeconds(draft.restSeconds || 90);
+    const remaining = Math.max(0, Math.ceil(((draft.restDeadline || 0) - Date.now()) / 1000));
+    setRestDeadline(draft.restDeadline || null);
+    setRestRemaining(remaining);
+    setRestActive(remaining > 0);
+    setView("workout");
+  });
+  const getLocalDate = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const today = getLocalDate();
+
+const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const AI_QUESTIONS = [
-    { id: "split_pref", q: "Do you have a preferred training split, or are you open to suggestions?", type: "choice", options: ["I have a preferred split", "Open to suggestions"] },
-    { id: "days_per_week", q: "How many days per week can you train?", type: "choice", options: ["2-3 days", "4 days", "5 days", "6+ days"] },
-    { id: "preferred_days", q: "Do you have preferred training days?", type: "text", placeholder: "e.g. Mon, Wed, Fri or no preference" },
-    { id: "goal", q: "What is your main goal?", type: "choice", options: ["Build muscle", "Lose fat", "Build strength", "Athletic performance", "General fitness"] },
-    { id: "experience", q: "What is your experience level?", type: "choice", options: ["Beginner (0-1 year)", "Intermediate (1-3 years)", "Advanced (3+ years)"] },
-    { id: "session_length", q: "How long can you train per session?", type: "choice", options: ["30 minutes", "45 minutes", "60 minutes", "90+ minutes"] },
-    { id: "equipment", q: "What equipment do you have access to?", type: "choice", options: ["Full commercial gym", "Home gym (weights)", "Dumbbells only", "Bodyweight only"] },
-    { id: "weak_points", q: "Any weak points or areas you want to prioritise?", type: "text", placeholder: "e.g. legs, shoulders, core or none" },
-    { id: "injuries", q: "Any injuries or exercises to avoid?", type: "text", placeholder: "e.g. bad knees, avoid overhead pressing or none" },
-    { id: "favourite_exercises", q: "Any favourite exercises you definitely want included?", type: "text", placeholder: "e.g. bench press, squats or no preference" },
+    { id: "goal", q: "What are we working towards?", type: "choice", options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
+    { id: "experience", q: "Where are you starting from?", type: "choice", options: ["New to training", "Training for a few months", "1–3 years of training", "3+ years of training"], custom: true },
+    { id: "days_per_week", q: "How many days can you realistically train?", type: "choice", options: ["1 day", "2 days", "3 days", "4 days", "5 days", "6 days", "7 days"] },
+    { id: "preferred_days", q: "Which days work best for you?", type: "text", placeholder: "e.g. Monday, Wednesday and Saturday — or flexible" },
+    { id: "session_length", q: "How much time do you have for training?", type: "availability" },
+    { id: "equipment", q: "What equipment can you use?", type: "choice", options: ["Full gym", "Home gym with weights", "Dumbbells only", "Bodyweight only"], custom: true },
+    { id: "split", q: "Do you have a preferred training split?", type: "choice", options: ["Let the coach choose", "Full body", "Upper / lower", "Push / pull / legs"], custom: true },
+    { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference" },
+    { id: "priorities", q: "What would you like to focus on?", type: "text", placeholder: "Muscle groups, skills or performance goals — or balanced progress" },
+    { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments — or none" },
   ];
 
   useEffect(() => { if (!user) return; loadData(); }, [user]);
 
   useEffect(() => {
-    if (!restActive) return;
-    if (restRemaining <= 0) { setRestActive(false); return; }
-    const timer = setTimeout(() => setRestRemaining(r => r - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [restActive, restRemaining]);
+    if (!restActive || !restDeadline) return;
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((restDeadline - Date.now()) / 1000));
+      setRestRemaining(remaining);
+      if (!remaining) setRestActive(false);
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    document.addEventListener("visibilitychange", update);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", update); };
+  }, [restActive, restDeadline]);
 
   const loadData = async () => {
     setLoading(true);
@@ -1382,6 +3510,17 @@ function Fitness({ user }) {
     return lastWeight.toFixed(1); // Keep same
   };
 
+  // All logged occurrences of an exercise, oldest first, for the progression graph
+  const getExerciseProgression = (exName) => {
+    return history
+      .map(log => {
+        const ex = log.exercises?.find(e => e.name?.toLowerCase() === exName?.toLowerCase());
+        return ex ? { date: log.date, sets: ex.sets || [] } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+  };
+
   const startWorkout = (session) => {
     setActiveSession(session);
     setExerciseIdx(0);
@@ -1409,7 +3548,7 @@ function Fitness({ user }) {
 
     const totalSets = activeSession.exercises[eIdx]?.sets || 0;
 
-    if (restTimerEnabled) { setRestRemaining(restSeconds); setRestActive(true); }
+    if (restTimerEnabled) { setRestDeadline(Date.now() + restSeconds * 1000); setRestRemaining(restSeconds); setRestActive(true); }
 
     if (sIdx + 1 < totalSets) {
       setSetProgress(prev => ({ ...prev, [eIdx]: sIdx + 1 }));
@@ -1426,6 +3565,8 @@ function Fitness({ user }) {
   };
 
   const buildAIPlan = async () => {
+    if (aiBuilding) return;
+    setAiPlanError("");
     setAiBuilding(true);
     const context = Object.entries(aiAnswers).map(([k, v]) => {
       const q = AI_QUESTIONS.find(q => q.id === k);
@@ -1435,27 +3576,55 @@ function Fitness({ user }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: `You are an expert personal trainer. Build a complete training programme. 
+          responseTokens: 6000,
+          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, and tempo for every exercise. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest; never replace different budgets with a single generic session length. Honour preferred days and the requested split, favourites, and priorities when feasible. Briefly explain conflicts rather than pretending they are satisfied. If days are flexible, assign the stated session budgets to sensible days. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN, never full day names; if no days are specified, choose a sensible schedule. Keep notes brief.
 SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
 Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["Monday"], "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
+{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
           messages: [{ role: "user", content: `Build me a training programme:\n${context}` }],
         }),
       });
+      if (!res.ok) throw new Error("Could not build programme");
       const data = await res.json();
       const text = data.content?.map(b => b.text || "").join("") || "";
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      if (!Array.isArray(parsed.sessions) || !parsed.sessions.length ||
+          parsed.sessions.length !== parseInt(aiAnswers.days_per_week, 10) ||
+          parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
+            session.days.some(day => !DAYS.includes(day)) ||
+            !Array.isArray(session.exercises) || !session.exercises.length ||
+            session.exercises.some(exercise => !exercise.name || !Number.isInteger(exercise.sets) ||
+              exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
+              exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
+              typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)))) {
+        throw new Error("Incomplete programme");
+      }
       setAiPlan(parsed);
-    } catch (e) { console.error("AI plan error:", e); }
+    } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
     setAiBuilding(false);
   };
 
   if (loading) return (
     <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
-      <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2 }}>LOADING FITNESS DATA...</div>
+      <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 2 }}>LOADING FITNESS DATA...</div>
     </div></div>
   );
 
+  const fitnessCoach = (
+    <div style={{ marginBottom: 16 }}>
+      <AICoach
+        title="AI FITNESS COACH"
+        introduction="Talk through your programme, exercise technique, progress, or changes that fit your goals and schedule."
+        activationLabel="CHAT WITH FITNESS COACH"
+        openingMessage="Review my current training context, then ask what I would like help with. If my goals or constraints are missing, ask rather than assuming."
+        system={`You are TRACK3D's fitness coach. Give practical, concise general training guidance and maintain a two-way conversation. Use the saved programme, recent logs, and current workout below. Ask about goals, experience, equipment, available time, and personal constraints when needed. Consider the user's reasons for agreeing or disagreeing. Do not invent missing history or claim to have changed their plan: this chat only gives advice, and changes must be made through the programme controls. Do not diagnose injuries or encourage training through pain.
+Saved programme: ${JSON.stringify(split?.sessions || [])}
+Current programme shown in the app: ${JSON.stringify(sessions)}
+Recent workout logs: ${JSON.stringify(history.slice(0, 5))}
+Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?.name, exercise: activeSession?.exercises?.[exerciseIdx], completedSets } : null)}`}
+      />
+    </div>
+  );
   // ── WORKOUT VIEW ──────────────────────────────────────────────────────────
   if (view === "workout" && activeSession) {
     const currentExercise = activeSession.exercises[exerciseIdx];
@@ -1472,16 +3641,17 @@ Respond ONLY with valid JSON:
 
     return (
       <div className="t3d-fade">
-        <div className="t3d-card">
+        {fitnessCoach}
+        <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === 0 ? 0.3 : 1 }}
               onClick={() => { if (exerciseIdx > 0) setExerciseIdx(e => e-1); }}>◀</button>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, letterSpacing: 2, color: "#E0EAF0" }}>{currentExercise.name}</div>
-              <div style={{ fontSize: 10, color: "#3A5060", marginTop: 3 }}>Exercise {exerciseIdx+1} of {totalExercises}</div>
+              <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 3 }}>Exercise {exerciseIdx+1} of {totalExercises}</div>
               {currentExercise.tempo && <div style={{ fontSize: 10, color: NEON2, marginTop: 2 }}>TEMPO: {currentExercise.tempo}</div>}
-              {currentSetRepRange && <div style={{ fontSize: 10, color: "#3A5060", marginTop: 2 }}>REP RANGE: {currentSetRepRange}</div>}
+              {currentSetRepRange && <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 2 }}>REP RANGE: {currentSetRepRange}</div>}
             </div>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
               onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>▶</button>
@@ -1491,7 +3661,7 @@ Respond ONLY with valid JSON:
           {restActive && (
             <div style={{ textAlign: "center", marginBottom: 16, padding: 12, background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 24, color: NEON2 }}>{restRemaining}s</div>
-              <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1 }}>REST</div>
+              <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1 }}>REST</div>
               <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8 }} onClick={() => setRestActive(false)}>SKIP</button>
             </div>
           )}
@@ -1499,12 +3669,12 @@ Respond ONLY with valid JSON:
           {/* Current set */}
           {!restActive && (
             <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#3A5060", letterSpacing: 2, marginBottom: 16 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 16 }}>
                 SET {sIdx+1} OF {totalSets}
               </div>
               <div style={{ display: "flex", gap: 16, justifyContent: "center", alignItems: "center" }}>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>REPS</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS</div>
                   <input type="number" value={reps}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                     placeholder="0"
@@ -1513,7 +3683,7 @@ Respond ONLY with valid JSON:
                 <button onClick={confirmSet} disabled={!weight || !reps}
                   style={{ width: 60, height: 60, background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 8, fontSize: 24, cursor: "pointer", color: "#080C10", fontWeight: 700 }}>▶</button>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>WEIGHT (kg)</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>WEIGHT (kg)</div>
                   <input type="number" value={weight}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                     placeholder={suggestedWeight || "0"}
@@ -1536,7 +3706,7 @@ Respond ONLY with valid JSON:
           {/* Last session scores */}
           {lastSets && lastSets.length > 0 && (
             <div style={{ background: "rgba(0,200,255,.04)", border: "1px solid rgba(0,200,255,.1)", borderRadius: 6, padding: 10, marginBottom: 12 }}>
-              <div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 2, marginBottom: 6, fontFamily: "'Orbitron',monospace" }}>LAST SESSION</div>
+              <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 2, marginBottom: 6, fontFamily: "'Orbitron',monospace" }}>LAST SESSION</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {lastSets.map((s, i) => (
                   <div key={i} style={{ fontSize: 10, color: NEON2 }}>Set {i+1}: {s.reps} reps @ {s.weight}kg</div>
@@ -1550,7 +3720,7 @@ Respond ONLY with valid JSON:
             <div style={{ marginBottom: 12 }}>
               {exerciseCompletedSets.map((s, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 10, opacity: 0.7 }}>
-                  <span style={{ color: "#3A5060", fontFamily: "'Orbitron',monospace", fontSize: 9 }}>SET {s.setNum} ✓</span>
+                  <span style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace", fontSize: 9 }}>SET {s.setNum} ✓</span>
                   <span style={{ color: NEON }}>{s.reps} reps</span>
                   <span style={{ color: NEON2 }}>{s.weight}kg</span>
                 </div>
@@ -1600,9 +3770,9 @@ Respond ONLY with valid JSON:
           <div style={{ fontSize: 48, marginBottom: 16 }}>💪</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: NEON, letterSpacing: 3, marginBottom: 24 }}>WORKOUT COMPLETE</div>
           <div className="t3d-grid3" style={{ marginBottom: 20 }}>
-            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>MINUTES</div></div>
-            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{allSets.length}</div><div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>SETS</div></div>
-            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: "#FF8C00" }}>{Math.round(totalVol).toLocaleString()}</div><div style={{ fontSize: 9, color: "#3A5060", letterSpacing: 1 }}>KG VOLUME</div></div>
+            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>MINUTES</div></div>
+            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{allSets.length}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>SETS</div></div>
+            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: "#FF8C00" }}>{Math.round(totalVol).toLocaleString()}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>KG VOLUME</div></div>
           </div>
           {activeSession?.exercises?.map((ex, eIdx) => {
             const sets = completedSets[eIdx] || [];
@@ -1611,7 +3781,7 @@ Respond ONLY with valid JSON:
               <div key={eIdx} style={{ marginBottom: 12, textAlign: "left" }}>
                 <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 6 }}>{ex.name}</div>
                 {sets.map((s, i) => (
-                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#3A5060", padding: "3px 0" }}>
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#E0EAF0", padding: "3px 0" }}>
                     <span>Set {s.setNum}</span><span style={{ color: NEON }}>{s.reps} reps @ {s.weight}kg</span>
                   </div>
                 ))}
@@ -1630,25 +3800,28 @@ Respond ONLY with valid JSON:
       <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
         <div style={{ fontSize: 30, marginBottom: 16 }}>🤖</div>
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 8 }}>BUILDING YOUR PROGRAMME</div>
-        <div style={{ fontSize: 11, color: "#3A5060" }}>Analysing your answers...</div>
+        <div style={{ fontSize: 11, color: "#E0EAF0" }}>Analysing your answers...</div>
       </div></div>
     );
 
     if (aiPlan) return (
       <div className="t3d-fade">
         <div className="t3d-card">
-          <div className="t3d-ctitle">YOUR AI PROGRAMME — {aiPlan.split_name}</div>
+          <div className="t3d-ctitle">YOUR AI COACH PROGRAMME — {aiPlan.split_name}</div>
+          <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds. X means an explosive movement.</p>
+          {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
+          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
           {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>{aiPlan.notes}</div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON }}>{s.name}</div>
-                <div style={{ fontSize: 10, color: "#3A5060" }}>{s.days?.join(", ")}</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0" }}>{s.days?.join(", ")}</div>
               </div>
               {s.exercises?.map((ex, eIdx) => (
                 <div key={eIdx} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                   <div style={{ flex: 1 }}>{ex.name}</div>
-                  <div style={{ fontSize: 10, color: "#3A5060" }}>{ex.sets}×{Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps}</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0" }}>{ex.sets}×{Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps}</div>
                   {ex.tempo && <div style={{ fontSize: 9, color: NEON2 }}>{ex.tempo}</div>}
                 </div>
               ))}
@@ -1657,11 +3830,23 @@ Respond ONLY with valid JSON:
           <div style={{ display: "flex", gap: 8 }}>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setAiPlan(null)}>REBUILD</button>
             <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
-              await saveSplit(aiPlan.sessions);
-              setSessions(aiPlan.sessions);
-              setSplit({ sessions: aiPlan.sessions });
-              setView("home");
-            }}>SAVE PROGRAMME ✓</button>
+              if (aiPlanSaving) return;
+              setAiPlanSaving(true);
+              setAiPlanError("");
+              try {
+                const programme = { sessions: aiPlan.sessions, split_name: aiPlan.split_name || "My Programme" };
+                const { error } = split
+                  ? await supabase.from("workout_splits").update(programme).eq("user_id", user.id)
+                  : await supabase.from("workout_splits").insert({ user_id: user.id, ...programme });
+                if (error) throw error;
+                setSessions(aiPlan.sessions);
+                setSplit({ sessions: aiPlan.sessions, split_name: aiPlan.split_name });
+                setView("home");
+              } catch {
+                setAiPlanError("Your programme could not be saved. Please try again.");
+              } finally { setAiPlanSaving(false); }
+            }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE PROGRAMME ✓"}</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiPlanSaving} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </div>
       </div>
@@ -1676,7 +3861,7 @@ Respond ONLY with valid JSON:
               <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= aiStep ? NEON : BORDER, transition: "background .3s" }} />
             ))}
           </div>
-          <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {AI_QUESTIONS.length}</div>
+          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {AI_QUESTIONS.length}</div>
           <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 24, lineHeight: 1.6 }}>{currentQ.q}</div>
           {currentQ.type === "choice" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
@@ -1687,25 +3872,57 @@ Respond ONLY with valid JSON:
                   color: aiAnswers[currentQ.id] === opt ? NEON : "#4A6070" }}
                   onClick={() => {
                     setAiAnswers(a => ({ ...a, [currentQ.id]: opt }));
-                    setTimeout(() => { if (aiStep < AI_QUESTIONS.length-1) setAiStep(s => s+1); else buildAIPlan(); }, 300);
+
                   }}>{opt}</button>
               ))}
             </div>
           )}
-          {currentQ.type === "text" && (
+          {currentQ.type === "choice" && currentQ.custom && (
+            <label style={{ display: "block", fontSize: 12, marginBottom: 16 }}>
+              Or describe your own answer
+              <input className="t3d-input" style={{ marginTop: 8 }}
+                value={currentQ.options.includes(aiAnswers[currentQ.id]) ? "" : aiAnswers[currentQ.id] || ""}
+                onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
+            </label>
+          )}
+          {currentQ.type === "availability" && (
+            <div style={{ marginBottom: 20 }}>
+              <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6 }}>
+                Enter any duration or range. If your time varies, tell the coach what works on each day.
+              </p>
+              <label style={{ display: "block", fontSize: 12 }}>
+                Your available time
+                <textarea className="t3d-input" rows={4} style={{ marginTop: 8, resize: "vertical" }}
+                  placeholder={"e.g. 35 minutes every session\nOr Monday 30 minutes, Wednesday 45–60, Saturday 75"}
+                  value={aiAnswers[currentQ.id] || ""}
+                  onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
+              </label>
+              <button className="t3d-btn" style={{ width: "100%", marginTop: 12 }}
+                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
+                onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
+            </div>
+          )}          {currentQ.type === "text" && (
             <div style={{ marginBottom: 20 }}>
               <input className="t3d-input" placeholder={currentQ.placeholder}
                 value={aiAnswers[currentQ.id] || ""}
                 onChange={e => setAiAnswers(a => ({ ...a, [currentQ.id]: e.target.value }))}
                 onKeyDown={e => e.key === "Enter" && aiAnswers[currentQ.id] && (aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan())} />
               <button className="t3d-btn" style={{ width: "100%", padding: 12, marginTop: 12 }}
-                disabled={!aiAnswers[currentQ.id]}
+                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
                 onClick={() => aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan()}>
                 {aiStep < AI_QUESTIONS.length-1 ? "NEXT →" : "BUILD MY PROGRAMME"}
               </button>
             </div>
           )}
-          {aiStep > 0 && <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setAiStep(s => s-1)}>← BACK</button>}
+          {currentQ.type === "choice" && (
+            <button className="t3d-btn" style={{ width: "100%", marginBottom: 12 }}
+              disabled={!String(aiAnswers[currentQ.id] || "").trim()} onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
+          )}
+          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+          <div style={{ display: "flex", gap: 10 }}>
+            {aiStep > 0 && <button className="t3d-btn t3d-btn-sm" onClick={() => setAiStep(step => step - 1)}>← BACK</button>}
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setView("home")}>CANCEL</button>
+          </div>
         </div>
       </div>
     );
@@ -1719,6 +3936,9 @@ Respond ONLY with valid JSON:
           {setupStep === 0 && (
             <div>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => {
+                setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder");
+              }}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
                 {[2,3,4,5,6].map(n => (
                   <button key={n} className="t3d-btn" style={{ width: 50, height: 50, fontSize: 18, padding: 0,
@@ -1738,11 +3958,11 @@ Respond ONLY with valid JSON:
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                 <div className="t3d-ctitle" style={{ margin: 0 }}>SESSION {currentSessionIdx+1} OF {sessions.length}</div>
-                <div style={{ fontSize: 10, color: "#3A5060" }}>{currentSessionIdx+1}/{sessions.length}</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0" }}>{currentSessionIdx+1}/{sessions.length}</div>
               </div>
 
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>SESSION NAME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>SESSION NAME</div>
                 <input className="t3d-input" placeholder="e.g. Push, Pull, Legs, Upper..."
                   value={sessions[currentSessionIdx].name}
                   onChange={e => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, name: e.target.value } : s))} />
@@ -1750,7 +3970,7 @@ Respond ONLY with valid JSON:
 
               {/* Days — optional */}
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>
                   TRAINING DAYS <span style={{ color: "#2A3A48" }}>(OPTIONAL)</span>
                 </div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1758,7 +3978,7 @@ Respond ONLY with valid JSON:
                     const selected = sessions[currentSessionIdx].days?.includes(d);
                     return (
                       <button key={d} className="t3d-btn t3d-btn-sm"
-                        style={{ background: selected ? "rgba(0,255,178,.15)" : "transparent", borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#3A5060" }}
+                        style={{ background: selected ? "rgba(0,255,178,.15)" : "transparent", borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#E0EAF0" }}
                         onClick={() => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? {
                           ...s, days: selected ? s.days.filter(x => x !== d) : [...(s.days||[]), d]
                         } : s))}>
@@ -1771,7 +3991,7 @@ Respond ONLY with valid JSON:
 
               {/* Exercises */}
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>EXERCISES</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>EXERCISES</div>
                 {sessions[currentSessionIdx].exercises?.map((ex, eIdx) => (
                   <div key={eIdx} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -1779,7 +3999,7 @@ Respond ONLY with valid JSON:
                       <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }}
                         onClick={() => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s))}>✕</button>
                     </div>
-                    <div style={{ fontSize: 10, color: "#3A5060" }}>
+                    <div style={{ fontSize: 10, color: "#E0EAF0" }}>
                       {ex.sets} sets · {Array.isArray(ex.reps) ? ex.reps.join(" / ") : ex.reps} reps
                       {ex.tempo && ` · ${ex.tempo}`}
                     </div>
@@ -1818,7 +4038,7 @@ Respond ONLY with valid JSON:
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setNoDaysWarning(false)}>GO BACK & ADD DAYS</button>
-                <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#3A5060" }} onClick={async () => {
+                <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={async () => {
                   setNoDaysWarning(false);
                   await saveSplit(sessions);
                   setSplit({ sessions });
@@ -1836,13 +4056,13 @@ Respond ONLY with valid JSON:
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>ADD EXERCISE</div>
 
               <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>EXERCISE NAME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>EXERCISE NAME</div>
                 <input className="t3d-input" placeholder="e.g. Bench Press" value={newEx.name} onChange={e => setNewEx(n => ({ ...n, name: e.target.value }))} />
               </div>
 
               <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>SETS</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>SETS</div>
                   <input className="t3d-input" type="number" placeholder="3" value={newEx.sets}
                     onChange={e => {
                       const n = parseInt(e.target.value) || 1;
@@ -1850,17 +4070,17 @@ Respond ONLY with valid JSON:
                     }} />
                 </div>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>TEMPO (OPT)</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>TEMPO (OPT)</div>
                   <input className="t3d-input" placeholder="3-1-0-1" value={newEx.tempo} onChange={e => setNewEx(n => ({ ...n, tempo: e.target.value }))} />
                 </div>
               </div>
 
               {/* Per-set rep ranges */}
               <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>REPS PER SET</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS PER SET</div>
                 {Array.from({ length: newEx.sets || 3 }, (_, i) => (
                   <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                    <div style={{ fontSize: 10, color: "#3A5060", width: 40, fontFamily: "'Orbitron',monospace" }}>SET {i+1}</div>
+                    <div style={{ fontSize: 10, color: "#E0EAF0", width: 40, fontFamily: "'Orbitron',monospace" }}>SET {i+1}</div>
                     <input className="t3d-input" placeholder="e.g. 8-10 or 8"
                       value={newEx.reps[i] || ""}
                       onChange={e => setNewEx(prev => {
@@ -1900,11 +4120,16 @@ Respond ONLY with valid JSON:
 
   return (
     <div className="t3d-fade">
+      <div className="t3d-card" style={{ marginBottom: 16 }}>
+        <div className="t3d-ctitle">BUILD WITH AI COACH</div>
+        <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6 }}>10 quick questions, with room for your own answers. A programme built around you — exercises, sets, rep ranges, and tempo.</p>
+        <button className="t3d-btn" onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder"); }}>LET&apos;S BUILD MY PLAN →</button>
+      </div>
       {!split ? (
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>⚡</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>FITNESS</div>
-          <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 28, lineHeight: 1.7 }}>Set up your training programme.<br />Track every session. Beat every record.</div>
+          <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>Set up your training programme.<br />Track every session. Beat every record.</div>
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
             <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10 }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
             <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
@@ -1932,52 +4157,33 @@ Respond ONLY with valid JSON:
             </div>
           </div>
 
-          <div className="t3d-card" style={{ marginBottom: 16, padding: 20 }}>
-            {/* Today's recommended session */}
-            {todaySession && (
-              <div style={{ textAlign: "center", marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` }}>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#3A5060", letterSpacing: 2, marginBottom: 6 }}>SCHEDULED TODAY</div>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON, marginBottom: 6 }}>{todaySession.name}</div>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 14 }}>{todaySession.exercises?.length} exercises</div>
+          <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 28 }}>
+            {todaySession ? (
+              <>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>TODAY</div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON, marginBottom: 8 }}>{todaySession.name}</div>
+                <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 20 }}>{todaySession.exercises?.length} exercises</div>
                 {history[0]?.date === today ? (
                   <>
-                    <div style={{ fontSize: 24, marginBottom: 6 }}>✅</div>
-                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON, letterSpacing: 2, marginBottom: 4 }}>LOGGED</div>
-                    <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 10 }}>{history[0]?.duration_mins} mins · {Math.round(history[0]?.total_volume||0).toLocaleString()} kg volume</div>
+                    <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 4 }}>WORKOUT LOGGED</div>
+                    <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12 }}>{history[0]?.duration_mins} mins · {Math.round(history[0]?.total_volume||0).toLocaleString()} kg volume</div>
                     <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => startWorkout(todaySession)}>EDIT / REDO</button>
                   </>
                 ) : (
                   <button className="t3d-big-btn"
-                    style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 13, letterSpacing: 3 }}
+                    style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
                     onClick={() => startWorkout(todaySession)}>⚡ START WORKOUT</button>
                 )}
-              </div>
-            )}
-
-            {/* All sessions — always visible */}
-            <div>
-              <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 10 }}>
-                {todaySession ? "OR CHOOSE A DIFFERENT SESSION" : "CHOOSE A SESSION TO START"}
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {sessions.map((s, i) => {
-                  const isTodays = s.name === todaySession?.name;
-                  return (
-                    <button key={i} className="t3d-btn t3d-btn-sm"
-                      style={{ background: isTodays ? "rgba(0,255,178,.08)" : "transparent", borderColor: isTodays ? NEON : BORDER, color: isTodays ? NEON : "#4A6070", fontSize: 10 }}
-                      onClick={() => startWorkout(s)}>
-                      {s.name}
-                      {isTodays && <span style={{ fontSize: 8, marginLeft: 4, color: NEON }}>★</span>}
-                    </button>
-                  );
-                })}
-              </div>
-              {!todaySession && (
-                <div style={{ fontSize: 10, color: "#2A3A48", marginTop: 10 }}>
-                  💡 Allocate days to sessions in EDIT SESSIONS to get a daily recommendation
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>NO SESSION SCHEDULED TODAY</div>
+                <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+                  {sessions.map((s, i) => <button key={i} className="t3d-btn t3d-btn-sm" onClick={() => startWorkout(s)}>{s.name}</button>)}
                 </div>
-              )}
-            </div>
+              </>
+            )}
           </div>
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
@@ -1995,7 +4201,7 @@ Respond ONLY with valid JSON:
               const session = sessions.find(s => s.days?.includes(day));
               return (
                 <div key={day} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}` }}>
-                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 32, color: isToday ? NEON : "#3A5060" }}>{day}</div>
+                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 32, color: isToday ? NEON : "#E0EAF0" }}>{day}</div>
                   <div style={{ flex: 1, fontSize: 11, color: session ? (isToday ? "#E0EAF0" : "#4A6070") : "#2A3A48" }}>{session ? session.name : "REST"}</div>
                   {isToday && <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, padding: "2px 7px", borderRadius: 10, background: "rgba(0,255,178,.1)", color: NEON, border: "1px solid rgba(0,255,178,.25)" }}>TODAY</span>}
                 </div>
@@ -2012,10 +4218,10 @@ Respond ONLY with valid JSON:
             </div>
             {restTimerEnabled && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 11, color: "#3A5060" }}>Duration:</div>
+                <div style={{ fontSize: 11, color: "#E0EAF0" }}>Duration:</div>
                 {[30,60,90,120,180].map(s => (
                   <button key={s} className="t3d-btn t3d-btn-sm"
-                    style={{ background: restSeconds === s ? "rgba(0,255,178,.15)" : "transparent", borderColor: restSeconds === s ? NEON : BORDER, color: restSeconds === s ? NEON : "#3A5060" }}
+                    style={{ background: restSeconds === s ? "rgba(0,255,178,.15)" : "transparent", borderColor: restSeconds === s ? NEON : BORDER, color: restSeconds === s ? NEON : "#E0EAF0" }}
                     onClick={() => setRestSeconds(s)}>{s}s</button>
                 ))}
               </div>
@@ -2039,13 +4245,13 @@ Respond ONLY with valid JSON:
                               ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, name: e.target.value } : ex2)
                             } : s))} />
                           <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                            <input style={{ background: "transparent", border: "none", color: "#3A5060", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 40 }}
+                            <input style={{ background: "transparent", border: "none", color: "#E0EAF0", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 40 }}
                               value={ex.sets} placeholder="sets"
                               onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
                                 ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, sets: e.target.value } : ex2)
                               } : s))} />
                             <span style={{ color: "#2A3A48", fontSize: 10 }}>sets ×</span>
-                            <input style={{ background: "transparent", border: "none", color: "#3A5060", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 60 }}
+                            <input style={{ background: "transparent", border: "none", color: "#E0EAF0", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 60 }}
                               value={Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps} placeholder="reps"
                               onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
                                 ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, reps: e.target.value } : ex2)
@@ -2053,7 +4259,7 @@ Respond ONLY with valid JSON:
                             <span style={{ color: "#2A3A48", fontSize: 10 }}>reps</span>
                           </div>
                         </div>
-                        <button style={{ background: "none", border: "none", color: "#3A5060", cursor: "pointer", fontSize: 16, padding: "0 4px" }}
+                        <button style={{ background: "none", border: "none", color: "#E0EAF0", cursor: "pointer", fontSize: 16, padding: "0 4px" }}
                           onClick={() => setSessions(prev => prev.map((s, i) => i === sIdx ? {
                             ...s, exercises: s.exercises.filter((_, j) => j !== eIdx)
                           } : s))}>×</button>
@@ -2086,19 +4292,20 @@ Respond ONLY with valid JSON:
           <div className="t3d-card">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setHistoryOpen(h => !h)}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>WORKOUT HISTORY</div>
-              <div style={{ color: "#3A5060", fontSize: 14, transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</div>
+              <div style={{ color: "#E0EAF0", fontSize: 14, transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</div>
             </div>
             {historyOpen && (
               <div style={{ marginTop: 16 }}>
                 {history.length === 0 ? (
-                  <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", padding: "16px 0" }}>No workouts logged yet!</div>
+                  <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No workouts logged yet!</div>
                 ) : history.map((log, i) => (
-                  <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
+                  <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}`, cursor: "pointer" }}
+                    onClick={() => { setViewingSession(log); setViewingExercise(null); }}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON }}>{log.session_name}</div>
-                      <div style={{ fontSize: 10, color: "#3A5060" }}>{log.date}</div>
+                      <div style={{ fontSize: 10, color: "#E0EAF0" }}>{log.date}</div>
                     </div>
-                    <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#3A5060" }}>
+                    <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#E0EAF0" }}>
                       <span>{log.duration_mins} mins</span>
                       <span>{Math.round(log.total_volume).toLocaleString()} kg volume</span>
                     </div>
@@ -2107,6 +4314,50 @@ Respond ONLY with valid JSON:
               </div>
             )}
           </div>
+
+          {/* Session detail / exercise progression popup */}
+          {viewingSession && (
+            <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.92)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}
+              onClick={() => { setViewingSession(null); setViewingExercise(null); }}>
+              <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "85vh", overflowY: "auto" }}
+                onClick={e => e.stopPropagation()}>
+                {!viewingExercise ? (
+                  <>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2 }}>{viewingSession.session_name}</div>
+                      <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => setViewingSession(null)}>✕</div>
+                    </div>
+                    <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 18 }}>{viewingSession.date}</div>
+                    {(viewingSession.exercises || []).map((ex, i) => (
+                      <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: "pointer" }}
+                        onClick={() => setViewingExercise(ex.name)}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                          <div style={{ fontSize: 12 }}>{ex.name}</div>
+                          <div style={{ fontSize: 10, color: NEON2 }}>VIEW PROGRESS →</div>
+                        </div>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {(ex.sets || []).map((s, j) => (
+                            <span key={j} style={{ fontSize: 10, color: "#E0EAF0", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: "3px 8px" }}>
+                              {s.weight || 0}kg × {s.reps || 0}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2 }}>{viewingExercise}</div>
+                      <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => setViewingSession(null)}>✕</div>
+                    </div>
+                    <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 16 }} onClick={() => setViewingExercise(null)}>← BACK TO SESSION</button>
+                    <ExerciseLineChart points={getExerciseProgression(viewingExercise)} />
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -2234,7 +4485,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
       {/* Tweaks box */}
       <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 10 }}>
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>WANT TO CHANGE ANYTHING?</div>
-        <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 8 }}>e.g. "swap salmon for chicken", "remove eggs", "add more carbs at lunch"</div>
+        <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>e.g. "swap salmon for chicken", "remove eggs", "add more carbs at lunch"</div>
         {tweakDone && <div style={{ fontSize: 10, color: NEON, marginBottom: 8 }}>✓ Plan updated!</div>}
         <div style={{ display: "flex", gap: 8 }}>
           <input className="t3d-ai-input" placeholder="Describe your changes..." value={tweakInput}
@@ -2257,7 +4508,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
             </div>
           ) : (
             <div>
-              <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 8 }}>Generate a lighter rest day version of your plan automatically</div>
+              <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>Generate a lighter rest day version of your plan automatically</div>
               <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.3)", color: NEON2 }} onClick={buildRestDayPlan} disabled={restLoading}>
                 {restLoading ? "🤖 Building..." : "🤖 AI BUILD REST DAY MEALS"}
               </button>
@@ -2309,7 +4560,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
             <div style={{ fontSize: 12, color: m.role === "user" ? "#C0D8E8" : "#8AABB8", lineHeight: 1.65 }}>{m.content}</div>
           </div>
         ))}
-        {loading && <div style={{ fontSize: 11, color: "#3A5060" }}>Thinking...</div>}
+        {loading && <div style={{ fontSize: 11, color: "#E0EAF0" }}>Thinking...</div>}
         <div ref={endRef} />
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -2367,6 +4618,8 @@ function Nutrition({ user, userSessions }) {
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
   const [todayLogged, setTodayLogged] = useState(false);
   const [editingHistoryIdx, setEditingHistoryIdx] = useState(null);
+  const [planSaveError, setPlanSaveError] = useState(false);
+  const [savingPlan, setSavingPlan] = useState(false);
 
   const getLocalDate = () => {
     const d = new Date();
@@ -2404,9 +4657,8 @@ function Nutrition({ user, userSessions }) {
   };
 
   const savePlan = async (trainingMeals, restMeals, macros) => {
-    if (!user) return;
-    await supabase.from("nutrition_plans").upsert({
-      user_id: user.id,
+    if (!user) return false;
+    const row = {
       daily_calories: macros.calories,
       protein_target: macros.protein,
       carbs_target: macros.carbs,
@@ -2415,7 +4667,21 @@ function Nutrition({ user, userSessions }) {
       meals: trainingMeals,
       rest_day_meals: restMeals,
       updated_at: new Date().toISOString(),
-    }, { onConflict: "user_id" });
+    };
+    try {
+      const { data: existing } = await supabase.from("nutrition_plans").select("id").eq("user_id", user.id).single();
+      const result = existing
+        ? await supabase.from("nutrition_plans").update(row).eq("user_id", user.id)
+        : await supabase.from("nutrition_plans").insert({ user_id: user.id, ...row });
+      if (result.error) {
+        console.error("savePlan error:", result.error.message, result.error.code, result.error.details, result.error.hint);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error("savePlan exception:", e.message || e);
+      return false;
+    }
   };
 
   const saveLog = async () => {
@@ -2508,7 +4774,7 @@ function Nutrition({ user, userSessions }) {
     return s;
   })();
 
-  if (loading) return <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}><div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2 }}>LOADING NUTRITION...</div></div></div>;
+  if (loading) return <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}><div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 2 }}>LOADING NUTRITION...</div></div></div>;
 
   // ── DAY REVIEW ────────────────────────────────────────────────────────────
   if (view === "review") {
@@ -2529,9 +4795,9 @@ function Nutrition({ user, userSessions }) {
             <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 3, marginBottom: 24 }}>DAY COMPLETE</div>
             <div className="t3d-grid3" style={{ marginBottom: 20 }}>
-              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: completedMeals===meals.length?NEON:"#FF8C00" }}>{completedMeals}/{meals.length}</div><div style={{ fontSize: 9, color: "#3A5060" }}>MEALS ON PLAN</div></div>
-              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff)<100?NEON:diff>0?NEON3:"#FF8C00" }}>{totalCals}</div><div style={{ fontSize: 9, color: "#3A5060" }}>KCAL TOTAL</div></div>
-              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=plan?.protein_target?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#3A5060" }}>PROTEIN</div></div>
+              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: completedMeals===meals.length?NEON:"#FF8C00" }}>{completedMeals}/{meals.length}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>MEALS ON PLAN</div></div>
+              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff)<100?NEON:diff>0?NEON3:"#FF8C00" }}>{totalCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>KCAL TOTAL</div></div>
+              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=plan?.protein_target?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>PROTEIN</div></div>
             </div>
             <div style={{ background: diff>200?"rgba(255,45,120,.06)":diff<-200?"rgba(255,140,0,.06)":"rgba(0,255,178,.06)", border: `1px solid ${diff>200?"rgba(255,45,120,.2)":diff<-200?"rgba(255,140,0,.2)":"rgba(0,255,178,.2)"}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: diff>200?NEON3:diff<-200?"#FF8C00":NEON, letterSpacing: 2, marginBottom: 8 }}>
@@ -2548,7 +4814,7 @@ function Nutrition({ user, userSessions }) {
               </div>
             )}
             {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>GET AI FEEDBACK</button>}
-            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 16 }}>AI analysing your day...</div>}
+            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
             {aiFeedback && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { await saveLog(); setTodayLogged(true); await loadData(); setView("home"); }}>SAVE & FINISH</button>
           </div>
@@ -2566,11 +4832,11 @@ function Nutrition({ user, userSessions }) {
             <div style={{ textAlign: "center", padding: "16px 0" }}>
               <div style={{ fontSize: 32, marginBottom: 12 }}>🍕</div>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0", letterSpacing: 2, marginBottom: 16 }}>BE HONEST</div>
-              <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20, lineHeight: 1.6 }}>Did you eat anything off plan today?</div>
+              <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>Did you eat anything off plan today?</div>
 
               {/* Off plan input first */}
               <div style={{ background: SURFACE2, borderRadius: 8, padding: 16, marginBottom: 16, textAlign: "left" }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 8, letterSpacing: 1 }}>WHAT DID YOU HAVE?</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8, letterSpacing: 1 }}>WHAT DID YOU HAVE?</div>
                 <input className="t3d-input" placeholder="e.g. chocolate bar, crisps, takeaway..." value={offPlanFood} onChange={e => setOffPlanFood(e.target.value)} style={{ marginBottom: 10 }} />
                 <input className="t3d-input" type="number" placeholder="Estimated extra calories (optional)" value={offPlanCals} onChange={e => setOffPlanCals(e.target.value)} />
               </div>
@@ -2598,14 +4864,14 @@ function Nutrition({ user, userSessions }) {
           <div className="t3d-progress-dots">
             {[...meals.map((_,i)=>i), "offplan"].map((_,i) => <div key={i} className={`t3d-dot-step ${i===reviewStep?"active":i<reviewStep?"done":""}`} />)}
           </div>
-          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>MEAL {reviewStep+1} OF {meals.length}</div>
+          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>MEAL {reviewStep+1} OF {meals.length}</div>
           <div style={{ textAlign: "center", padding: "12px 0 20px" }}>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0", marginBottom: 4 }}>{meal?.name}</div>
-            {meal?.time && <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 14 }}>{meal.time}</div>}
+            {meal?.time && <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 14 }}>{meal.time}</div>}
             <div style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 14, textAlign: "left" }}>
               {meal?.ingredients?.map((ing, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 11, borderBottom: i<meal.ingredients.length-1?`1px solid ${BORDER}`:"none" }}>
-                  <span style={{ color: "#8AABB8" }}>{ing.name}</span><span style={{ color: "#3A5060" }}>{ing.weight}{ing.unit}</span>
+                  <span style={{ color: "#8AABB8" }}>{ing.name}</span><span style={{ color: "#E0EAF0" }}>{ing.weight}{ing.unit}</span>
                 </div>
               ))}
             </div>
@@ -2615,7 +4881,7 @@ function Nutrition({ user, userSessions }) {
               <span style={{ color: "#FF8C00" }}>{meal?.carbs}g C</span>
               <span style={{ color: "#8AABB8" }}>{meal?.fats}g F</span>
             </div>
-            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 16 }}>Did you have this exactly as planned?</div>
+            <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 16 }}>Did you have this exactly as planned?</div>
             <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
               <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(s => s+1); }}>✓</button>
               <button className="t3d-cross-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: false })); setReviewStep(s => s+1); }}>✗</button>
@@ -2637,7 +4903,7 @@ function Nutrition({ user, userSessions }) {
           <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
             {["GOALS", "MEALS", "REVIEW"].map((s, i) => (
               <div key={i} style={{ flex: 1, textAlign: "center", padding: "8px 4px", borderRadius: 5, fontSize: 9, letterSpacing: 1, fontFamily: "'Orbitron',monospace",
-                background: setupStep===i?"rgba(0,255,178,.08)":"transparent", border: `1px solid ${setupStep===i?NEON:BORDER}`, color: setupStep===i?NEON:"#3A5060" }}>{s}</div>
+                background: setupStep===i?"rgba(0,255,178,.08)":"transparent", border: `1px solid ${setupStep===i?NEON:BORDER}`, color: setupStep===i?NEON:"#E0EAF0" }}>{s}</div>
             ))}
           </div>
 
@@ -2646,23 +4912,23 @@ function Nutrition({ user, userSessions }) {
             <div>
               <div className="t3d-ctitle">YOUR GOALS & STATS</div>
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 6 }}>BODY WEIGHT (kg)</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>BODY WEIGHT (kg)</div>
                 <input className="t3d-input" type="number" placeholder="e.g. 80" value={bodyWeight} onChange={e => setBodyWeight(e.target.value)} />
               </div>
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>GOAL</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>GOAL</div>
                 {Object.keys(GOAL_MULTIPLIERS).map(g => (
                   <button key={g} className="t3d-btn" style={{ width: "100%", textAlign: "left", padding: "11px 16px", marginBottom: 6, fontSize: 11, background: goal===g?"rgba(0,255,178,.12)":"transparent", borderColor: goal===g?NEON:BORDER, color: goal===g?NEON:"#4A6070" }} onClick={() => setGoal(g)}>{g}</button>
                 ))}
               </div>
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>ACTIVITY LEVEL</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>ACTIVITY LEVEL</div>
                 {["Sedentary", "Lightly active", "Moderately active", "Very active"].map(a => (
                   <button key={a} className="t3d-btn" style={{ width: "100%", textAlign: "left", padding: "11px 16px", marginBottom: 6, fontSize: 11, background: activityLevel===a?"rgba(0,255,178,.12)":"transparent", borderColor: activityLevel===a?NEON:BORDER, color: activityLevel===a?NEON:"#4A6070" }} onClick={() => setActivityLevel(a)}>{a}</button>
                 ))}
               </div>
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", letterSpacing: 1, marginBottom: 8 }}>HOW MANY MEALS PER DAY?</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>HOW MANY MEALS PER DAY?</div>
                 <div style={{ display: "flex", gap: 8 }}>
                   {[3,4,5,6].map(n => (
                     <button key={n} className="t3d-btn" style={{ flex: 1, height: 44, fontSize: 16, padding: 0, background: mealsPerDay===n?"rgba(0,255,178,.15)":"transparent", borderColor: mealsPerDay===n?NEON:BORDER }} onClick={() => setMealsPerDay(n)}>{n}</button>
@@ -2698,7 +4964,7 @@ function Nutrition({ user, userSessions }) {
                   <div style={{ display: "flex", gap: 6 }}>
                     {[["Kcal", customCalories, setCustomCalories], ["P(g)", customProtein, setCustomProtein], ["C(g)", customCarbs, setCustomCarbs], ["F(g)", customFats, setCustomFats]].map(([l, v, s]) => (
                       <div key={l} style={{ flex: 1 }}>
-                        <div style={{ fontSize: 8, color: "#3A5060", marginBottom: 4 }}>{l}</div>
+                        <div style={{ fontSize: 8, color: "#E0EAF0", marginBottom: 4 }}>{l}</div>
                         <input className="t3d-input" type="number" placeholder={l} value={v} onChange={e => s(e.target.value)} style={{ padding: "6px 4px", fontSize: 11 }} />
                       </div>
                     ))}
@@ -2719,7 +4985,7 @@ function Nutrition({ user, userSessions }) {
               {hasRestDayPlan && (
                 <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                   <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: !editingRestDay?"rgba(0,255,178,.12)":"transparent", borderColor: !editingRestDay?NEON:BORDER }} onClick={() => setEditingRestDay(false)}>TRAINING DAY MEALS</button>
-                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: editingRestDay?"rgba(0,200,255,.12)":"transparent", borderColor: editingRestDay?NEON2:BORDER, color: editingRestDay?NEON2:"#3A5060" }} onClick={() => setEditingRestDay(true)}>REST DAY MEALS</button>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: editingRestDay?"rgba(0,200,255,.12)":"transparent", borderColor: editingRestDay?NEON2:BORDER, color: editingRestDay?NEON2:"#E0EAF0" }} onClick={() => setEditingRestDay(true)}>REST DAY MEALS</button>
                 </div>
               )}
 
@@ -2729,15 +4995,15 @@ function Nutrition({ user, userSessions }) {
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", fontSize: 11 }} onClick={() => setMealBuildMode("own")}>
                       📝 Build my own meals
-                      <div style={{ fontSize: 9, color: "#3A5060", marginTop: 4 }}>Add custom meals with ingredients</div>
+                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>Add custom meals with ingredients</div>
                     </button>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", fontSize: 11 }} onClick={() => setMealBuildMode("common")}>
                       🍽️ Choose from common meals
-                      <div style={{ fontSize: 9, color: "#3A5060", marginTop: 4 }}>Pick from breakfast, lunch, dinner, snacks</div>
+                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>Pick from breakfast, lunch, dinner, snacks</div>
                     </button>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", fontSize: 11, borderColor: "rgba(0,200,255,.3)", color: NEON2 }} onClick={() => { setMealBuildMode("ai"); setShowAiQuestions(true); }}>
                       🤖 AI build my meal plan
-                      <div style={{ fontSize: 9, color: "#3A5060", marginTop: 4 }}>10 questions to build the perfect plan</div>
+                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>10 questions to build the perfect plan</div>
                     </button>
                   </div>
                 </div>
@@ -2747,7 +5013,7 @@ function Nutrition({ user, userSessions }) {
                   <div style={{ display: "flex", gap: 3, marginBottom: 16 }}>
                     {AI_NUTRITION_QUESTIONS.map((_, i) => <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i<=aiNutritionStep?NEON:BORDER }} />)}
                   </div>
-                  <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>QUESTION {aiNutritionStep+1} OF {AI_NUTRITION_QUESTIONS.length}</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>QUESTION {aiNutritionStep+1} OF {AI_NUTRITION_QUESTIONS.length}</div>
                   <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>{AI_NUTRITION_QUESTIONS[aiNutritionStep].q}</div>
                   {AI_NUTRITION_QUESTIONS[aiNutritionStep].type === "choice" && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
@@ -2786,7 +5052,7 @@ function Nutrition({ user, userSessions }) {
                     <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setMealBuildMode(null); setCurrentMeals([]); }}>CHANGE</button>
                   </div>
 
-                  {aiMealLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#3A5060" }}>🤖 Building your meal plan...</div>}
+                  {aiMealLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#E0EAF0" }}>🤖 Building your meal plan...</div>}
                   {/* AI tweaks box */}
                   {mealBuildMode === "ai" && currentMeals.length > 0 && !aiMealLoading && (
                     <AiTweaksBox
@@ -2806,7 +5072,7 @@ function Nutrition({ user, userSessions }) {
                     <div style={{ marginBottom: 14 }}>
                       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
                         {["breakfast","lunch","dinner","snacks"].map(cat => (
-                          <button key={cat} className="t3d-btn t3d-btn-sm" style={{ flex: 1, fontSize: 8, background: commonCategory===cat?"rgba(0,255,178,.12)":"transparent", borderColor: commonCategory===cat?NEON:BORDER, color: commonCategory===cat?NEON:"#3A5060" }} onClick={() => setCommonCategory(cat)}>
+                          <button key={cat} className="t3d-btn t3d-btn-sm" style={{ flex: 1, fontSize: 8, background: commonCategory===cat?"rgba(0,255,178,.12)":"transparent", borderColor: commonCategory===cat?NEON:BORDER, color: commonCategory===cat?NEON:"#E0EAF0" }} onClick={() => setCommonCategory(cat)}>
                             {cat.toUpperCase()}
                           </button>
                         ))}
@@ -2819,7 +5085,7 @@ function Nutrition({ user, userSessions }) {
                             <div style={{ width: 20, height: 20, borderRadius: 4, border: `1px solid ${selected?NEON:BORDER}`, background: selected?"rgba(0,255,178,.1)":"transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: NEON, flexShrink: 0 }}>{selected?"✓":""}</div>
                             <div style={{ flex: 1 }}>
                               <div style={{ fontSize: 12 }}>{m.name}</div>
-                              <div style={{ fontSize: 10, color: "#3A5060" }}>{m.calories} kcal · {m.protein}g P</div>
+                              <div style={{ fontSize: 10, color: "#E0EAF0" }}>{m.calories} kcal · {m.protein}g P</div>
                             </div>
                           </div>
                         );
@@ -2832,22 +5098,22 @@ function Nutrition({ user, userSessions }) {
                       {currentMeals.map((m, i) => (
                         <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                            <div style={{ fontSize: 12 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#3A5060" }}>· {m.time}</span>}</div>
+                            <div style={{ fontSize: 12 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
                             <div style={{ display: "flex", gap: 6 }}>
                               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => { setNewMeal({ ...m, calories: String(m.calories), protein: String(m.protein), carbs: String(m.carbs), fats: String(m.fats) }); setEditMealIdx(i); setAddMealModal(true); }}>✏️</button>
                               <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setCurrentMeals(prev => prev.filter((_,j)=>j!==i))}>✕</button>
                             </div>
                           </div>
-                          <div style={{ fontSize: 10, color: "#3A5060" }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
+                          <div style={{ fontSize: 10, color: "#E0EAF0" }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
                         </div>
                       ))}
                       {/* Totals vs target */}
                       <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 10 }}>
-                        <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>TOTALS vs TARGETS</div>
+                        <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>TOTALS vs TARGETS</div>
                         {[["Calories", currentMeals.reduce((a,m)=>a+(m.calories||0),0), getFinalMacros().calories, NEON, "kcal"],
                           ["Protein", currentMeals.reduce((a,m)=>a+(m.protein||0),0), getFinalMacros().protein, NEON2, "g"]].map(([l,v,t,c,u]) => (
                           <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
-                            <span style={{ color: "#3A5060" }}>{l}</span>
+                            <span style={{ color: "#E0EAF0" }}>{l}</span>
                             <span style={{ color: Math.abs(v-t)/t<0.1?NEON:"#FF8C00" }}>{v} / {t}{u}</span>
                           </div>
                         ))}
@@ -2874,8 +5140,8 @@ function Nutrition({ user, userSessions }) {
               <div className="t3d-ctitle">REVIEW YOUR PLAN</div>
               {planMeals.map((m, i) => (
                 <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
-                  <div style={{ fontSize: 12, marginBottom: 4 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#3A5060" }}>· {m.time}</span>}</div>
-                  {m.ingredients?.map((ing,j) => <div key={j} style={{ fontSize: 10, color: "#3A5060" }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
+                  <div style={{ fontSize: 12, marginBottom: 4 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
+                  {m.ingredients?.map((ing,j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0" }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
                   <div style={{ fontSize: 10, color: "#4A6070", marginTop: 6 }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
                 </div>
               ))}
@@ -2890,14 +5156,30 @@ function Nutrition({ user, userSessions }) {
                   ))}
                 </div>
               )}
+              {planSaveError && (
+                <div style={{ fontSize: 11, color: NEON3, marginTop: 12, textAlign: "center" }}>
+                  Couldn't save your plan — check your connection and try again.
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(1)}>← BACK</button>
-                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
-                  const macros = getFinalMacros();
-                  await savePlan(planMeals, restDayMeals, macros);
-                  setPlan({ meals: planMeals, rest_day_meals: restDayMeals, daily_calories: macros.calories, protein_target: macros.protein, carbs_target: macros.carbs, fats_target: macros.fats, goal });
+                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan} onClick={async () => {
+                  setSavingPlan(true);
+                  setPlanSaveError(false);
+                  // Target the plan is judged against is the actual totals of the locked-in meals,
+                  // not the originally calculated recommendation (they can drift apart).
+                  const realMacros = {
+                    calories: planMeals.reduce((a, m) => a + (m.calories || 0), 0),
+                    protein: planMeals.reduce((a, m) => a + (m.protein || 0), 0),
+                    carbs: planMeals.reduce((a, m) => a + (m.carbs || 0), 0),
+                    fats: planMeals.reduce((a, m) => a + (m.fats || 0), 0),
+                  };
+                  const ok = await savePlan(planMeals, restDayMeals, realMacros);
+                  setSavingPlan(false);
+                  if (!ok) { setPlanSaveError(true); return; }
+                  setPlan({ meals: planMeals, rest_day_meals: restDayMeals, daily_calories: realMacros.calories, protein_target: realMacros.protein, carbs_target: realMacros.carbs, fats_target: realMacros.fats, goal });
                   setView("home");
-                }}>SAVE PLAN ✓</button>
+                }}>{savingPlan ? "SAVING..." : "SAVE PLAN ✓"}</button>
               </div>
             </div>
           )}
@@ -2909,15 +5191,15 @@ function Nutrition({ user, userSessions }) {
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "85vh", overflowY: "auto" }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>{editMealIdx !== null ? "EDIT MEAL" : "ADD MEAL"}</div>
               <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>MEAL NAME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>MEAL NAME</div>
                 <input className="t3d-input" placeholder="e.g. Chicken & Rice" value={newMeal.name} onChange={e => setNewMeal(n => ({ ...n, name: e.target.value }))} />
               </div>
               <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>TIME (OPTIONAL)</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>TIME (OPTIONAL)</div>
                 <input className="t3d-input" type="time" value={newMeal.time} onChange={e => setNewMeal(n => ({ ...n, time: e.target.value }))} />
               </div>
               <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 8 }}>INGREDIENTS</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>INGREDIENTS</div>
                 {newMeal.ingredients.map((ing, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 11, color: "#8AABB8" }}>
                     <span>{ing.name}</span><span>{ing.weight}{ing.unit}</span>
@@ -2967,7 +5249,7 @@ function Nutrition({ user, userSessions }) {
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>🥗</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>NUTRITION</div>
-          <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 28, lineHeight: 1.7 }}>Build your nutrition plan.<br />Track every meal. Hit every target.</div>
+          <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>Build your nutrition plan.<br />Track every meal. Hit every target.</div>
           <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => { setSetupStep(0); setView("setup"); }}>SET UP MY NUTRITION</button>
           <div style={{ marginTop: 16, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>Calorie targets are estimates. Consult a dietitian for medical nutrition advice.</div>
         </div>
@@ -2976,10 +5258,10 @@ function Nutrition({ user, userSessions }) {
           {/* Training/rest day toggle */}
           <div className="t3d-card" style={{ marginBottom: 16, padding: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 1 }}>TODAY IS A</div>
+              <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>TODAY IS A</div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm" style={{ background: isTrainingDay?"rgba(0,255,178,.12)":"transparent", borderColor: isTrainingDay?NEON:BORDER, color: isTrainingDay?NEON:"#3A5060" }} onClick={() => setIsTrainingDay(true)}>TRAINING DAY</button>
-                <button className="t3d-btn t3d-btn-sm" style={{ background: !isTrainingDay?"rgba(0,200,255,.12)":"transparent", borderColor: !isTrainingDay?NEON2:BORDER, color: !isTrainingDay?NEON2:"#3A5060" }} onClick={() => setIsTrainingDay(false)}>REST DAY</button>
+                <button className="t3d-btn t3d-btn-sm" style={{ background: isTrainingDay?"rgba(0,255,178,.12)":"transparent", borderColor: isTrainingDay?NEON:BORDER, color: isTrainingDay?NEON:"#E0EAF0" }} onClick={() => setIsTrainingDay(true)}>TRAINING DAY</button>
+                <button className="t3d-btn t3d-btn-sm" style={{ background: !isTrainingDay?"rgba(0,200,255,.12)":"transparent", borderColor: !isTrainingDay?NEON2:BORDER, color: !isTrainingDay?NEON2:"#E0EAF0" }} onClick={() => setIsTrainingDay(false)}>REST DAY</button>
               </div>
             </div>
           </div>
@@ -3009,12 +5291,12 @@ function Nutrition({ user, userSessions }) {
               <>
                 <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2, marginBottom: 4 }}>TODAY LOGGED</div>
-                <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 12 }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
+                <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12 }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
                 <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => { setMealResults(todayLog?.meals_completed||{}); setOffPlanFood(todayLog?.off_plan_food||""); setOffPlanCals(String(todayLog?.off_plan_calories||"")); setReviewStep(0); setAiFeedback(""); setView("review"); }}>EDIT TODAY</button>
               </>
             ) : (
               <>
-                <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20, letterSpacing: 1 }}>READY TO REVIEW YOUR DAY?</div>
+                <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, letterSpacing: 1 }}>READY TO REVIEW YOUR DAY?</div>
                 <button className="t3d-big-btn"
                   style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
                   onClick={() => { setReviewStep(0); setMealResults({}); setOffPlanFood(""); setOffPlanCals(""); setAiFeedback(""); setView("review"); }}>
@@ -3034,9 +5316,9 @@ function Nutrition({ user, userSessions }) {
               <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                   <div style={{ fontSize: 12 }}>{m.name}</div>
-                  <div style={{ fontSize: 10, color: "#3A5060" }}>{m.time}</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0" }}>{m.time}</div>
                 </div>
-                {m.ingredients?.map((ing, j) => <div key={j} style={{ fontSize: 10, color: "#3A5060", marginBottom: 2 }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
+                {m.ingredients?.map((ing, j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 2 }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
                 <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 10 }}>
                   <span style={{ color: NEON }}>{m.calories} kcal</span>
                   <span style={{ color: NEON2 }}>{m.protein}g P</span>
@@ -3078,14 +5360,14 @@ function Nutrition({ user, userSessions }) {
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setWeeklyOpen(w=>!w)}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SUMMARY</div>
-              <div style={{ color: "#3A5060", fontSize: 14, transform: weeklyOpen?"rotate(180deg)":"rotate(0deg)", transition: "transform .2s" }}>▾</div>
+              <div style={{ color: "#E0EAF0", fontSize: 14, transform: weeklyOpen?"rotate(180deg)":"rotate(0deg)", transition: "transform .2s" }}>▾</div>
             </div>
             {weeklyOpen && (
               <div style={{ marginTop: 16 }}>
                 <div className="t3d-grid3">
-                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON }}>{avgCals}</div><div style={{ fontSize: 9, color: "#3A5060" }}>AVG KCAL</div><div style={{ fontSize: 8, color: Math.abs(avgCals-plan.daily_calories)/plan.daily_calories<0.05?NEON:"#FF8C00" }}>target {plan.daily_calories}</div></div>
-                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON2 }}>{avgProtein}g</div><div style={{ fontSize: 9, color: "#3A5060" }}>AVG PROTEIN</div><div style={{ fontSize: 8, color: avgProtein>=plan.protein_target?NEON:"#FF8C00" }}>target {plan.protein_target}g</div></div>
-                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#FF8C00" }}>{onPlanDays}/7</div><div style={{ fontSize: 9, color: "#3A5060" }}>ON PLAN DAYS</div></div>
+                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON }}>{avgCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>AVG KCAL</div><div style={{ fontSize: 8, color: Math.abs(avgCals-plan.daily_calories)/plan.daily_calories<0.05?NEON:"#FF8C00" }}>target {plan.daily_calories}</div></div>
+                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON2 }}>{avgProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>AVG PROTEIN</div><div style={{ fontSize: 8, color: avgProtein>=plan.protein_target?NEON:"#FF8C00" }}>target {plan.protein_target}g</div></div>
+                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#FF8C00" }}>{onPlanDays}/7</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>ON PLAN DAYS</div></div>
                 </div>
               </div>
             )}
@@ -3095,19 +5377,19 @@ function Nutrition({ user, userSessions }) {
           <div className="t3d-card">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setHistoryOpen(h=>!h)}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>NUTRITION HISTORY</div>
-              <div style={{ color: "#3A5060", fontSize: 14, transform: historyOpen?"rotate(180deg)":"rotate(0deg)", transition: "transform .2s" }}>▾</div>
+              <div style={{ color: "#E0EAF0", fontSize: 14, transform: historyOpen?"rotate(180deg)":"rotate(0deg)", transition: "transform .2s" }}>▾</div>
             </div>
             {historyOpen && (
               <div style={{ marginTop: 16 }}>
                 {logs.length===0 ? (
-                  <div style={{ fontSize: 11, color: "#3A5060", textAlign: "center", padding: "16px 0" }}>No history yet!</div>
+                  <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No history yet!</div>
                 ) : logs.map((log, i) => {
                   const completed = Object.values(log.meals_completed||{}).filter(v=>v===true).length;
                   const total = plan?.meals?.length||1;
                   return (
                     <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <div style={{ fontSize: 10, color: "#3A5060", fontFamily: "'Orbitron',monospace" }}>{log.date}</div>
+                        <div style={{ fontSize: 10, color: "#E0EAF0", fontFamily: "'Orbitron',monospace" }}>{log.date}</div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                           <div style={{ fontSize: 10, color: completed/total>=0.8?NEON:"#FF8C00" }}>{completed}/{total} meals</div>
                           <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => {
@@ -3119,7 +5401,7 @@ function Nutrition({ user, userSessions }) {
                           }}>EDIT</button>
                         </div>
                       </div>
-                      <div style={{ display: "flex", gap: 12, fontSize: 10, color: "#3A5060" }}>
+                      <div style={{ display: "flex", gap: 12, fontSize: 10, color: "#E0EAF0" }}>
                         <span style={{ color: NEON }}>{log.total_calories} kcal</span>
                         <span style={{ color: NEON2 }}>{log.total_protein}g P</span>
                         {log.off_plan_food && <span style={{ color: "#FF8C00" }}>+ off plan</span>}
@@ -3346,7 +5628,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   const doneCount = tasks.filter(t=>t.status==="done").length;
   const halfCount = tasks.filter(t=>t.status==="half").length;
 
-  if (loading) return <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}><div style={{ fontSize: 11, color: "#3A5060", letterSpacing: 2 }}>LOADING CALENDAR...</div></div></div>;
+  if (loading) return <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}><div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 2 }}>LOADING CALENDAR...</div></div></div>;
 
   // ── DEBRIEF VIEW ──────────────────────────────────────────────────────────
   if (debriefView) {
@@ -3362,7 +5644,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
             <div style={{ fontSize: 48, marginBottom: 16 }}>🌙</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 3, marginBottom: 20 }}>DAY COMPLETE</div>
             <div style={{ margin: "0 auto 20px" }}><ScoreRing score={score*10} size={120} /></div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#3A5060", letterSpacing: 2, marginBottom: 20 }}>DAY SCORE: {score}/10</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 20 }}>DAY SCORE: {score}/10</div>
             <div style={{ marginBottom: 20, textAlign: "left" }}>
               {tasks.map((t,i) => {
                 const result = taskResults[t.id] || t.status;
@@ -3370,13 +5652,13 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
                   <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                     <div style={{ width: 20, height: 20, borderRadius: 4, background: `${statusColor(result)}20`, border: `1px solid ${statusColor(result)}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: statusColor(result), flexShrink: 0 }}>{statusIcon(result)}</div>
                     <div style={{ flex: 1, color: "#8AABB8" }}>{t.title}</div>
-                    <div style={{ fontSize: 9, color: "#3A5060" }}>{t.start_time}</div>
+                    <div style={{ fontSize: 9, color: "#E0EAF0" }}>{t.start_time}</div>
                   </div>
                 );
               })}
             </div>
             {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={() => getAIDebrief(taskResults, score)}>GET AI FEEDBACK</button>}
-            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#3A5060", marginBottom: 16 }}>AI analysing your day...</div>}
+            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
             {aiFeedback && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 14, marginBottom: 20, textAlign: "left" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 6 }}>AI COACH</div><div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.65 }}>{aiFeedback}</div></div>}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { await saveDebrief(taskResults, score); setDebriefView(false); }}>SAVE & FINISH</button>
           </div>
@@ -3390,11 +5672,11 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
           <div className="t3d-progress-dots">
             {pendingTasks.map((_,i) => <div key={i} className={`t3d-dot-step ${i===debriefStep?"active":i<debriefStep?"done":""}`} />)}
           </div>
-          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#3A5060", letterSpacing: 2 }}>TASK {debriefStep+1} OF {pendingTasks.length}</div>
+          <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>TASK {debriefStep+1} OF {pendingTasks.length}</div>
           <div style={{ textAlign: "center", padding: "20px 0 28px" }}>
-            <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 8 }}>{currentTask?.start_time}{currentTask?.end_time ? ` — ${currentTask.end_time}` : ""}</div>
+            <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>{currentTask?.start_time}{currentTask?.end_time ? ` — ${currentTask.end_time}` : ""}</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: "#E0EAF0", letterSpacing: 2, marginBottom: 28 }}>{currentTask?.title}</div>
-            <div style={{ fontSize: 12, color: "#3A5060", marginBottom: 20 }}>How did this go?</div>
+            <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20 }}>How did this go?</div>
             <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
               {[["✓","done",NEON,"rgba(0,255,178,.1)"],["⏰","half","#FF8C00","rgba(255,140,0,.1)"],["✗","none",NEON3,"rgba(255,45,120,.1)"]].map(([icon,val,color,bg]) => (
                 <button key={val} style={{ flex: 1, maxWidth: 90, padding: "16px 8px", background: bg, border: `2px solid ${color}`, borderRadius: 8, cursor: "pointer", fontFamily: "'Orbitron',monospace", fontSize: 20, color }}
@@ -3421,7 +5703,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: isToday ? NEON : "#E0EAF0", letterSpacing: 2 }}>
               {isToday ? "TODAY" : new Date(selectedDate+"T12:00:00").toLocaleDateString("en-GB", { weekday: "short" }).toUpperCase()}
             </div>
-            <div style={{ fontSize: 10, color: "#3A5060", marginTop: 2 }}>{selectedDateFormatted}</div>
+            <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 2 }}>{selectedDateFormatted}</div>
           </div>
           <button className="t3d-btn t3d-btn-sm" onClick={() => navigateDay(1)}>▶</button>
         </div>
@@ -3437,15 +5719,15 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
             <div style={{ display: "flex", gap: 16 }}>
               <div style={{ textAlign: "center" }}>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON }}>{doneCount}</div>
-                <div style={{ fontSize: 8, color: "#3A5060", letterSpacing: 1 }}>DONE</div>
+                <div style={{ fontSize: 8, color: "#E0EAF0", letterSpacing: 1 }}>DONE</div>
               </div>
               <div style={{ textAlign: "center" }}>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#FF8C00" }}>{halfCount}</div>
-                <div style={{ fontSize: 8, color: "#3A5060", letterSpacing: 1 }}>PARTIAL</div>
+                <div style={{ fontSize: 8, color: "#E0EAF0", letterSpacing: 1 }}>PARTIAL</div>
               </div>
               <div style={{ textAlign: "center" }}>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#3A5060" }}>{tasks.length - doneCount - halfCount}</div>
-                <div style={{ fontSize: 8, color: "#3A5060", letterSpacing: 1 }}>REMAINING</div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#E0EAF0" }}>{tasks.length - doneCount - halfCount}</div>
+                <div style={{ fontSize: 8, color: "#E0EAF0", letterSpacing: 1 }}>REMAINING</div>
               </div>
             </div>
             {isToday && (
@@ -3521,7 +5803,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
               {/* Time */}
               <div style={{ width: 38, flexShrink: 0, paddingTop: 2 }}>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: isCurrentHour ? NEON : "#3A5060", letterSpacing: 0 }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: isCurrentHour ? NEON : "#E0EAF0", letterSpacing: 0 }}>
                   {String(hour).padStart(2,"0")}:00
                 </div>
               </div>
@@ -3556,13 +5838,13 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
                       {statusIcon(task.status)}
                     </div>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 11, color: task.status==="none"?"#3A5060":"#E0EAF0", textDecoration: task.status==="none"?"line-through":"none" }}>{task.title}</div>
-                      {task.end_time && <div style={{ fontSize: 9, color: "#3A5060" }}>{task.start_time} — {task.end_time}</div>}
+                      <div style={{ fontSize: 11, color: task.status==="none"?"#E0EAF0":"#E0EAF0", textDecoration: task.status==="none"?"line-through":"none" }}>{task.title}</div>
+                      {task.end_time && <div style={{ fontSize: 9, color: "#E0EAF0" }}>{task.start_time} — {task.end_time}</div>}
                     </div>
                     <div style={{ fontSize: 8, color: "#2A3A48", marginRight: 4 }}>≡</div>
-                    <button style={{ background: "none", border: "none", color: "#3A5060", cursor: "pointer", fontSize: 11, padding: "0 4px" }}
+                    <button style={{ background: "none", border: "none", color: "#E0EAF0", cursor: "pointer", fontSize: 11, padding: "0 4px" }}
                       onClick={() => setEditingTask({ ...task })}>✏️</button>
-                    <button style={{ background: "none", border: "none", color: "#3A5060", cursor: "pointer", fontSize: 14, padding: "0 2px", lineHeight: 1 }}
+                    <button style={{ background: "none", border: "none", color: "#E0EAF0", cursor: "pointer", fontSize: 14, padding: "0 2px", lineHeight: 1 }}
                       onClick={() => deleteTask(task.id)}>×</button>
                   </div>
                 ))}
@@ -3584,16 +5866,16 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
           <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 360 }}>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>EDIT TASK</div>
             <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>TASK NAME</div>
+              <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>TASK NAME</div>
               <input className="t3d-input" value={editingTask.title} onChange={e => setEditingTask(t => ({ ...t, title: e.target.value }))} />
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>START TIME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>START TIME</div>
                 <input className="t3d-input" type="time" value={editingTask.start_time || ""} onChange={e => setEditingTask(t => ({ ...t, start_time: e.target.value }))} style={{ colorScheme: "dark" }} />
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>END TIME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>END TIME</div>
                 <input className="t3d-input" type="time" value={editingTask.end_time || ""} onChange={e => setEditingTask(t => ({ ...t, end_time: e.target.value }))} style={{ colorScheme: "dark" }} />
               </div>
             </div>
@@ -3611,18 +5893,18 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
           <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 360 }}>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>ADD TASK</div>
             <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>TASK NAME</div>
+              <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>TASK NAME</div>
               <input className="t3d-input" placeholder="e.g. Team meeting, gym, study..." value={newTask.title}
                 onChange={e => setNewTask(n=>({...n,title:e.target.value}))}
                 onKeyDown={e => e.key==="Enter" && addTask(newTask)} autoFocus />
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>START TIME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>START TIME</div>
                 <input className="t3d-input" type="time" value={newTask.startTime} onChange={e => setNewTask(n=>({...n,startTime:e.target.value}))} style={{ colorScheme: "dark" }} />
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: "#3A5060", marginBottom: 6 }}>END TIME</div>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>END TIME</div>
                 <input className="t3d-input" type="time" value={newTask.endTime} onChange={e => setNewTask(n=>({...n,endTime:e.target.value}))} style={{ colorScheme: "dark" }} />
               </div>
             </div>
@@ -3696,6 +5978,9 @@ function HabitsPage({ habits, setHabits }) {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [activeSessions, setActiveSessions] = useState({});
+  const [draftError, setDraftError] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [fitnessSessions, setFitnessSessions] = useState([]);
@@ -3707,21 +5992,84 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
+    let cancelled = false;
+    let recovering = false;
+    let expiryTimer;
+    let retryTimer;
+    const expire = async () => {
+      clearLoginWindow();
+      await supabase.auth.signOut({ scope: "local" });
+      if (!cancelled) window.location.replace("/login");
+    };
+    const accept = session => {
+      if (cancelled) return;
+      if (!session) { window.location.replace("/login"); return; }
+      const expiresAt = loginWindowExpiry(session.user.id) ?? beginLoginWindow(session.user.id);
+      if (expiresAt <= Date.now()) { void expire(); return; }
+      clearTimeout(expiryTimer);
+      expiryTimer = setTimeout(expire, expiresAt - Date.now());
+      setUser(previous => previous?.id === session.user.id ? previous : session.user);
+      setAuthError("");
       setAuthLoading(false);
-      if (!session) window.location.href = "/login";
+    };
+    const recover = async () => {
+      if (cancelled || recovering || document.visibilityState === "hidden") return;
+      recovering = true;
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (cancelled) return;
+        if (error) throw error;
+        accept(data.session);
+      } catch {
+        if (!cancelled) {
+          setAuthError("Reconnecting to your account. Your active session is kept on this browser.");
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(recover, 5000);
+        }
+      } finally { recovering = false; }
+    };
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (cancelled) return;
+      // Defer work out of Supabase's auth callback/lock.
+      if (event === "SIGNED_OUT") {
+        clearLoginWindow();
+        window.location.replace("/login");
+      } else if (session) {
+        setTimeout(() => accept(session), 0);
+      }
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (!session) window.location.href = "/login";
-    });
-    return () => subscription.unsubscribe();
+    void recover();
+    window.addEventListener("online", recover);
+    window.addEventListener("focus", recover);
+    document.addEventListener("visibilitychange", recover);
+    return () => {
+      cancelled = true;
+      clearTimeout(expiryTimer);
+      clearTimeout(retryTimer);
+      subscription.unsubscribe();
+      window.removeEventListener("online", recover);
+      window.removeEventListener("focus", recover);
+      document.removeEventListener("visibilitychange", recover);
+    };
   }, []);
 
+  useEffect(() => {
+    const active = event => {
+      if (event.detail.userId === user?.id) {
+        setActiveSessions(previous => ({ ...previous, [event.detail.kind]: event.detail.active }));
+      }
+    };
+    const failed = event => { if (event.detail.userId === user?.id) setDraftError(true); };
+    window.addEventListener("track3d-active-session", active);
+    window.addEventListener("track3d-draft-error", failed);
+    return () => {
+      window.removeEventListener("track3d-active-session", active);
+      window.removeEventListener("track3d-draft-error", failed);
+    };
+  }, [user?.id]);
   if (authLoading) return (
     <div style={{ minHeight: "100vh", background: "#080C10", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Orbitron',monospace", color: "#00FFB2", letterSpacing: 4, fontSize: 12 }}>
-      LOADING...
+      {authError || "LOADING..."}
     </div>
   );
 
@@ -3762,19 +6110,23 @@ export default function App() {
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
-                SIGN OUT
-              </button>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { await supabase.auth.signOut(); window.location.href = "/login"; }}>
+                onClick={async () => { if (user) await clearDrafts(user.id).catch(() => {}); clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
                 SIGN OUT
               </button>
             </div>
           </div>
 
+          {authError && <p role="status" style={{ color: "#FFB547", fontSize: 12 }}>{authError}</p>}
+          {draftError && <p role="alert" style={{ color: "#FFB547", fontSize: 12 }}>This browser could not save your progress. Keep this page open until you finish.</p>}
+          {Object.entries(activeSessions).filter(([kind, active]) => active && kind !== tab).map(([kind]) => (
+            <button key={kind} className="t3d-btn" onClick={() => setTab(kind)}
+              style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON }}>
+              ACTIVE {kind === "morning" ? "MORNING ROUTINE" : "WORKOUT"} — CLICK TO CONTINUE →
+            </button>
+          ))}
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} />}
-          {tab === "morning" && <MorningSection user={user} />}
-          {tab === "fitness" && <Fitness user={user} />}
+          <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
+          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
