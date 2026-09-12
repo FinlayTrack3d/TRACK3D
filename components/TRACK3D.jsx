@@ -139,6 +139,14 @@ const css = `
   .t3d-grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid12 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; margin-bottom: 16px; }
+  .t3d-workout-screen { height: calc(100dvh - 140px); overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
+  .t3d-workout-screen .t3d-workout-card { flex: 1; min-height: 0; overflow: hidden; padding: 14px 18px; }
+  .t3d-compact-coach { flex: 0 0 auto; max-height: 154px; overflow: hidden; }
+  @media (max-width: 768px) {
+    .t3d-workout-screen { height: calc(100dvh - 160px); gap: 7px; }
+    .t3d-workout-screen .t3d-workout-card { padding: 10px !important; }
+    .t3d-compact-coach { max-height: 132px; }
+  }
   .t3d-card { background: #0D1318; border: 1px solid #1A2530; border-radius: 8px; padding: 20px; position: relative; overflow: hidden; }
   .t3d-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(0,255,178,.25),transparent); }
   .t3d-ctitle { font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 3px; color: #2A3A48; text-transform: uppercase; margin-bottom: 14px; }
@@ -220,14 +228,14 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [started, setStarted] = useState(false);
   const endRef = useRef(null);
 
-  const scroll = () => endRef.current?.scrollIntoView({ behavior: "smooth" });
+  const scroll = () => { if (!compact) endRef.current?.scrollIntoView({ behavior: "smooth" }); };
 
   const defaultSystem = `You are TRACK3D's AI coach - sharp, direct, data-driven accountability partner. Keep responses to 2-4 sentences. Be real, not fluffy.
 User data today:
@@ -265,20 +273,20 @@ User data today:
   const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
 
   return (
-    <div className="t3d-card" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div className="t3d-ctitle">{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
+    <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
+      <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14 }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
       {!started ? (
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 0" }}>
-          <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>
-          <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 18, textAlign: "center", lineHeight: 1.6, letterSpacing: 1 }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
+          {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
+          <div style={{ flex: 1, fontSize: compact ? 9 : 11, color: "#E0EAF0", marginBottom: compact ? 0 : 18, textAlign: compact ? "left" : "center", lineHeight: 1.5, letterSpacing: compact ? 0 : 1 }}>
             {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time.")}
           </div>
-          <button className="t3d-btn" onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : "ACTIVATE COACH")}</button>
+          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : "ACTIVATE COACH")}</button>
         </div>
       ) : (
         <>
-          <div style={{ flex: 1, overflowY: "auto", maxHeight: 260, marginBottom: 10 }}>
-            {messages.map((m, i) => (
+          <div style={{ flex: 1, overflowY: compact ? "hidden" : "auto", maxHeight: compact ? 70 : 260, marginBottom: compact ? 5 : 10 }}>
+            {(compact ? messages.slice(-2) : messages).map((m, i) => (
               <div key={i} className="t3d-ai-msg" style={{
                 background: m.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2,
                 border: `1px solid ${m.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}`,
@@ -3629,8 +3637,9 @@ Respond ONLY with valid JSON:
   );
 
   const fitnessCoach = (
-    <div style={{ marginBottom: 16 }}>
+    <div style={{ flex: "0 0 auto" }}>
       <AICoach
+        compact
         title="AI FITNESS COACH"
         introduction="Talk through your programme, exercise technique, progress, or changes that fit your goals and schedule."
         activationLabel="CHAT WITH FITNESS COACH"
@@ -3659,8 +3668,8 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
     const reps = currentInputs[exerciseIdx]?.reps || "";
 
     return (
-      <div className="t3d-fade">
-        <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 12 }} onClick={() => setView("home")}>
+      <div className="t3d-fade t3d-workout-screen">
+        <button className="t3d-btn t3d-btn-sm" style={{ alignSelf: "flex-start", flex: "0 0 auto" }} onClick={() => setView("home")}>
           ← BACK TO FITNESS · PROGRESS SAVED
         </button>
         <div className="t3d-card t3d-workout-card">
@@ -3729,23 +3738,19 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             <div style={{ background: "rgba(0,200,255,.04)", border: "1px solid rgba(0,200,255,.1)", borderRadius: 6, padding: 10, marginBottom: 12 }}>
               <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 2, marginBottom: 6, fontFamily: "'Orbitron',monospace" }}>LAST SESSION</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                {lastSets.map((s, i) => (
+                {lastSets.slice(0, 4).map((s, i) => (
                   <div key={i} style={{ fontSize: 10, color: NEON2 }}>Set {i+1}: {s.reps} reps @ {s.weight}kg</div>
                 ))}
+                {lastSets.length > 4 && <div style={{ fontSize: 10, color: "#4A6070" }}>+{lastSets.length - 4} more</div>}
               </div>
             </div>
           )}
 
           {/* Completed sets this session */}
           {exerciseCompletedSets.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              {exerciseCompletedSets.map((s, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 10, opacity: 0.7 }}>
-                  <span style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace", fontSize: 9 }}>SET {s.setNum} ✓</span>
-                  <span style={{ color: NEON }}>{s.reps} reps</span>
-                  <span style={{ color: NEON2 }}>{s.weight}kg</span>
-                </div>
-              ))}
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, padding: "7px 9px", border: `1px solid ${BORDER}`, borderRadius: 5, fontSize: 9 }}>
+              <span style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace" }}>{exerciseCompletedSets.length} SET{exerciseCompletedSets.length === 1 ? "" : "S"} COMPLETE ✓</span>
+              <span style={{ color: NEON2 }}>LATEST: {exerciseCompletedSets.at(-1).reps} @ {exerciseCompletedSets.at(-1).weight}kg</span>
             </div>
           )}
 
