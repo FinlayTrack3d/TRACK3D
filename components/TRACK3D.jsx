@@ -3651,7 +3651,6 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
         <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 12 }} onClick={() => setView("home")}>
           ← BACK TO FITNESS · PROGRESS SAVED
         </button>
-        {fitnessCoach}
         <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -3739,7 +3738,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
           )}
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE EXERCISE</button>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { await saveWorkoutLog(); setWorkoutInProgress(false); setActiveSession(null); await loadData(); setView("home"); }}>END WORKOUT</button>
           </div>
 
@@ -3747,8 +3746,8 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
               <div style={{ background: SURFACE, border: `1px solid ${NEON3}`, borderRadius: 8, padding: 28, maxWidth: 320, textAlign: "center" }}>
                 <div style={{ fontSize: 24, marginBottom: 12 }}>⚠️</div>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>OFF PLAN WARNING</div>
-                <div style={{ fontSize: 12, color: "#8AABB8", marginBottom: 20, lineHeight: 1.6 }}>Going off plan is not recommended. Consistency delivers the best results. Are you sure?</div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>REPLACE EXERCISE</div>
+                <div style={{ fontSize: 12, color: "#8AABB8", marginBottom: 20, lineHeight: 1.6 }}>Changing an exercise takes this workout off the saved plan. Do you want to continue?</div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setReplaceWarning(null)}>STAY ON PLAN</button>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => {
@@ -3759,12 +3758,13 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                       setActiveSession(updated);
                     }
                     setReplaceWarning(null);
-                  }}>REPLACE</button>
+                  }}>CONFIRM REPLACEMENT</button>
                 </div>
               </div>
             </div>
           )}
         </div>
+        {fitnessCoach}
       </div>
     );
   }
