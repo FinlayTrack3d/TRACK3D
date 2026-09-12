@@ -4155,14 +4155,41 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
   // ── HOME VIEW ─────────────────────────────────────────────────────────────
   const todaySession = getTodaySession();
+  const getSessionForDate = (date) => {
+    const dayNumber = date.getDay();
+    const shortDay = ["SUN","MON","TUE","WED","THU","FRI","SAT"][dayNumber];
+    const fullDay = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"][dayNumber];
+    return sessions.find(session => session.days?.some(day => {
+      const savedDay = String(day).toUpperCase();
+      return savedDay === shortDay || fullDay.startsWith(savedDay);
+    })) || null;
+  };
+  let missedRecommendation = null;
+  for (let daysAgo = 1; daysAgo <= 6; daysAgo += 1) {
+    const scheduledDate = new Date();
+    scheduledDate.setDate(scheduledDate.getDate() - daysAgo);
+    const dateKey = `${scheduledDate.getFullYear()}-${String(scheduledDate.getMonth()+1).padStart(2,"0")}-${String(scheduledDate.getDate()).padStart(2,"0")}`;
+    const scheduledSession = getSessionForDate(scheduledDate);
+    if (!scheduledSession) continue;
+    const trainedSince = history.some(log => log.session_name === scheduledSession.name && log.date >= dateKey && log.date <= today);
+    if (!trainedSince) {
+      missedRecommendation = {
+        session: scheduledSession,
+        dayLabel: scheduledDate.toLocaleDateString("en-GB", { weekday: "long" }),
+      };
+      break;
+    }
+  }
+  const recommendedSession = missedRecommendation?.session || todaySession;
+  const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name === recommendedSession.name));
   const thisWeekLogs = history.filter(h => {
     const d = new Date(h.date); const now = new Date();
     const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
     return d >= weekStart;
   });
-  const last7Days = Array.from({ length: 7 }, (_, index) => {
+  const last6Days = Array.from({ length: 6 }, (_, index) => {
     const date = new Date();
-    date.setDate(date.getDate() - (6 - index));
+    date.setDate(date.getDate() - (5 - index));
     const dateKey = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
     return {
       date: dateKey,
@@ -4189,61 +4216,48 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
         </div>
       ) : (
         <>
-          <div className="t3d-grid2" style={{ alignItems: "stretch" }}>
-            <div className="t3d-card" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", minHeight: 190 }}>
-              <div>
-                <div className="t3d-ctitle" style={{ color: NEON }}>TODAY&apos;S RECOMMENDED WORKOUT</div>
-                {todaySession ? (
-                  <>
-                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>{todaySession.name}</div>
-                    <div style={{ fontSize: 11, color: "#8AABB8" }}>{todaySession.exercises?.length || 0} exercises · scheduled for today</div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#8AABB8", marginBottom: 8 }}>RECOVERY DAY</div>
-                    <div style={{ fontSize: 11, color: "#4A6070" }}>Nothing is scheduled, but you can still choose a session below.</div>
-                  </>
-                )}
-              </div>
-              {todaySession && (
-                <button className="t3d-big-btn" style={{ marginTop: 20, background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 13, letterSpacing: 2 }} onClick={() => startWorkout(todaySession)}>
-                  ⚡ {history[0]?.date === today ? "TRAIN AGAIN" : "START TODAY'S WORKOUT"}
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle" style={{ color: NEON }}>RECOMMENDED NEXT SESSION</div>
+            {recommendedSession ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 240px", minWidth: 0 }}>
+                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8, overflowWrap: "anywhere" }}>{recommendedSession.name}</div>
+                  <div style={{ fontSize: 11, color: missedRecommendation ? "#FF8C00" : "#8AABB8" }}>
+                    {missedRecommendation ? `Make-up session missed on ${missedRecommendation.dayLabel}` : "Scheduled for today"} · {recommendedSession.exercises?.length || 0} exercises
+                  </div>
+                </div>
+                <button className="t3d-big-btn" style={{ flex: "0 1 280px", margin: 0, background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 12, letterSpacing: 2 }} onClick={() => startWorkout(recommendedSession)}>
+                  ⚡ {recommendedDoneToday ? "TRAIN AGAIN" : "START RECOMMENDED"}
                 </button>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: "#4A6070" }}>No missed or scheduled session. Choose any workout below.</div>
+            )}
 
-            <div className="t3d-card" style={{ minHeight: 190 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>REST TIMER</div>
-                <button className="t3d-btn t3d-btn-sm" style={{ background: restTimerEnabled ? "rgba(0,255,178,.15)" : "transparent", borderColor: restTimerEnabled ? NEON : BORDER }} onClick={() => setRestTimerEnabled(value => !value)}>
-                  {restTimerEnabled ? "ON" : "OFF"}
-                </button>
-              </div>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 28, color: restActive ? NEON2 : "#E0EAF0", margin: "24px 0 18px" }}>
-                {restActive ? `${restRemaining}s` : `${restSeconds}s`}
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {[30,60,90,120,180].map(seconds => (
-                  <button key={seconds} className="t3d-btn t3d-btn-sm" style={{ background: restSeconds === seconds ? "rgba(0,255,178,.15)" : "transparent", borderColor: restSeconds === seconds ? NEON : BORDER, color: restSeconds === seconds ? NEON : "#8AABB8" }} onClick={() => setRestSeconds(seconds)}>{seconds}s</button>
-                ))}
-              </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 16, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
+              <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#4A6070", letterSpacing: 1 }}>REST TIMER</span>
+              <button className="t3d-btn t3d-btn-sm" style={{ padding: "5px 9px", background: restTimerEnabled ? "rgba(0,255,178,.12)" : "transparent", borderColor: restTimerEnabled ? NEON : BORDER }} onClick={() => setRestTimerEnabled(value => !value)}>{restTimerEnabled ? "ON" : "OFF"}</button>
+              {[60,90,120].map(seconds => (
+                <button key={seconds} className="t3d-btn t3d-btn-sm" style={{ padding: "5px 9px", borderColor: restSeconds === seconds ? NEON : BORDER, color: restSeconds === seconds ? NEON : "#4A6070" }} onClick={() => setRestSeconds(seconds)}>{seconds}s</button>
+              ))}
+              {restActive && <span style={{ marginLeft: "auto", fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON2 }}>{restRemaining}s</span>}
             </div>
           </div>
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle">OTHER WORKOUTS</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 9 }}>
-              {sessions.filter(session => session !== todaySession).map((session, index) => (
+              {sessions.filter(session => session !== recommendedSession).map((session, index) => (
                 <button key={`${session.name}-${index}`} className="t3d-btn" onClick={() => startWorkout(session)} disabled={!session.exercises?.length}
-                  style={{ minHeight: 66, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, textAlign: "left", padding: "12px 14px", color: "#E0EAF0", borderColor: BORDER }}>
-                  <span>
-                    <span style={{ display: "block", fontSize: 10 }}>{session.name}</span>
+                  style={{ minWidth: 0, width: "100%", minHeight: 78, display: "block", textAlign: "left", padding: "12px 14px", color: "#E0EAF0", borderColor: BORDER, whiteSpace: "normal", overflow: "hidden" }}>
+                  <span style={{ display: "block", minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 10, lineHeight: 1.45, overflowWrap: "anywhere" }}>{session.name}</span>
                     <span style={{ display: "block", marginTop: 5, fontSize: 8, color: "#4A6070" }}>{session.exercises?.length || 0} EXERCISES</span>
                   </span>
-                  <span style={{ fontSize: 8, color: NEON2, textAlign: "right" }}>{(session.days || []).join(" / ") || "FLEXIBLE"}<br />START →</span>
+                  <span style={{ display: "block", marginTop: 8, fontSize: 8, color: NEON2, lineHeight: 1.45, overflowWrap: "anywhere" }}>{(session.days || []).join(" / ") || "FLEXIBLE"} · START →</span>
                 </button>
               ))}
-              {sessions.filter(session => session !== todaySession).length === 0 && <div style={{ fontSize: 11, color: "#4A6070" }}>No other sessions in this plan.</div>}
+              {sessions.filter(session => session !== recommendedSession).length === 0 && <div style={{ fontSize: 11, color: "#4A6070" }}>No other sessions in this plan.</div>}
             </div>
           </div>
 
@@ -4263,9 +4277,9 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                 <div className="t3d-slabel">LAST SESSION</div>
               </div>
             </div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#4A6070", letterSpacing: 2, marginBottom: 10 }}>LAST 7 DAYS</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#4A6070", letterSpacing: 2, marginBottom: 10 }}>LAST 6 DAYS</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 7 }}>
-              {last7Days.map(day => (
+              {last6Days.map(day => (
                 <div key={day.date} style={{ minHeight: 78, padding: 9, borderRadius: 6, background: day.workouts.length ? "rgba(0,255,178,.06)" : SURFACE2, border: `1px solid ${day.isToday ? "rgba(0,255,178,.4)" : BORDER}` }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 4, fontSize: 8, color: day.isToday ? NEON : "#4A6070", marginBottom: 8 }}><span>{day.day}</span><span>{day.dateLabel}</span></div>
                   <div style={{ fontSize: 9, color: day.workouts.length ? "#E0EAF0" : "#2A3A48", lineHeight: 1.45 }}>{day.workouts.length ? day.workouts.map(log => log.session_name).join(" + ") : "REST"}</div>
@@ -4305,7 +4319,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SPLIT</div>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>RECOMMENDED WEEKLY SPLIT</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setSplit(null); setSessions([]); setSetupStep(0); setView("setup"); }}>CHANGE PLAN</button>
