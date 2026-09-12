@@ -11,7 +11,30 @@ const SURFACE = "#0D1318";
 const SURFACE2 = "#111921";
 const BORDER = "#1A2530";
 
-const TODAY = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+const DEFAULT_HOME_TIME_ZONE = "Europe/London";
+
+const resolveHomeTimeZone = (user) => {
+  const candidate = user?.user_metadata?.timezone || user?.user_metadata?.time_zone || DEFAULT_HOME_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return DEFAULT_HOME_TIME_ZONE;
+  }
+};
+
+const getZonedDateInfo = (date = new Date(), timeZone = DEFAULT_HOME_TIME_ZONE) => {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", weekday: "long",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return {
+    dateKey: `${parts.year}-${parts.month}-${parts.day}`,
+    weekday: parts.weekday,
+    dayCode: parts.weekday.slice(0, 3).toUpperCase(),
+    time: `${parts.hour}:${parts.minute}`,
+  };
+};
 
 const INITIAL_HABITS = [
   { id: 1, name: "Morning workout", done: true, streak: 14, category: "fitness" },
@@ -3329,6 +3352,8 @@ function ExerciseLineChart({ points }) {
 }
 
 function Fitness({ user }) {
+  const homeTimeZone = resolveHomeTimeZone(user);
+  const homeDate = getZonedDateInfo(new Date(), homeTimeZone);
   const [view, setView] = useState("home");
   const [split, setSplit] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3395,12 +3420,7 @@ function Fitness({ user }) {
     setWorkoutInProgress(true);
     setView("workout");
   });
-  const getLocalDate = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-};
-
-const today = getLocalDate();
+  const today = homeDate.dateKey;
 
 const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
@@ -3467,8 +3487,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const saveWorkoutLog = async (setsToSave = completedSets) => {
     if (!user) return;
-    const d = new Date();
-    const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const dateStr = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
     const exerciseData = activeSession.exercises.map((ex, eIdx) => ({
       name: ex.name,
       sets: (setsToSave[eIdx] || []).map(s => ({ weight: s.weight, reps: s.reps })),
@@ -3480,14 +3499,6 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       duration_mins: Math.round((Date.now() - workoutStart) / 60000),
       created_at: new Date().toISOString(),
     });
-  };
-
-  const getTodaySession = () => {
-    if (!sessions.length) return null;
-    const todayNum = new Date().getDay();
-    const dayNames = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"];
-    const todayShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][todayNum];
-    return sessions.find(s => s.days?.some(d => d.toUpperCase() === todayShort || dayNames[todayNum].startsWith(d.toUpperCase()))) || null;
   };
 
   // Get last session's data for a specific exercise
@@ -3584,7 +3595,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           responseTokens: 6000,
-          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, and tempo for every exercise. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest; never replace different budgets with a single generic session length. Honour preferred days and the requested split, favourites, and priorities when feasible. Briefly explain conflicts rather than pretending they are satisfied. If days are flexible, assign the stated session budgets to sensible days. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN, never full day names; if no days are specified, choose a sensible schedule. Keep notes brief.
+          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, and tempo for every exercise. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest; never replace different budgets with a single generic session length. Honour preferred days and the requested split, favourites, and priorities when feasible. Briefly explain conflicts rather than pretending they are satisfied. If days are flexible, assign the stated session budgets to sensible days. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN, never full day names; if no days are specified, choose a sensible schedule. Keep notes brief. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
 SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
 Respond ONLY with valid JSON:
 {"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
@@ -3625,7 +3636,8 @@ Respond ONLY with valid JSON:
         activationLabel="CHAT WITH FITNESS COACH"
         openingMessage="Review my current training context, then ask what I would like help with. If my goals or constraints are missing, ask rather than assuming."
         system={`You are TRACK3D's fitness coach. Give practical, concise general training guidance and maintain a two-way conversation. Use the saved programme, recent logs, and current workout below. Ask about goals, experience, equipment, available time, and personal constraints when needed. Consider the user's reasons for agreeing or disagreeing. Do not invent missing history or claim to have changed their plan: this chat only gives advice, and changes must be made through the programme controls. Do not diagnose injuries or encourage training through pain.
-Saved programme: ${JSON.stringify(split?.sessions || [])}
+ Home timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.
+ Saved programme: ${JSON.stringify(split?.sessions || [])}
 Current programme shown in the app: ${JSON.stringify(sessions)}
 Recent workout logs: ${JSON.stringify(history.slice(0, 5))}
 Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?.name, exercise: activeSession?.exercises?.[exerciseIdx], completedSets } : null)}`}
@@ -4145,7 +4157,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: `You are TRACK3D's fitness coach. Help the user with their existing plan; do not offer to rebuild it unless they explicitly ask. Be concise, practical and supportive. Use the plan and recent workout data below when relevant. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+          system: `You are TRACK3D's fitness coach. Help the user with their existing plan; do not offer to rebuild it unless they explicitly ask. Be concise, practical and supportive. Use the plan and recent workout data below when relevant. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
           messages: updatedMessages,
         }),
       });
@@ -4161,49 +4173,51 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
   };
 
   // ── HOME VIEW ─────────────────────────────────────────────────────────────
-  const todaySession = getTodaySession();
-  const getSessionForDate = (date) => {
-    const dayNumber = date.getDay();
-    const shortDay = ["SUN","MON","TUE","WED","THU","FRI","SAT"][dayNumber];
-    const fullDay = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"][dayNumber];
+  const dayCodes = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+  const dayNames = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"];
+  const getSessionForDayCode = (dayCode) => {
+    const fullDay = dayNames[dayCodes.indexOf(dayCode)];
     return sessions.find(session => session.days?.some(day => {
       const savedDay = String(day).toUpperCase();
-      return savedDay === shortDay || fullDay.startsWith(savedDay);
+      return savedDay === dayCode || fullDay?.startsWith(savedDay);
     })) || null;
   };
+  const todaySession = getSessionForDayCode(homeDate.dayCode);
+  const homeTodayAnchor = new Date(`${today}T12:00:00Z`);
   let missedRecommendation = null;
   for (let daysAgo = 1; daysAgo <= 6; daysAgo += 1) {
-    const scheduledDate = new Date();
-    scheduledDate.setDate(scheduledDate.getDate() - daysAgo);
-    const dateKey = `${scheduledDate.getFullYear()}-${String(scheduledDate.getMonth()+1).padStart(2,"0")}-${String(scheduledDate.getDate()).padStart(2,"0")}`;
-    const scheduledSession = getSessionForDate(scheduledDate);
+    const scheduledDate = new Date(homeTodayAnchor);
+    scheduledDate.setUTCDate(scheduledDate.getUTCDate() - daysAgo);
+    const dateKey = scheduledDate.toISOString().slice(0, 10);
+    const scheduledSession = getSessionForDayCode(dayCodes[scheduledDate.getUTCDay()]);
     if (!scheduledSession) continue;
-    const trainedSince = history.some(log => log.session_name === scheduledSession.name && log.date >= dateKey && log.date <= today);
+    const trainedSince = history.some(log => log.session_name?.toLowerCase() === scheduledSession.name?.toLowerCase() && log.date >= dateKey && log.date <= today);
     if (!trainedSince) {
       missedRecommendation = {
         session: scheduledSession,
-        dayLabel: scheduledDate.toLocaleDateString("en-GB", { weekday: "long" }),
+        dayLabel: scheduledDate.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long" }),
       };
       break;
     }
   }
   const recommendedSession = missedRecommendation?.session || todaySession;
-  const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name === recommendedSession.name));
+  const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase()));
   const activeCompletedSets = Object.values(completedSets).reduce((total, sets) => total + sets.length, 0);
   const activeTotalSets = activeSession?.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0) || 0;
+  const weekStartAnchor = new Date(homeTodayAnchor);
+  weekStartAnchor.setUTCDate(weekStartAnchor.getUTCDate() - homeTodayAnchor.getUTCDay());
+  const weekStartKey = weekStartAnchor.toISOString().slice(0, 10);
   const thisWeekLogs = history.filter(h => {
-    const d = new Date(h.date); const now = new Date();
-    const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
-    return d >= weekStart;
+    return h.date >= weekStartKey && h.date <= today;
   });
   const last6Days = Array.from({ length: 6 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (5 - index));
-    const dateKey = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+    const date = new Date(homeTodayAnchor);
+    date.setUTCDate(date.getUTCDate() - (5 - index));
+    const dateKey = date.toISOString().slice(0, 10);
     return {
       date: dateKey,
-      day: date.toLocaleDateString("en-GB", { weekday: "short" }).toUpperCase(),
-      dateLabel: date.toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
+      day: date.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" }).toUpperCase(),
+      dateLabel: date.toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" }),
       workouts: history.filter(log => log.date === dateKey),
       isToday: dateKey === today,
     };
@@ -4359,9 +4373,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               </div>
             </div>
             {DAYS.map(day => {
-              const dayIdx = ["MON","TUE","WED","THU","FRI","SAT","SUN"].indexOf(day);
-              const todayIdx = [1,2,3,4,5,6,0][new Date().getDay()-1] ?? new Date().getDay()-1;
-              const isToday = dayIdx === [1,2,3,4,5,6,0].indexOf(new Date().getDay());
+              const isToday = day === homeDate.dayCode;
               const session = sessions.find(s => s.days?.includes(day));
               return (
                 <div key={day} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}` }}>
@@ -6129,6 +6141,8 @@ export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [fitnessSessions, setFitnessSessions] = useState([]);
+  const homeTimeZone = resolveHomeTimeZone(user);
+  const todayLabel = new Date().toLocaleDateString("en-US", { timeZone: homeTimeZone, weekday: "long", month: "long", day: "numeric" });
 
   useEffect(() => {
     if (!user) return;
@@ -6249,7 +6263,7 @@ export default function App() {
           <div className="t3d-header">
             <div>
               <div className="t3d-title">{titles[tab]}</div>
-              <div className="t3d-date">{TODAY.toUpperCase()}</div>
+              <div className="t3d-date">{todayLabel.toUpperCase()}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div className="t3d-dot" />
