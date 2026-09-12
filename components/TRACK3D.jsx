@@ -4160,45 +4160,21 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
     const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
     return d >= weekStart;
   });
+  const last7Days = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (6 - index));
+    const dateKey = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+    return {
+      date: dateKey,
+      day: date.toLocaleDateString("en-GB", { weekday: "short" }).toUpperCase(),
+      dateLabel: date.toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
+      workouts: history.filter(log => log.date === dateKey),
+      isToday: dateKey === today,
+    };
+  });
 
   return (
     <div className="t3d-fade">
-      {!split ? (
-        <div className="t3d-card" style={{ marginBottom: 16 }}>
-          <div className="t3d-ctitle">BUILD WITH AI COACH</div>
-          <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6 }}>10 quick questions, with room for your own answers. A programme built around you — exercises, sets, rep ranges, and tempo.</p>
-          <button className="t3d-btn" onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder"); }}>LET&apos;S BUILD MY PLAN →</button>
-        </div>
-      ) : (
-        <div className="t3d-card" style={{ marginBottom: 16 }}>
-          <div className="t3d-ctitle" style={{ color: NEON }}>ASK ABOUT YOUR PLAN</div>
-          <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask your AI coach about exercises, progression, recovery or which session to train.</p>
-          {coachMessages.length === 0 && (
-            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
-              {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
-                <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
-              ))}
-            </div>
-          )}
-          {coachMessages.length > 0 && (
-            <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
-              {coachMessages.map((message, index) => (
-                <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
-                  <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-                  <span style={{ color: message.role === "user" ? "#C0D8E8" : "#8AABB8" }}>{message.content}</span>
-                </div>
-              ))}
-              {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
-            </div>
-          )}
-          <div style={{ display: "flex", gap: 8 }}>
-            <input className="t3d-ai-input" placeholder="Ask a question about your current plan..." value={coachQuestion}
-              onChange={event => setCoachQuestion(event.target.value)}
-              onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanCoach(); } }} />
-            <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach()} disabled={coachLoading || !coachQuestion.trim()}>{coachLoading ? "ASKING..." : "ASK"}</button>
-          </div>
-        </div>
-      )}
       {!split ? (
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>⚡</div>
@@ -4207,49 +4183,124 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
             <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10 }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
             <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
-              onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setView("ai_builder"); }}>🤖 AI BUILD MY PROGRAMME</button>
+              onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder"); }}>🤖 AI BUILD MY PROGRAMME</button>
           </div>
           <div style={{ marginTop: 20, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>TRACK3D provides general fitness guidance. Consult a qualified professional before starting any new exercise programme. Not medical advice.</div>
         </div>
       ) : (
         <>
-          <div className="t3d-grid3">
-            <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">THIS WEEK</div>
-              <div className="t3d-sval" style={{ color: NEON }}>{thisWeekLogs.length}</div>
-              <div className="t3d-slabel">SESSIONS</div>
+          <div className="t3d-grid2" style={{ alignItems: "stretch" }}>
+            <div className="t3d-card" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", minHeight: 190 }}>
+              <div>
+                <div className="t3d-ctitle" style={{ color: NEON }}>TODAY&apos;S RECOMMENDED WORKOUT</div>
+                {todaySession ? (
+                  <>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>{todaySession.name}</div>
+                    <div style={{ fontSize: 11, color: "#8AABB8" }}>{todaySession.exercises?.length || 0} exercises · scheduled for today</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#8AABB8", marginBottom: 8 }}>RECOVERY DAY</div>
+                    <div style={{ fontSize: 11, color: "#4A6070" }}>Nothing is scheduled, but you can still choose a session below.</div>
+                  </>
+                )}
+              </div>
+              {todaySession && (
+                <button className="t3d-big-btn" style={{ marginTop: 20, background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 13, letterSpacing: 2 }} onClick={() => startWorkout(todaySession)}>
+                  ⚡ {history[0]?.date === today ? "TRAIN AGAIN" : "START TODAY'S WORKOUT"}
+                </button>
+              )}
             </div>
-            <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">TOTAL VOLUME</div>
-              <div className="t3d-sval" style={{ color: NEON2, fontSize: 20 }}>{thisWeekLogs.reduce((a, l) => a + (l.total_volume||0), 0).toLocaleString()}</div>
-              <div className="t3d-slabel">KG THIS WEEK</div>
-            </div>
-            <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">LAST SESSION</div>
-              <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 16 }}>{history[0]?.session_name || "—"}</div>
-              <div className="t3d-slabel">{history[0]?.date || "NO SESSIONS YET"}</div>
+
+            <div className="t3d-card" style={{ minHeight: 190 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>REST TIMER</div>
+                <button className="t3d-btn t3d-btn-sm" style={{ background: restTimerEnabled ? "rgba(0,255,178,.15)" : "transparent", borderColor: restTimerEnabled ? NEON : BORDER }} onClick={() => setRestTimerEnabled(value => !value)}>
+                  {restTimerEnabled ? "ON" : "OFF"}
+                </button>
+              </div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 28, color: restActive ? NEON2 : "#E0EAF0", margin: "24px 0 18px" }}>
+                {restActive ? `${restRemaining}s` : `${restSeconds}s`}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {[30,60,90,120,180].map(seconds => (
+                  <button key={seconds} className="t3d-btn t3d-btn-sm" style={{ background: restSeconds === seconds ? "rgba(0,255,178,.15)" : "transparent", borderColor: restSeconds === seconds ? NEON : BORDER, color: restSeconds === seconds ? NEON : "#8AABB8" }} onClick={() => setRestSeconds(seconds)}>{seconds}s</button>
+                ))}
+              </div>
             </div>
           </div>
 
-          <div className="t3d-card" style={{ marginBottom: 16, padding: 24 }}>
-            <div className="t3d-ctitle" style={{ marginBottom: 6 }}>START ANY SESSION</div>
-            <div style={{ fontSize: 11, color: "#8AABB8", marginBottom: 16 }}>
-              {todaySession ? `${todaySession.name} is scheduled today, but every session is available.` : "No session is scheduled today — choose any workout."}
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle">OTHER WORKOUTS</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 9 }}>
+              {sessions.filter(session => session !== todaySession).map((session, index) => (
+                <button key={`${session.name}-${index}`} className="t3d-btn" onClick={() => startWorkout(session)} disabled={!session.exercises?.length}
+                  style={{ minHeight: 66, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, textAlign: "left", padding: "12px 14px", color: "#E0EAF0", borderColor: BORDER }}>
+                  <span>
+                    <span style={{ display: "block", fontSize: 10 }}>{session.name}</span>
+                    <span style={{ display: "block", marginTop: 5, fontSize: 8, color: "#4A6070" }}>{session.exercises?.length || 0} EXERCISES</span>
+                  </span>
+                  <span style={{ fontSize: 8, color: NEON2, textAlign: "right" }}>{(session.days || []).join(" / ") || "FLEXIBLE"}<br />START →</span>
+                </button>
+              ))}
+              {sessions.filter(session => session !== todaySession).length === 0 && <div style={{ fontSize: 11, color: "#4A6070" }}>No other sessions in this plan.</div>}
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
-              {sessions.map((session, index) => {
-                const scheduledToday = session === todaySession;
-                return (
-                  <button key={`${session.name}-${index}`} className="t3d-btn" onClick={() => startWorkout(session)}
-                    disabled={!session.exercises?.length}
-                    style={{ minHeight: 72, borderColor: scheduledToday ? NEON : BORDER, color: scheduledToday ? NEON : "#E0EAF0", background: scheduledToday ? "rgba(0,255,178,.07)" : "transparent" }}>
-                    <span style={{ display: "block", fontSize: 10 }}>{scheduledToday ? "TODAY · " : ""}{session.name}</span>
-                    <span style={{ display: "block", marginTop: 6, fontSize: 8, color: "#4A6070" }}>{session.exercises?.length || 0} EXERCISES · START →</span>
-                  </button>
-                );
-              })}
+          </div>
+
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle">THIS WEEK</div>
+            <div className="t3d-grid3" style={{ marginBottom: 18 }}>
+              <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
+                <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{thisWeekLogs.length}</div>
+                <div className="t3d-slabel">SESSIONS</div>
+              </div>
+              <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
+                <div className="t3d-sval" style={{ color: NEON2, fontSize: 18 }}>{thisWeekLogs.reduce((total, log) => total + (log.total_volume || 0), 0).toLocaleString()}</div>
+                <div className="t3d-slabel">KG VOLUME</div>
+              </div>
+              <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
+                <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 14 }}>{history[0]?.session_name || "—"}</div>
+                <div className="t3d-slabel">LAST SESSION</div>
+              </div>
             </div>
-            {history[0]?.date === today && <div style={{ marginTop: 14, fontSize: 9, color: NEON }}>✓ A workout has already been logged today. You can still start another session.</div>}
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#4A6070", letterSpacing: 2, marginBottom: 10 }}>LAST 7 DAYS</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 7 }}>
+              {last7Days.map(day => (
+                <div key={day.date} style={{ minHeight: 78, padding: 9, borderRadius: 6, background: day.workouts.length ? "rgba(0,255,178,.06)" : SURFACE2, border: `1px solid ${day.isToday ? "rgba(0,255,178,.4)" : BORDER}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 4, fontSize: 8, color: day.isToday ? NEON : "#4A6070", marginBottom: 8 }}><span>{day.day}</span><span>{day.dateLabel}</span></div>
+                  <div style={{ fontSize: 9, color: day.workouts.length ? "#E0EAF0" : "#2A3A48", lineHeight: 1.45 }}>{day.workouts.length ? day.workouts.map(log => log.session_name).join(" + ") : "REST"}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle" style={{ color: NEON }}>AI COACH</div>
+            <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask about your current plan, progress, recovery or exercise choices.</p>
+            {coachMessages.length === 0 && (
+              <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
+                {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
+                  <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
+                ))}
+              </div>
+            )}
+            {coachMessages.length > 0 && (
+              <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
+                {coachMessages.map((message, index) => (
+                  <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
+                    <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
+                    <span style={{ color: message.role === "user" ? "#C0D8E8" : "#8AABB8" }}>{message.content}</span>
+                  </div>
+                ))}
+                {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <input className="t3d-ai-input" placeholder="Ask a question about your current plan..." value={coachQuestion}
+                onChange={event => setCoachQuestion(event.target.value)}
+                onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanCoach(); } }} />
+              <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach()} disabled={coachLoading || !coachQuestion.trim()}>{coachLoading ? "ASKING..." : "ASK"}</button>
+            </div>
           </div>
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
@@ -4273,25 +4324,6 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                 </div>
               );
             })}
-          </div>
-
-          <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>REST TIMER</div>
-              <button className="t3d-btn t3d-btn-sm"
-                style={{ background: restTimerEnabled ? "rgba(0,255,178,.15)" : "transparent", borderColor: restTimerEnabled ? NEON : BORDER }}
-                onClick={() => setRestTimerEnabled(v => !v)}>{restTimerEnabled ? "ON" : "OFF"}</button>
-            </div>
-            {restTimerEnabled && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <div style={{ fontSize: 11, color: "#E0EAF0" }}>Duration:</div>
-                {[30,60,90,120,180].map(s => (
-                  <button key={s} className="t3d-btn t3d-btn-sm"
-                    style={{ background: restSeconds === s ? "rgba(0,255,178,.15)" : "transparent", borderColor: restSeconds === s ? NEON : BORDER, color: restSeconds === s ? NEON : "#E0EAF0" }}
-                    onClick={() => setRestSeconds(s)}>{s}s</button>
-                ))}
-              </div>
-            )}
           </div>
 
           {/* Edit Days Modal */}
