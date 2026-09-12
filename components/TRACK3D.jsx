@@ -3362,19 +3362,21 @@ function Fitness({ user }) {
 
   // Workout logger state - track sets per exercise independently
   const [activeSession, setActiveSession] = useState(null);
+  const [workoutInProgress, setWorkoutInProgress] = useState(false);
   const [exerciseIdx, setExerciseIdx] = useState(0);
   const [setProgress, setSetProgress] = useState({}); // { exerciseIdx: currentSetIdx }
   const [completedSets, setCompletedSets] = useState({}); // { exerciseIdx: [{weight, reps, setNum}] }
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
   const [workoutStart, setWorkoutStart] = useState(null);
+  const otherWorkoutsRef = useRef(null);
 
   const fitnessDraft = useMemo(() => (
-    view === "workout" && activeSession ? {
+    workoutInProgress && activeSession ? {
       activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
       restTimerEnabled, restSeconds, restActive,
       restDeadline,
     } : null
-  ), [view, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+  ), [workoutInProgress, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
     restTimerEnabled, restSeconds, restActive, restDeadline]);
   useSessionDraft(user?.id, "fitness", fitnessDraft, draft => {
     if (!draft.activeSession?.exercises?.length) return;
@@ -3390,6 +3392,7 @@ function Fitness({ user }) {
     setRestDeadline(draft.restDeadline || null);
     setRestRemaining(remaining);
     setRestActive(remaining > 0);
+    setWorkoutInProgress(true);
     setView("workout");
   });
   const getLocalDate = () => {
@@ -3462,13 +3465,13 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     }
   };
 
-  const saveWorkoutLog = async () => {
+  const saveWorkoutLog = async (setsToSave = completedSets) => {
     if (!user) return;
     const d = new Date();
     const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
     const exerciseData = activeSession.exercises.map((ex, eIdx) => ({
       name: ex.name,
-      sets: (completedSets[eIdx] || []).map(s => ({ weight: s.weight, reps: s.reps })),
+      sets: (setsToSave[eIdx] || []).map(s => ({ weight: s.weight, reps: s.reps })),
     }));
     const totalVol = exerciseData.reduce((a, ex) => a + ex.sets.reduce((b, s) => b + (parseFloat(s.weight)||0) * (parseInt(s.reps)||0), 0), 0);
     await supabase.from("workout_logs").insert({
@@ -3526,6 +3529,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const startWorkout = (session) => {
     setActiveSession(session);
+    setWorkoutInProgress(true);
     setExerciseIdx(0);
     setSetProgress({});
     setCompletedSets({});
@@ -3562,7 +3566,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
         setExerciseIdx(nextIdx);
       } else {
         // Workout complete
-        saveWorkoutLog().then(() => { loadData(); setView("complete"); });
+        saveWorkoutLog(newCompleted).then(() => { setWorkoutInProgress(false); loadData(); setView("complete"); });
       }
     }
   };
@@ -3644,6 +3648,9 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
     return (
       <div className="t3d-fade">
+        <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 12 }} onClick={() => setView("home")}>
+          ← BACK TO FITNESS · PROGRESS SAVED
+        </button>
         {fitnessCoach}
         <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation */}
@@ -3733,7 +3740,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
           <div style={{ display: "flex", gap: 8 }}>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE</button>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { await saveWorkoutLog(); await loadData(); setView("home"); }}>END WORKOUT</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { await saveWorkoutLog(); setWorkoutInProgress(false); setActiveSession(null); await loadData(); setView("home"); }}>END WORKOUT</button>
           </div>
 
           {replaceWarning !== null && (
@@ -3791,7 +3798,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               </div>
             );
           })}
-          <button className="t3d-btn" style={{ width: "100%", padding: 14, marginTop: 16 }} onClick={() => setView("home")}>BACK TO FITNESS</button>
+          <button className="t3d-btn" style={{ width: "100%", padding: 14, marginTop: 16 }} onClick={() => { setActiveSession(null); setView("home"); }}>BACK TO FITNESS</button>
         </div>
       </div>
     );
@@ -4182,6 +4189,8 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
   }
   const recommendedSession = missedRecommendation?.session || todaySession;
   const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name === recommendedSession.name));
+  const activeCompletedSets = Object.values(completedSets).reduce((total, sets) => total + sets.length, 0);
+  const activeTotalSets = activeSession?.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0) || 0;
   const thisWeekLogs = history.filter(h => {
     const d = new Date(h.date); const now = new Date();
     const weekStart = new Date(now); weekStart.setDate(now.getDate() - now.getDay());
@@ -4217,8 +4226,24 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
       ) : (
         <>
           <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle" style={{ color: NEON }}>RECOMMENDED NEXT SESSION</div>
-            {recommendedSession ? (
+            <div className="t3d-ctitle" style={{ color: NEON }}>{workoutInProgress && activeSession ? "ACTIVE WORKOUT" : "RECOMMENDED NEXT SESSION"}</div>
+            {workoutInProgress && activeSession ? (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 240px", minWidth: 0 }}>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8, overflowWrap: "anywhere" }}>{activeSession.name}</div>
+                    <div style={{ fontSize: 11, color: NEON2 }}>{activeCompletedSets} of {activeTotalSets} sets completed · progress saved</div>
+                  </div>
+                  <button className="t3d-big-btn" style={{ flex: "0 1 300px", margin: 0, background: "linear-gradient(90deg, rgba(0,255,178,.18), rgba(0,200,255,.18))", border: `1px solid ${NEON}`, color: NEON, fontSize: 12, letterSpacing: 2 }} onClick={() => setView("workout")}>
+                    ▶ CONTINUE ACTIVE WORKOUT
+                  </button>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => startWorkout(activeSession)}>START AGAIN</button>
+                  <button className="t3d-btn t3d-btn-sm" onClick={() => otherWorkoutsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>CHOOSE A DIFFERENT DAY</button>
+                </div>
+              </div>
+            ) : recommendedSession ? (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8, overflowWrap: "anywhere" }}>{recommendedSession.name}</div>
@@ -4236,15 +4261,23 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 16, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
               <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#4A6070", letterSpacing: 1 }}>REST TIMER</span>
-              <button className="t3d-btn t3d-btn-sm" style={{ padding: "5px 9px", background: restTimerEnabled ? "rgba(0,255,178,.12)" : "transparent", borderColor: restTimerEnabled ? NEON : BORDER }} onClick={() => setRestTimerEnabled(value => !value)}>{restTimerEnabled ? "ON" : "OFF"}</button>
-              {[60,90,120].map(seconds => (
-                <button key={seconds} className="t3d-btn t3d-btn-sm" style={{ padding: "5px 9px", borderColor: restSeconds === seconds ? NEON : BORDER, color: restSeconds === seconds ? NEON : "#4A6070" }} onClick={() => setRestSeconds(seconds)}>{seconds}s</button>
-              ))}
-              {restActive && <span style={{ marginLeft: "auto", fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON2 }}>{restRemaining}s</span>}
+              <button className="t3d-btn t3d-btn-sm" style={{ padding: "5px 9px", background: restTimerEnabled ? "rgba(0,255,178,.12)" : "transparent", borderColor: restTimerEnabled ? NEON : BORDER }} onClick={() => {
+                const enabled = !restTimerEnabled;
+                setRestTimerEnabled(enabled);
+                if (!enabled) { setRestActive(false); setRestDeadline(null); }
+              }}>{restTimerEnabled ? "ON" : "OFF"}</button>
+              {restTimerEnabled && (
+                <>
+                  {[60,90,120].map(seconds => (
+                    <button key={seconds} className="t3d-btn t3d-btn-sm" style={{ padding: "5px 9px", borderColor: restSeconds === seconds ? NEON : BORDER, color: restSeconds === seconds ? NEON : "#4A6070" }} onClick={() => setRestSeconds(seconds)}>{seconds}s</button>
+                  ))}
+                  {restActive && <span style={{ marginLeft: "auto", fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON2 }}>{restRemaining}s</span>}
+                </>
+              )}
             </div>
           </div>
 
-          <div className="t3d-card" style={{ marginBottom: 16 }}>
+          <div ref={otherWorkoutsRef} className="t3d-card" style={{ marginBottom: 16, scrollMarginTop: 16 }}>
             <div className="t3d-ctitle">OTHER WORKOUTS</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 9 }}>
               {sessions.filter(session => session !== recommendedSession).map((session, index) => (
