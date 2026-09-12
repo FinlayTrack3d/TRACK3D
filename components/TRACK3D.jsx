@@ -1194,6 +1194,7 @@ function MorningSection({ user }) {
   const currentLiveTask = liveRoutineSteps[liveTaskIndex];
 
   const currentStep = allSteps[checkinStep];
+  const isRoughCheckin = view === "roughCheckin";
 
   const startNormalMorningCheckin = () => {
     setShowMissedRoutineChoice(false);
@@ -1207,6 +1208,16 @@ function MorningSection({ user }) {
     setLiveInputActive(false);
     setLiveDeadline(null);
     setView("wakeCheckin");
+  };
+
+  const startRoughMorningCheckin = () => {
+    setShowMissedRoutineChoice(false);
+    setSkipMorningError("");
+    setSubmissionError("");
+    setEditSubmissionData({});
+    setPhotoFiles({ front: null, side: null, back: null });
+    setPhotoPreviews({ front: null, side: null, back: null });
+    setView("roughCheckin");
   };
 
   const markMorningNotToday = async () => {
@@ -1405,8 +1416,8 @@ function MorningSection({ user }) {
       </div>
     );
   }
-  // Correct today's saved answers without changing the routine or stored photos.
-  if (view === "editSubmission") {
+  // Correct a saved check-in or capture a lighter, all-at-once rough check-in.
+  if (view === "editSubmission" || isRoughCheckin) {
     return (
       <div className="t3d-fade">
         <form className="t3d-card" onSubmit={async event => {
@@ -1415,7 +1426,10 @@ function MorningSection({ user }) {
           setSavingCheckin(true);
           setSubmissionError("");
           try {
-            const updatedData = { ...editSubmissionData };
+            const updatedData = {
+              ...editSubmissionData,
+              ...(isRoughCheckin ? { routineSkipped: false, roughCheckin: true } : {}),
+            };
             const updatedPhotos = { front: "skipped", side: "skipped", back: "skipped", ...editSubmissionData.photos };
             for (const angle of PHOTO_ANGLES) {
               const file = photoFiles[angle];
@@ -1443,8 +1457,12 @@ function MorningSection({ user }) {
             setSavingCheckin(false);
           }
         }}>
-          <div className="t3d-ctitle">EDIT TODAY&apos;S SUBMISSION</div>
-          <p style={{ fontSize: 12, color: "#8AABB8" }}>Correct your answers to reflect what actually happened this morning.</p>
+          <div className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : "EDIT TODAY'S SUBMISSION"}</div>
+          <p style={{ fontSize: 12, color: "#8AABB8" }}>
+            {isRoughCheckin
+              ? "Add whatever you remember. It does not need to be perfect, and you can leave anything blank."
+              : "Correct your answers to reflect what actually happened this morning."}
+          </p>
           <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
             Actual wake-up time
             <input className="t3d-input" type="time" style={{ marginTop: 8, colorScheme: "dark" }}
@@ -1508,7 +1526,7 @@ function MorningSection({ user }) {
                         )}
                       </div>
                     ))}
-                    Photos you leave unchanged will be kept. New photos upload when you save.
+                    {isRoughCheckin ? "Photos are optional. Add only what you have." : "Photos you leave unchanged will be kept. New photos upload when you save."}
                   </div>
                 )}
               </div>
@@ -1516,7 +1534,7 @@ function MorningSection({ user }) {
           })}
           {submissionError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{submissionError}</p>}
           <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : "SAVE CHANGES"}</button>
+            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : "SAVE CHANGES"}</button>
             <button className="t3d-btn t3d-btn-red" type="button" disabled={savingCheckin} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </form>
@@ -1568,7 +1586,7 @@ function MorningSection({ user }) {
                       <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.7, maxWidth: 430, margin: "0 auto 14px" }}>
                         You can&apos;t change the past, but you can change the future. Get after it tomorrow morning.
                       </p>
-                      <button type="button" className="t3d-btn t3d-btn-sm" onClick={startNormalMorningCheckin}>
+                      <button type="button" className="t3d-btn t3d-btn-sm" onClick={startRoughMorningCheckin}>
                         FILL IT IN ANYWAY
                       </button>
                     </>
@@ -1726,7 +1744,7 @@ function MorningSection({ user }) {
                           Even if it wasn&apos;t ideal, fill it in anyway. A rough check-in is more useful than no data.
                         </p>
                         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                          <button type="button" className="t3d-btn t3d-btn-sm" onClick={startNormalMorningCheckin}>
+                          <button type="button" className="t3d-btn t3d-btn-sm" onClick={startRoughMorningCheckin}>
                             FILL IN A ROUGH CHECK-IN
                           </button>
                           <button
@@ -2635,6 +2653,17 @@ function MorningSection({ user }) {
                 <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
                   onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); finishLiveInputStep(); }}>
                   CONFIRM →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCheckinData(d => ({ ...d, [currentStep.id]: "" }));
+                    setTempInput("");
+                    finishLiveInputStep();
+                  }}
+                  style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
+                >
+                  I&apos;M NOT SURE — SKIP
                 </button>
               </div>
             )}
