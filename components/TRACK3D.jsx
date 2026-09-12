@@ -139,13 +139,18 @@ const css = `
   .t3d-grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid12 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; margin-bottom: 16px; }
-  .t3d-workout-screen { height: calc(100dvh - 140px); overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
+  body.t3d-workout-active { overflow: hidden; overscroll-behavior: none; }
+  body.t3d-workout-active .t3d { height: 100dvh; min-height: 0; overflow: hidden; }
+  body.t3d-workout-active .t3d-main { height: 100dvh; overflow: hidden; }
+  body.t3d-workout-active .t3d-header { display: none; }
+  .t3d-workout-screen { height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
   .t3d-workout-screen .t3d-workout-card { flex: 1; min-height: 0; overflow: hidden; padding: 14px 18px; }
-  .t3d-compact-coach { flex: 0 0 auto; max-height: 154px; overflow: hidden; }
+  .t3d-compact-coach { flex: 0 0 174px; height: 174px !important; max-height: 174px; overflow: hidden; }
   @media (max-width: 768px) {
-    .t3d-workout-screen { height: calc(100dvh - 160px); gap: 7px; }
+    body.t3d-workout-active .t3d-main { padding: 10px 10px 74px; }
+    .t3d-workout-screen { gap: 7px; }
     .t3d-workout-screen .t3d-workout-card { padding: 10px !important; }
-    .t3d-compact-coach { max-height: 132px; }
+    .t3d-compact-coach { flex-basis: 170px; height: 170px !important; max-height: 170px; }
   }
   .t3d-card { background: #0D1318; border: 1px solid #1A2530; border-radius: 8px; padding: 20px; position: relative; overflow: hidden; }
   .t3d-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(0,255,178,.25),transparent); }
@@ -184,6 +189,8 @@ const css = `
   .t3d-ai-input { flex: 1; background: #111921; border: 1px solid #1A2530; border-radius: 5px; padding: 9px 12px; color: #E0EAF0; font-family: 'Space Mono', monospace; font-size: 11px; outline: none; transition: border-color .18s; }
   .t3d-ai-input:focus { border-color: rgba(0,255,178,.35); }
   .t3d-ai-input::placeholder { color: #1E2E3A; }
+  .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
+  .t3d-compact-coach .t3d-ai-msg { padding: 7px 10px; margin-bottom: 5px; line-height: 1.45; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
   .t3d-input { background: #111921; border: 1px solid #1A2530; border-radius: 5px; padding: 9px 12px; color: #E0EAF0; font-family: 'Space Mono', monospace; font-size: 12px; outline: none; transition: border-color .18s; width: 100%; }
@@ -274,7 +281,7 @@ User data today:
 
   return (
     <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
-      <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14 }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
+      <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
@@ -285,7 +292,7 @@ User data today:
         </div>
       ) : (
         <>
-          <div style={{ flex: 1, overflowY: compact ? "hidden" : "auto", maxHeight: compact ? 70 : 260, marginBottom: compact ? 5 : 10 }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? 96 : 260, marginBottom: compact ? 5 : 10, scrollbarWidth: "thin" }}>
             {(compact ? messages.slice(-2) : messages).map((m, i) => (
               <div key={i} className="t3d-ai-msg" style={{
                 background: m.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2,
@@ -294,7 +301,7 @@ User data today:
                 <div className="t3d-ai-tag" style={{ color: m.role === "user" ? NEON2 : NEON }}>
                   {m.role === "user" ? "YOU" : "AI"}
                 </div>
-                <span style={{ color: m.role === "user" ? "#C0D8E8" : "#8AABB8" }}>{m.content}</span>
+                <span style={{ color: compact ? "#D8E5EA" : m.role === "user" ? "#C0D8E8" : "#8AABB8" }}>{m.content}</span>
               </div>
             ))}
             {loading && (
@@ -3537,6 +3544,12 @@ function Fitness({ user }) {
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
   const [workoutStart, setWorkoutStart] = useState(null);
   const otherWorkoutsRef = useRef(null);
+
+  useEffect(() => {
+    if (view !== "workout") return;
+    document.body.classList.add("t3d-workout-active");
+    return () => document.body.classList.remove("t3d-workout-active");
+  }, [view]);
 
   const fitnessDraft = useMemo(() => (
     workoutInProgress && activeSession ? {
