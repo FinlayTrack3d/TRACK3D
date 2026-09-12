@@ -3896,9 +3896,17 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
           {/* Completed sets this session */}
           {exerciseCompletedSets.length > 0 && (
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 10, padding: "7px 9px", border: `1px solid ${BORDER}`, borderRadius: 5, fontSize: 9 }}>
-              <span style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace" }}>{exerciseCompletedSets.length} SET{exerciseCompletedSets.length === 1 ? "" : "S"} COMPLETE ✓</span>
-              <span style={{ color: NEON2 }}>LATEST: {exerciseCompletedSets.at(-1).reps} @ {exerciseCompletedSets.at(-1).weight}kg</span>
+            <div style={{ marginBottom: 10, padding: "7px 9px", border: `1px solid ${BORDER}`, borderRadius: 5 }}>
+              <div style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace", fontSize: 8, marginBottom: 6 }}>
+                {exerciseCompletedSets.length} SET{exerciseCompletedSets.length === 1 ? "" : "S"} COMPLETE ✓
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(88px, 1fr))", gap: 5 }}>
+                {exerciseCompletedSets.map((set, index) => (
+                  <div key={index} style={{ background: "rgba(0,200,255,.04)", borderRadius: 4, color: NEON2, fontSize: 9, padding: "5px 6px", whiteSpace: "nowrap" }}>
+                    SET {index + 1}: {set.reps} REPS · {set.weight}KG
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
