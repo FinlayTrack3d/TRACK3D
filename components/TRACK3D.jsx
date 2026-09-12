@@ -191,6 +191,7 @@ const css = `
   .t3d-ai-input::placeholder { color: #1E2E3A; }
   .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
   .t3d-compact-coach .t3d-ai-msg { padding: 7px 10px; margin-bottom: 5px; line-height: 1.45; }
+  .t3d-rough-checkin { max-height: calc(100dvh - 145px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: 8px; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
   .t3d-input { background: #111921; border: 1px solid #1A2530; border-radius: 5px; padding: 9px 12px; color: #E0EAF0; font-family: 'Space Mono', monospace; font-size: 12px; outline: none; transition: border-color .18s; width: 100%; }
@@ -1426,7 +1427,7 @@ function MorningSection({ user }) {
   // Correct a saved check-in or capture a lighter, all-at-once rough check-in.
   if (view === "editSubmission" || isRoughCheckin) {
     return (
-      <div className="t3d-fade">
+      <div className={`t3d-fade ${isRoughCheckin ? "t3d-rough-checkin" : ""}`}>
         <form className="t3d-card" onSubmit={async event => {
           event.preventDefault();
           if (savingCheckin) return;
@@ -3501,7 +3502,7 @@ function ExerciseLineChart({ points }) {
   );
 }
 
-function Fitness({ user }) {
+function Fitness({ user, isActive = true }) {
   const homeTimeZone = resolveHomeTimeZone(user);
   const homeDate = getZonedDateInfo(new Date(), homeTimeZone);
   const [view, setView] = useState("home");
@@ -3534,6 +3535,8 @@ function Fitness({ user }) {
   const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], tempo: "" });
   const [viewingSession, setViewingSession] = useState(null); // log entry shown in the history popup
   const [viewingExercise, setViewingExercise] = useState(null); // exercise name shown as a graph within the popup
+  const [showOtherWorkouts, setShowOtherWorkouts] = useState(false);
+  const [discardWorkoutWarning, setDiscardWorkoutWarning] = useState(false);
 
   // Workout logger state - track sets per exercise independently
   const [activeSession, setActiveSession] = useState(null);
@@ -3546,10 +3549,10 @@ function Fitness({ user }) {
   const otherWorkoutsRef = useRef(null);
 
   useEffect(() => {
-    if (view !== "workout") return;
+    if (view !== "workout" || !isActive) return;
     document.body.classList.add("t3d-workout-active");
     return () => document.body.classList.remove("t3d-workout-active");
-  }, [view]);
+  }, [view, isActive]);
 
   const fitnessDraft = useMemo(() => (
     workoutInProgress && activeSession ? {
@@ -3705,6 +3708,25 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setView("workout");
   };
 
+  const discardActiveWorkout = () => {
+    setWorkoutInProgress(false);
+    setActiveSession(null);
+    setExerciseIdx(0);
+    setSetProgress({});
+    setCompletedSets({});
+    setCurrentInputs({});
+    setWorkoutStart(null);
+    setRestActive(false);
+    setRestDeadline(null);
+    setDiscardWorkoutWarning(false);
+    setView("home");
+  };
+
+  const openOtherWorkouts = () => {
+    setShowOtherWorkouts(true);
+    requestAnimationFrame(() => otherWorkoutsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
+
   const getCurrentSetIdx = (eIdx) => setProgress[eIdx] || 0;
   const getCompletedForExercise = (eIdx) => completedSets[eIdx] || [];
 
@@ -3801,6 +3823,20 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
       />
     </div>
   );
+  const discardWorkoutDialog = discardWorkoutWarning ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
+      <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="discard-workout-title" style={{ width: "100%", maxWidth: 360, borderColor: NEON3, textAlign: "center" }}>
+        <div id="discard-workout-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>DELETE ACTIVE SESSION?</div>
+        <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>
+          This removes the accidentally started workout and its unsaved sets. It will not appear in workout history.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setDiscardWorkoutWarning(false)}>KEEP SESSION</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={discardActiveWorkout}>DELETE SESSION</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
   // ── WORKOUT VIEW ──────────────────────────────────────────────────────────
   if (view === "workout" && activeSession) {
     const currentExercise = activeSession.exercises[exerciseIdx];
@@ -3910,9 +3946,10 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE EXERCISE</button>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { await saveWorkoutLog(); setWorkoutInProgress(false); setActiveSession(null); await loadData(); setView("home"); }}>END WORKOUT</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setDiscardWorkoutWarning(true)}>DELETE SESSION</button>
           </div>
 
           {replaceWarning !== null && (
@@ -3936,6 +3973,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               </div>
             </div>
           )}
+          {discardWorkoutDialog}
         </div>
         {fitnessCoach}
       </div>
@@ -4415,7 +4453,8 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => startWorkout(activeSession)}>START AGAIN</button>
-                  <button className="t3d-btn t3d-btn-sm" onClick={() => otherWorkoutsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>CHOOSE A DIFFERENT DAY</button>
+                  <button className="t3d-btn t3d-btn-sm" onClick={openOtherWorkouts}>CHOOSE A DIFFERENT DAY</button>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setDiscardWorkoutWarning(true)}>DELETE SESSION</button>
                 </div>
               </div>
             ) : recommendedSession ? (
@@ -4449,11 +4488,21 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                   {restActive && <span style={{ marginLeft: "auto", fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON2 }}>{restRemaining}s</span>}
                 </>
               )}
+              <button
+                className="t3d-btn t3d-btn-sm"
+                style={{ padding: "5px 9px", marginLeft: restTimerEnabled ? 0 : "auto", borderColor: showOtherWorkouts ? NEON : BORDER, color: showOtherWorkouts ? NEON : "#8AABB8" }}
+                onClick={() => showOtherWorkouts ? setShowOtherWorkouts(false) : openOtherWorkouts()}
+              >
+                OTHER WORKOUTS {showOtherWorkouts ? "▲" : "▼"}
+              </button>
             </div>
           </div>
 
-          <div ref={otherWorkoutsRef} className="t3d-card" style={{ marginBottom: 16, scrollMarginTop: 16 }}>
-            <div className="t3d-ctitle">OTHER WORKOUTS</div>
+          {showOtherWorkouts && <div ref={otherWorkoutsRef} className="t3d-card" style={{ marginBottom: 16, scrollMarginTop: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>OTHER WORKOUTS</div>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => setShowOtherWorkouts(false)}>CLOSE ✕</button>
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 9 }}>
               {sessions.filter(session => session !== recommendedSession).map((session, index) => (
                 <button key={`${session.name}-${index}`} className="t3d-btn" onClick={() => startWorkout(session)} disabled={!session.exercises?.length}
@@ -4467,7 +4516,9 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               ))}
               {sessions.filter(session => session !== recommendedSession).length === 0 && <div style={{ fontSize: 11, color: "#4A6070" }}>No other sessions in this plan.</div>}
             </div>
-          </div>
+          </div>}
+
+          {discardWorkoutDialog}
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle">THIS WEEK</div>
@@ -6446,7 +6497,7 @@ export default function App() {
           ))}
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} />}
           <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
-          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} /></div>
+          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
