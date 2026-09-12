@@ -47,3 +47,18 @@ a {
     color-scheme: dark;
   }
 }
+
+.workout-set-fields { display: grid; grid-template-columns: minmax(0,1fr) 60px minmax(0,1fr); align-items: center; gap: 12px; }
+.workout-number { width: 100% !important; height: 100px !important; font-size: 30px !important; }
+.workout-progress { color: #8bd5aa; background: rgba(139,213,170,.09); border-radius: 4px; padding: 2px 4px; }
+.workout-replace { color: #ffac52 !important; border-color: #ff942b !important; background: rgba(255,148,43,.1) !important; }
+.workout-edit-overlay { position: fixed; inset: 0; z-index: 200; background: #000c; display: grid; place-items: center; padding: 16px; }
+.workout-edit-dialog { width: min(100%, 440px); max-height: 90dvh; overflow-y: auto; }
+@media (max-width: 600px) {
+ .t3d-workout-card { margin-inline: -10px; }
+ .workout-set-fields { grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
+ .workout-set-fields > div { min-width: 0; }
+ .workout-set-fields > div:last-child { grid-column: 2; grid-row: 1; }
+ .workout-number { height: 108px !important; font-size: 34px !important; }
+ .workout-log-set { grid-column: 1 / -1; grid-row: 2; width: 100% !important; height: 48px !important; }
+}

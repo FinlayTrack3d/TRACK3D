@@ -17,7 +17,7 @@ export async function POST(request) {
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
         max_tokens: Number.isInteger(responseTokens) ? Math.min(6000, Math.max(1000, responseTokens)) : 1000,
-        system: system || "You are TRACK3D's AI coach.",
+        system: (system || "You are TRACK3D's AI coach.") + "\nFor conversational replies default to 1–2 short sentences and at most 60 words. Answer directly. Expand when explicitly asked for detail. Preserve complete requested JSON and structured plans.",
         messages: messages,
       }),
     });

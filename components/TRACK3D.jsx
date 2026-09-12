@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useMemo } from "react";
+import { RichText, ExerciseEdit, DurationEstimate } from "./WorkoutControls";
+import { normalizeExercise, targetFor, repRange, estimateSession, requestedBudget, equivalentWorkout, workoutReview } from "../lib/workout";
 import { supabase } from "../lib/supabase";
-import { useSessionDraft, clearDrafts } from "../lib/session-drafts";
+import { useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 
 const NEON = "#00FFB2";
@@ -225,7 +227,7 @@ User data today:
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: system || defaultSystem,
+          system: (system || defaultSystem) + "\nDefault to 1–2 short sentences, at most 60 words. Answer first. Expand only when asked for detail.",
           messages: updated,
         }),
       });
@@ -263,7 +265,7 @@ User data today:
                 <div className="t3d-ai-tag" style={{ color: m.role === "user" ? NEON2 : NEON }}>
                   {m.role === "user" ? "YOU" : "AI"}
                 </div>
-                <span style={{ color: m.role === "user" ? "#C0D8E8" : "#8AABB8" }}>{m.content}</span>
+                <span style={{ color: m.role === "user" ? "#C0D8E8" : "#8AABB8" }}><RichText>{m.content}</RichText></span>
               </div>
             ))}
             {loading && (
@@ -423,7 +425,7 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
           {aiConversation.filter(message => !message.hidden).map((message, index) => (
             <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2 }}>
               <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "AI COACH"}</div>
-              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0" }}>{message.content}</div>
+              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0" }}><RichText>{message.content}</RichText></div>
             </div>
           ))}
           {aiLoading && <p role="status" style={{ fontSize: 11, color: NEON }}>Thinking about your routine...</p>}
@@ -2834,7 +2836,7 @@ Give me my daily roundup and spot any patterns.` }],
           ) : aiRoundup ? (
             <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 16, marginBottom: 16 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>AI DAILY ROUNDUP</div>
-              <div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.7 }}>{aiRoundup}</div>
+              <div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.7 }}><RichText>{aiRoundup}</RichText></div>
             </div>
           ) : null}
 
@@ -3141,11 +3143,11 @@ Give me my weekly patterns and diet suggestions.` }],
           </div>
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 10, color: NEON2, letterSpacing: 1, marginBottom: 6 }}>PATTERNS</div>
-            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}>{report.patterns || "Not enough data yet."}</div>
+            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}><RichText>{report.patterns || "Not enough data yet."}</RichText></div>
           </div>
           <div>
             <div style={{ fontSize: 10, color: "#FF8C00", letterSpacing: 1, marginBottom: 6 }}>DIET SUGGESTIONS</div>
-            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}>{report.diet_suggestions || "Nothing to flag this week."}</div>
+            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}><RichText>{report.diet_suggestions || "Nothing to flag this week."}</RichText></div>
             <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Suggestions only — update your plan in Nutrition if you agree.</div>
           </div>
         </div>
@@ -3364,18 +3366,27 @@ function Fitness({ user }) {
   const [completedSets, setCompletedSets] = useState({}); // { exerciseIdx: [{weight, reps, setNum}] }
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
   const [workoutStart, setWorkoutStart] = useState(null);
+  const [workoutId, setWorkoutId] = useState(null);
+  const [workoutEnd, setWorkoutEnd] = useState(null);
+  const [workoutFeedback, setWorkoutFeedback] = useState("");
+  const [workoutSaving, setWorkoutSaving] = useState(false);
+  const [workoutError, setWorkoutError] = useState("");
+  const savingWorkout = useRef(false);
 
   const fitnessDraft = useMemo(() => (
-    view === "workout" && activeSession ? {
-      activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+    (view === "workout" || view === "complete") && activeSession ? {
+      activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart, workoutId, workoutEnd, workoutFeedback, view,
       restTimerEnabled, restSeconds, restActive,
       restDeadline,
     } : null
-  ), [view, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
+  ), [view, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart, workoutId, workoutEnd, workoutFeedback,
     restTimerEnabled, restSeconds, restActive, restDeadline]);
   useSessionDraft(user?.id, "fitness", fitnessDraft, draft => {
     if (!draft.activeSession?.exercises?.length) return;
-    setActiveSession(draft.activeSession);
+    setActiveSession({ ...draft.activeSession, exercises: draft.activeSession.exercises.map(normalizeExercise) });
+    setWorkoutId(draft.workoutId || crypto.randomUUID());
+    setWorkoutEnd(draft.workoutEnd || null);
+    setWorkoutFeedback(draft.workoutFeedback || "");
     setExerciseIdx(draft.exerciseIdx || 0);
     setSetProgress(draft.setProgress || {});
     setCompletedSets(draft.completedSets || {});
@@ -3387,7 +3398,7 @@ function Fitness({ user }) {
     setRestDeadline(draft.restDeadline || null);
     setRestRemaining(remaining);
     setRestActive(remaining > 0);
-    setView("workout");
+    setView(draft.view === "complete" ? "complete" : "workout");
   });
   const getLocalDate = () => {
   const d = new Date();
@@ -3430,8 +3441,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setLoading(true);
     try {
       const { data: splitData } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
-      if (splitData) { setSplit(splitData); setSessions(splitData.sessions || []); }
-      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(20);
+      if (splitData) { setSplit(splitData); setSessions((splitData.sessions || []).map(session => ({ ...session, exercises: (session.exercises || []).map(normalizeExercise) }))); }
+      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(200);
       if (logs) setHistory(logs);
     } catch (e) { console.log("Load error:", e); }
     setLoading(false);
@@ -3460,20 +3471,39 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   };
 
   const saveWorkoutLog = async () => {
-    if (!user) return;
-    const d = new Date();
+    if (!user || savingWorkout.current) return;
+    savingWorkout.current = true;
+    setWorkoutSaving(true);
+    setWorkoutError("");
+    try {
+    const d = new Date(workoutStart);
     const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
     const exerciseData = activeSession.exercises.map((ex, eIdx) => ({
       name: ex.name,
+      prescribed_sets: ex.sets, rep_ranges: ex.reps,
+      ...(eIdx === 0 ? { workout_feedback: workoutFeedback } : {}),
       sets: (completedSets[eIdx] || []).map(s => ({ weight: s.weight, reps: s.reps })),
     }));
     const totalVol = exerciseData.reduce((a, ex) => a + ex.sets.reduce((b, s) => b + (parseFloat(s.weight)||0) * (parseInt(s.reps)||0), 0), 0);
-    await supabase.from("workout_logs").insert({
+    const workoutRecord = {
+      id: workoutId,
       user_id: user.id, date: dateStr, session_name: activeSession?.name || "Workout",
       exercises: exerciseData, total_volume: totalVol,
-      duration_mins: Math.round((Date.now() - workoutStart) / 60000),
-      created_at: new Date().toISOString(),
-    });
+      duration_mins: Math.max(0, Math.round(((workoutEnd || Date.now()) - workoutStart) / 60000)),
+      created_at: new Date(workoutEnd || Date.now()).toISOString(),
+    };
+    const result = await supabase.from("workout_logs").insert(workoutRecord);
+    if (result.error) {
+      const existing = await supabase.from("workout_logs").select("id").eq("id", workoutId).eq("user_id", user.id).maybeSingle();
+      if (!existing.data) throw result.error;
+      const updated = await supabase.from("workout_logs").update(workoutRecord).eq("id", workoutId).eq("user_id", user.id);
+      if (updated.error) throw updated.error;
+    }
+    setView("home");
+    setActiveSession(null);
+    await loadData();
+    } catch { setWorkoutError("Could not save to your account. Your workout and feedback are kept here — please retry."); }
+    finally { savingWorkout.current = false; setWorkoutSaving(false); }
   };
 
   const getTodaySession = () => {
@@ -3486,10 +3516,9 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   // Get last session's data for a specific exercise
   const getLastSessionData = (exName) => {
-    for (const log of history) {
-      const ex = log.exercises?.find(e => e.name?.toLowerCase() === exName?.toLowerCase());
-      if (ex?.sets?.length) return ex.sets;
-    }
+    const log = equivalentWorkout(history, activeSession, workoutStart);
+    const ex = log?.exercises?.find(e => e.name?.toLowerCase() === exName?.toLowerCase());
+    if (ex?.sets?.length) return ex.sets;
     return null;
   };
 
@@ -3503,7 +3532,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     if (!lastWeight) return null;
 
     // Parse rep range top end
-    const rangeTop = repRange ? parseInt(String(repRange).split("-").pop()) : null;
+    const rangeTop = repRange ? Number(String(repRange).split(/[–—-]/).pop()) : null;
     if (rangeTop && lastReps >= rangeTop) {
       return (lastWeight + 2.5).toFixed(1); // Hit top of range — increase
     }
@@ -3522,7 +3551,13 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   };
 
   const startWorkout = (session) => {
-    setActiveSession(session);
+    setActiveSession({ ...session, exercises: session.exercises.map(normalizeExercise) });
+    setWorkoutId(crypto.randomUUID());
+    setWorkoutEnd(null);
+    setWorkoutFeedback("");
+    setWorkoutError("");
+    setRestActive(false);
+    setRestDeadline(null);
     setExerciseIdx(0);
     setSetProgress({});
     setCompletedSets({});
@@ -3531,7 +3566,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setView("workout");
   };
 
-  const getCurrentSetIdx = (eIdx) => setProgress[eIdx] || 0;
+  const getCurrentSetIdx = (eIdx) => (completedSets[eIdx] || []).length;
   const getCompletedForExercise = (eIdx) => completedSets[eIdx] || [];
 
   const confirmSet = () => {
@@ -3539,7 +3574,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const sIdx = getCurrentSetIdx(eIdx);
     const weight = currentInputs[eIdx]?.weight || "";
     const reps = currentInputs[eIdx]?.reps || "";
-    if (!weight || !reps) return;
+    if (!weight || !reps || !Number.isFinite(Number(weight)) || Number(weight) < 0 || !Number.isInteger(Number(reps)) || Number(reps) < 1) return;
 
     const newSet = { weight, reps, setNum: sIdx + 1 };
     const newCompleted = { ...completedSets, [eIdx]: [...(completedSets[eIdx] || []), newSet] };
@@ -3550,18 +3585,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
     if (restTimerEnabled) { setRestDeadline(Date.now() + restSeconds * 1000); setRestRemaining(restSeconds); setRestActive(true); }
 
-    if (sIdx + 1 < totalSets) {
-      setSetProgress(prev => ({ ...prev, [eIdx]: sIdx + 1 }));
-    } else {
-      // All sets done for this exercise — auto move to next
-      const nextIdx = eIdx + 1;
-      if (nextIdx < activeSession.exercises.length) {
-        setExerciseIdx(nextIdx);
-      } else {
-        // Workout complete
-        saveWorkoutLog().then(() => { loadData(); setView("complete"); });
-      }
-    }
+    setSetProgress(prev => ({ ...prev, [eIdx]: sIdx + 1 }));
+    // Keep completion visible; further sets are explicitly optional.
   };
 
   const buildAIPlan = async () => {
@@ -3577,10 +3602,11 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           responseTokens: 6000,
-          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, and tempo for every exercise. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest; never replace different budgets with a single generic session length. Honour preferred days and the requested split, favourites, and priorities when feasible. Briefly explain conflicts rather than pretending they are satisfied. If days are flexible, assign the stated session budgets to sensible days. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN, never full day names; if no days are specified, choose a sensible schedule. Keep notes brief.
+          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, and tempo for every exercise. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest; never replace different budgets with a single generic session length. Honour preferred days and the requested split, favourites, and priorities when feasible. Briefly explain conflicts rather than pretending they are satisfied. If days are flexible, assign the stated session budgets to sensible days. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN, never full day names; if no days are specified, choose a sensible schedule. Keep notes brief. Use double progression: normally 12–15 reps, starting near 12 after a weight increase and building to 15 before increasing again. Use goal-appropriate ranges when needed; never single rep targets.
+DURATION: Set budget_minutes for EACH session from the user's exact availability (use the upper end of a requested range). Calculate time before choosing volume: at least 5 minutes general warm-up, 2 ramp-up sets per exercise (8 reps at the exercise tempo plus 60 seconds rest each), every working set at the upper rep target times the sum of tempo seconds (X=1), rest_seconds between working sets (at least 120 for compounds, 60–90 for isolation, longer for heavy strength), and 90 seconds per exercise transition. Reduce working sets or exercises until the total fits budget_minutes. Never shorten realistic rests to force a fit.
 SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
 Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
+{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "budget_minutes": 60, "warmup_minutes": 5, "exercises": [{"name": "string", "sets": 4, "reps": ["12–15","12–15","12–15","12–15"], "rest_seconds": 120, "warmup_sets": 2, "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
           messages: [{ role: "user", content: `Build me a training programme:\n${context}` }],
         }),
       });
@@ -3599,12 +3625,16 @@ Respond ONLY with valid JSON:
               typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)))) {
         throw new Error("Incomplete programme");
       }
+      parsed.sessions = parsed.sessions.map(session => ({ ...session, budget_minutes: requestedBudget(aiAnswers.session_length, session.days) ?? session.budget_minutes, exercises: session.exercises.map(normalizeExercise) }));
+      if (parsed.sessions.some(session => !Number.isFinite(session.budget_minutes) || session.budget_minutes <= 0 || estimateSession(session).minutes > session.budget_minutes)) {
+        throw new Error("The generated programme exceeds its time budget. Please rebuild; your answers are retained.");
+      }
       setAiPlan(parsed);
-    } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
+    } catch (error) { setAiPlanError(error.message.includes("time budget") ? error.message : "The coach could not finish your programme. Your answers are saved here — please try again."); }
     setAiBuilding(false);
   };
 
-  if (loading) return (
+  if (loading && !activeSession) return (
     <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
       <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 2 }}>LOADING FITNESS DATA...</div>
     </div></div>
@@ -3633,7 +3663,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
     const totalSets = currentExercise.sets || 0;
     const totalExercises = activeSession.exercises.length;
     const exerciseCompletedSets = getCompletedForExercise(exerciseIdx);
-    const currentSetRepRange = Array.isArray(currentExercise.reps) ? currentExercise.reps[sIdx] : currentExercise.reps;
+    const currentSetRepRange = targetFor(currentExercise, sIdx);
     const suggestedWeight = getSuggestedWeight(currentExercise.name, sIdx, currentSetRepRange);
     const lastSets = getLastSessionData(currentExercise.name);
     const weight = currentInputs[exerciseIdx]?.weight || "";
@@ -3641,7 +3671,6 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
 
     return (
       <div className="t3d-fade">
-        {fitnessCoach}
         <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -3650,6 +3679,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             <div style={{ textAlign: "center" }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, letterSpacing: 2, color: "#E0EAF0" }}>{currentExercise.name}</div>
               <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 3 }}>Exercise {exerciseIdx+1} of {totalExercises}</div>
+              <ExerciseEdit exercise={currentExercise} onSave={updated => setActiveSession(prev => ({ ...prev, exercises: prev.exercises.map((ex, i) => i === exerciseIdx ? updated : ex) }))} />
               {currentExercise.tempo && <div style={{ fontSize: 10, color: NEON2, marginTop: 2 }}>TEMPO: {currentExercise.tempo}</div>}
               {currentSetRepRange && <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 2 }}>REP RANGE: {currentSetRepRange}</div>}
             </div>
@@ -3657,12 +3687,15 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>▶</button>
           </div>
 
+          <DurationEstimate session={activeSession} />
+          <p style={{ fontSize: 12, marginBottom: 12 }}>Start near the lower target after increasing weight. Build to the top with good form before progressing again.</p>
+          {sIdx >= totalSets && <p role="status" style={{ color: "#80CDA5", marginBottom: 12 }}>{totalSets} of {totalSets} prescribed sets completed ✓ · Further sets are optional.</p>}
           {/* Rest timer */}
           {restActive && (
             <div style={{ textAlign: "center", marginBottom: 16, padding: 12, background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 24, color: NEON2 }}>{restRemaining}s</div>
               <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1 }}>REST</div>
-              <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8 }} onClick={() => setRestActive(false)}>SKIP</button>
+              <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8 }} onClick={() => { setRestActive(false); setRestDeadline(null); }}>SKIP</button>
             </div>
           )}
 
@@ -3670,21 +3703,21 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
           {!restActive && (
             <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 16 }}>
-                SET {sIdx+1} OF {totalSets}
+                {sIdx >= totalSets ? `OPTIONAL ADDITIONAL SET ${sIdx - totalSets + 1}` : `SET ${sIdx + 1} OF ${totalSets}`}
               </div>
-              <div style={{ display: "flex", gap: 16, justifyContent: "center", alignItems: "center" }}>
+              <div className="workout-set-fields">
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS</div>
-                  <input type="number" value={reps}
+                  <input className="workout-number" aria-label="Reps" inputMode="numeric" min="1" step="1" type="number" value={reps}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                     placeholder="0"
                     style={{ width: 80, height: 80, background: "#E0EAF0", border: "none", borderRadius: 8, fontSize: 28, fontWeight: 700, textAlign: "center", color: "#080C10", outline: "none" }} />
                 </div>
-                <button onClick={confirmSet} disabled={!weight || !reps}
+                <button className="workout-log-set" aria-label="Log set" onClick={confirmSet} disabled={!weight || !reps}
                   style={{ width: 60, height: 60, background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 8, fontSize: 24, cursor: "pointer", color: "#080C10", fontWeight: 700 }}>▶</button>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>WEIGHT (kg)</div>
-                  <input type="number" value={weight}
+                  <input className="workout-number" aria-label="Weight in kilograms" inputMode="decimal" min="0" step="0.5" type="number" value={weight}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                     placeholder={suggestedWeight || "0"}
                     style={{ width: 80, height: 80, background: "#E0EAF0", border: "none", borderRadius: 8, fontSize: suggestedWeight && !weight ? 16 : 28, fontWeight: 700, textAlign: "center", color: "#080C10", outline: "none" }} />
@@ -3694,7 +3727,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               {/* Suggested weight hint */}
               {suggestedWeight && (
                 <div style={{ marginTop: 10, fontSize: 10, color: NEON, letterSpacing: 1 }}>
-                  {getLastSessionData(currentExercise.name)?.[sIdx]?.reps >= (currentSetRepRange ? parseInt(String(currentSetRepRange).split("-").pop()) : 999)
+                  {getLastSessionData(currentExercise.name)?.[sIdx]?.reps >= (currentSetRepRange ? repRange(currentSetRepRange)[1] : 999)
                     ? `↑ Try ${suggestedWeight}kg — you hit the top of your range last time!`
                     : `Last session: ${suggestedWeight}kg`
                   }
@@ -3720,17 +3753,18 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             <div style={{ marginBottom: 12 }}>
               {exerciseCompletedSets.map((s, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 10, opacity: 0.7 }}>
-                  <span style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace", fontSize: 9 }}>SET {s.setNum} ✓</span>
-                  <span style={{ color: NEON }}>{s.reps} reps</span>
-                  <span style={{ color: NEON2 }}>{s.weight}kg</span>
+                  <span style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace", fontSize: 9 }}>{i >= totalSets ? "EXTRA" : "SET"} {s.setNum} ✓</span>
+                  <span className={lastSets?.[i] && Number(s.reps) > Number(lastSets[i].reps) ? "workout-progress" : ""}>{s.reps} reps{lastSets?.[i] && Number(s.reps) > Number(lastSets[i].reps) ? " ↑" : ""}</span>
+                  <span className={lastSets?.[i] && Number(s.weight) > Number(lastSets[i].weight) ? "workout-progress" : ""}>{s.weight}kg{lastSets?.[i] && Number(s.weight) > Number(lastSets[i].weight) ? " ↑" : ""}</span>
+                  <ExerciseEdit setOnly exercise={s} onSave={updated => setCompletedSets(prev => ({ ...prev, [exerciseIdx]: prev[exerciseIdx].map((set, j) => j === i ? updated : set) }))} />
                 </div>
               ))}
             </div>
           )}
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE</button>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { await saveWorkoutLog(); await loadData(); setView("home"); }}>END WORKOUT</button>
+            <button className="t3d-btn t3d-btn-sm workout-replace" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setWorkoutEnd(Date.now()); setRestActive(false); setRestDeadline(null); setView("complete"); }}>END WORKOUT</button>
           </div>
 
           {replaceWarning !== null && (
@@ -3738,14 +3772,17 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               <div style={{ background: SURFACE, border: `1px solid ${NEON3}`, borderRadius: 8, padding: 28, maxWidth: 320, textAlign: "center" }}>
                 <div style={{ fontSize: 24, marginBottom: 12 }}>⚠️</div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>OFF PLAN WARNING</div>
-                <div style={{ fontSize: 12, color: "#8AABB8", marginBottom: 20, lineHeight: 1.6 }}>Going off plan is not recommended. Consistency delivers the best results. Are you sure?</div>
+                <div style={{ fontSize: 12, color: "#8AABB8", marginBottom: 20, lineHeight: 1.6 }}>Choose a suitable alternative. If you have logged sets, the replacement is added separately to preserve those records.</div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setReplaceWarning(null)}>STAY ON PLAN</button>
-                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => {
+                  <button className="t3d-btn t3d-btn-sm workout-replace" style={{ flex: 1 }} onClick={() => {
                     const newName = prompt("Enter replacement exercise name:");
                     if (newName) {
                       const updated = JSON.parse(JSON.stringify(activeSession));
-                      updated.exercises[replaceWarning].name = newName;
+                      if ((completedSets[replaceWarning] || []).length) {
+                        updated.exercises.push({ ...updated.exercises[replaceWarning], name: newName });
+                        setExerciseIdx(updated.exercises.length - 1);
+                      } else updated.exercises[replaceWarning].name = newName;
                       setActiveSession(updated);
                     }
                     setReplaceWarning(null);
@@ -3755,6 +3792,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             </div>
           )}
         </div>
+        {fitnessCoach}
       </div>
     );
   }
@@ -3763,12 +3801,23 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
   if (view === "complete") {
     const allSets = Object.values(completedSets).flat();
     const totalVol = allSets.reduce((a, s) => a + (parseFloat(s.weight)||0) * (parseInt(s.reps)||0), 0);
-    const duration = Math.round((Date.now() - workoutStart) / 60000);
+    const duration = Math.round(((workoutEnd || Date.now()) - workoutStart) / 60000);
+    const previous = equivalentWorkout(history, activeSession, workoutStart);
+    const review = workoutReview(activeSession, completedSets, previous);
+    const planned = review.reduce((sum, ex) => sum + ex.prescribed, 0);
+    const done = review.reduce((sum, ex) => sum + ex.logged, 0);
+    const achieved = review.reduce((sum, ex) => sum + ex.achieved, 0);
     return (
       <div className="t3d-fade">
         <div className="t3d-card" style={{ textAlign: "center", padding: 32 }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>💪</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: NEON, letterSpacing: 3, marginBottom: 24 }}>WORKOUT COMPLETE</div>
+          <p style={{ fontSize: 14, lineHeight: 1.5, marginBottom: 16 }}>You completed {done} of {planned} prescribed sets in {duration} minutes. {achieved} sets landed in their rep range{review.some(ex => ex.improvements) ? ", with progress over your previous equivalent workout." : "."}</p>
+          <details style={{ textAlign: "left", marginBottom: 20 }}><summary>View detailed workout report</summary>
+            <p style={{ margin: "12px 0" }}>{previous ? `Compared with ${previous.session_name} on ${previous.date}.` : "No previous equivalent workout yet. This session will establish your baseline."}</p>
+            {review.map((ex, i) => <div key={i} style={{ marginBottom: 12 }}><strong>{ex.name}</strong><p>{ex.logged}/{ex.prescribed} prescribed sets · {ex.achieved} in range · {ex.extra} additional sets{ex.improvements ? ` · ${ex.improvements} sets improved ↑` : ""}</p><p>{ex.advice}</p></div>)}
+          </details>
+          <label style={{ display: "block", textAlign: "left", marginBottom: 20 }}>Workout feedback<textarea className="t3d-input" rows={3} maxLength={2000} value={workoutFeedback} disabled={workoutSaving} onChange={e => setWorkoutFeedback(e.target.value)} placeholder="How did it feel? What worked, felt too hard, or should change?" /></label>
           <div className="t3d-grid3" style={{ marginBottom: 20 }}>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>MINUTES</div></div>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{allSets.length}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>SETS</div></div>
@@ -3788,7 +3837,9 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               </div>
             );
           })}
-          <button className="t3d-btn" style={{ width: "100%", padding: 14, marginTop: 16 }} onClick={() => setView("home")}>BACK TO FITNESS</button>
+          {workoutError && <p role="alert" style={{ color: "#FFB547" }}>{workoutError}</p>}
+          <button disabled={workoutSaving} className="t3d-btn" style={{ width: "100%", padding: 14, marginTop: 16 }} onClick={saveWorkoutLog}>{workoutSaving ? "SAVING…" : "SAVE WORKOUT & FEEDBACK"}</button>
+          <button disabled={workoutSaving} className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => { setWorkoutEnd(null); setView("workout"); }}>BACK TO WORKOUT</button>
         </div>
       </div>
     );
@@ -3811,16 +3862,18 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
           <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds. X means an explosive movement.</p>
           {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
           {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
-          {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>{aiPlan.notes}</div>}
+          {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}><RichText>{aiPlan.notes}</RichText></div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON }}>{s.name}</div>
                 <div style={{ fontSize: 10, color: "#E0EAF0" }}>{s.days?.join(", ")}</div>
               </div>
+              <DurationEstimate session={s} />
               {s.exercises?.map((ex, eIdx) => (
                 <div key={eIdx} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                   <div style={{ flex: 1 }}>{ex.name}</div>
+                  <ExerciseEdit exercise={ex} onSave={updated => setAiPlan(prev => ({ ...prev, sessions: prev.sessions.map((session, i) => i === sIdx ? { ...session, exercises: session.exercises.map((item, j) => j === eIdx ? updated : item) } : session) }))} />
                   <div style={{ fontSize: 10, color: "#E0EAF0" }}>{ex.sets}×{Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps}</div>
                   {ex.tempo && <div style={{ fontSize: 9, color: NEON2 }}>{ex.tempo}</div>}
                 </div>
@@ -3831,6 +3884,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setAiPlan(null)}>REBUILD</button>
             <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
               if (aiPlanSaving) return;
+              if (aiPlan.sessions.some(session => estimateSession(session).minutes > session.budget_minutes)) { setAiPlanError("Your edits exceed the time budget. Reduce sets or exercises before saving."); return; }
               setAiPlanSaving(true);
               setAiPlanError("");
               try {
@@ -3996,6 +4050,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                   <div key={eIdx} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <div style={{ fontSize: 12 }}>{ex.name}</div>
+                      <ExerciseEdit exercise={ex} onSave={updated => setSessions(prev => prev.map((session, i) => i === currentSessionIdx ? { ...session, exercises: session.exercises.map((item, j) => j === eIdx ? updated : item) } : session))} />
                       <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }}
                         onClick={() => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s))}>✕</button>
                     </div>
@@ -4202,6 +4257,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               return (
                 <div key={day} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}` }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 32, color: isToday ? NEON : "#E0EAF0" }}>{day}</div>
+                  {session && <button className="t3d-btn t3d-btn-sm" onClick={() => setEditDaysModal(true)}>Edit</button>}
                   <div style={{ flex: 1, fontSize: 11, color: session ? (isToday ? "#E0EAF0" : "#4A6070") : "#2A3A48" }}>{session ? session.name : "REST"}</div>
                   {isToday && <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, padding: "2px 7px", borderRadius: 10, background: "rgba(0,255,178,.1)", color: NEON, border: "1px solid rgba(0,255,178,.25)" }}>TODAY</span>}
                 </div>
@@ -4307,6 +4363,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                     </div>
                     <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#E0EAF0" }}>
                       <span>{log.duration_mins} mins</span>
+                      {log.exercises?.[0]?.workout_feedback && <p>Feedback: {log.exercises[0].workout_feedback}</p>}
                       <span>{Math.round(log.total_volume).toLocaleString()} kg volume</span>
                     </div>
                   </div>
@@ -4557,7 +4614,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
         {messages.map((m, i) => (
           <div key={i} style={{ marginBottom: 10 }}>
             <div style={{ fontSize: 8, letterSpacing: 1, color: m.role === "user" ? NEON2 : NEON, fontFamily: "'Orbitron',monospace", marginBottom: 3 }}>{m.role === "user" ? "YOU" : "AI"}</div>
-            <div style={{ fontSize: 12, color: m.role === "user" ? "#C0D8E8" : "#8AABB8", lineHeight: 1.65 }}>{m.content}</div>
+            <div style={{ fontSize: 12, color: m.role === "user" ? "#C0D8E8" : "#8AABB8", lineHeight: 1.65 }}><RichText>{m.content}</RichText></div>
           </div>
         ))}
         {loading && <div style={{ fontSize: 11, color: "#E0EAF0" }}>Thinking...</div>}
@@ -5659,7 +5716,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
             </div>
             {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={() => getAIDebrief(taskResults, score)}>GET AI FEEDBACK</button>}
             {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
-            {aiFeedback && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 14, marginBottom: 20, textAlign: "left" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 6 }}>AI COACH</div><div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.65 }}>{aiFeedback}</div></div>}
+            {aiFeedback && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 14, marginBottom: 20, textAlign: "left" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 6 }}>AI COACH</div><div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.65 }}><RichText>{aiFeedback}</RichText></div></div>}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { await saveDebrief(taskResults, score); setDebriefView(false); }}>SAVE & FINISH</button>
           </div>
         </div>
@@ -6110,7 +6167,7 @@ export default function App() {
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { if (user) await clearDrafts(user.id).catch(() => {}); clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
+                onClick={async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
                 SIGN OUT
               </button>
             </div>
