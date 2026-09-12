@@ -2642,6 +2642,19 @@ function MorningSection({ user }) {
 }}>
                   CONFIRM →
                 </button>
+                {currentStep.id === "weight" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCheckinData(d => ({ ...d, [currentStep.id]: "" }));
+                      setTempInput("");
+                      finishLiveInputStep();
+                    }}
+                    style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
+                  >
+                    I&apos;M NOT SURE — SKIP
+                  </button>
+                )}
               </div>
             )}
 
@@ -2735,6 +2748,13 @@ function MorningSection({ user }) {
               </div>
             )}
           </div>
+          <button
+            type="button"
+            onClick={() => setView("home")}
+            style={{ display: "block", margin: "18px auto 0", background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, padding: 6, textDecoration: "underline" }}
+          >
+            ← RETURN TO MORNING SECTION
+          </button>
         </div>
       </div>
     );
