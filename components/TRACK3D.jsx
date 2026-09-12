@@ -937,6 +937,10 @@ function MorningSection({ user }) {
   const [savingCheckin, setSavingCheckin] = useState(false);
   const [isSetup, setIsSetup] = useState(false);
   const [completedToday, setCompletedToday] = useState(false);
+  const [skippedToday, setSkippedToday] = useState(false);
+  const [showMissedRoutineChoice, setShowMissedRoutineChoice] = useState(false);
+  const [savingSkippedMorning, setSavingSkippedMorning] = useState(false);
+  const [skipMorningError, setSkipMorningError] = useState("");
   const [history, setHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1025,7 +1029,8 @@ function MorningSection({ user }) {
       if (checkinHistory) {
         setHistory(checkinHistory);
         const todayEntry = checkinHistory.find(c => c.date === today);
-        if (todayEntry) setCompletedToday(true);
+        setCompletedToday(Boolean(todayEntry));
+        setSkippedToday(Boolean(todayEntry?.data?.routineSkipped));
       }
     } catch (e) {
       console.log("Load error:", e);
@@ -1045,7 +1050,7 @@ function MorningSection({ user }) {
 
   const saveCheckin = async (data, score) => {
     if (!user) return;
-    await supabase.from("morning_checkins").upsert({
+    return await supabase.from("morning_checkins").upsert({
       user_id: user.id,
       date: today,
       score: score,
@@ -1189,6 +1194,43 @@ function MorningSection({ user }) {
   const currentLiveTask = liveRoutineSteps[liveTaskIndex];
 
   const currentStep = allSteps[checkinStep];
+
+  const startNormalMorningCheckin = () => {
+    setShowMissedRoutineChoice(false);
+    setSkipMorningError("");
+    setCheckinStep(0);
+    setCheckinData({});
+    setTempInput("");
+    setPhotoAngleIdx(0);
+    setPhotoFiles({ front: null, side: null, back: null });
+    setPhotoPreviews({ front: null, side: null, back: null });
+    setLiveInputActive(false);
+    setLiveDeadline(null);
+    setView("wakeCheckin");
+  };
+
+  const markMorningNotToday = async () => {
+    if (savingSkippedMorning) return;
+    setSavingSkippedMorning(true);
+    setSkipMorningError("");
+    try {
+      const skippedData = {
+        routineSkipped: true,
+        skipReason: "routine_not_completed",
+        recordedAt: new Date().toISOString(),
+      };
+      const { error } = await saveCheckin(skippedData, 0);
+      if (error) throw error;
+      setShowMissedRoutineChoice(false);
+      setSkippedToday(true);
+      setCompletedToday(true);
+      await loadData();
+    } catch {
+      setSkipMorningError("We couldn't save this. Please try again.");
+    } finally {
+      setSavingSkippedMorning(false);
+    }
+  };
 
   useEffect(() => {
     if (!liveDeadline) return;
@@ -1517,16 +1559,27 @@ function MorningSection({ user }) {
             <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 32 }}>
               {completedToday ? (
                 <>
-                  <div style={{ fontSize: 40, marginBottom: 12 }}>✅</div>
+                  <div style={{ fontSize: 40, marginBottom: 12 }}>{skippedToday ? "↗" : "✅"}</div>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 2, marginBottom: 8 }}>
-                    MORNING COMPLETE
+                    {skippedToday ? "RESET FOR TOMORROW" : "MORNING COMPLETE"}
                   </div>
-                  <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>
-                    Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
-                  </div>
-                  <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
-                    {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
-                  </p>
+                  {skippedToday ? (
+                    <>
+                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.7, maxWidth: 430, margin: "0 auto 14px" }}>
+                        You can&apos;t change the past, but you can change the future. Get after it tomorrow morning.
+                      </p>
+                      <button type="button" className="t3d-btn t3d-btn-sm" onClick={startNormalMorningCheckin}>
+                        FILL IT IN ANYWAY
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>
+                        Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
+                      </div>
+                      <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
+                        {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
+                      </p>
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
                     <button type="button" onClick={() => setCompletedAction("edit")}
                       style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
@@ -1588,6 +1641,8 @@ function MorningSection({ user }) {
                       </div>
                     </div>
                   )}
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -1641,20 +1696,51 @@ function MorningSection({ user }) {
                         width: "100%",
                         padding: 14
                       }}
-                      onClick={() => {
-                        setCheckinStep(0);
-                        setCheckinData({});
-                        setTempInput("");
-                        setPhotoAngleIdx(0);
-                        setPhotoFiles({ front: null, side: null, back: null });
-                        setPhotoPreviews({ front: null, side: null, back: null });
-                        setLiveInputActive(false);
-                        setLiveDeadline(null);
-                        setView("wakeCheckin");
-                      }}
+                      onClick={startNormalMorningCheckin}
                     >
                       ✓ NORMAL MORNING CHECK-IN
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowMissedRoutineChoice(open => !open);
+                        setSkipMorningError("");
+                      }}
+                      style={{
+                        alignSelf: "center",
+                        background: "none",
+                        border: 0,
+                        color: "#6F8792",
+                        cursor: "pointer",
+                        fontSize: 10,
+                        padding: "3px 6px",
+                        textDecoration: "underline",
+                      }}
+                    >
+                      I didn&apos;t complete my morning routine
+                    </button>
+                    {showMissedRoutineChoice && (
+                      <div style={{ padding: "12px 14px", border: "1px solid rgba(255,181,71,.35)", background: "rgba(255,181,71,.06)", borderRadius: 8, textAlign: "left" }}>
+                        <div style={{ color: "#FFB547", fontSize: 10, fontWeight: 700, letterSpacing: 1 }}>CHECK IN HONESTLY IF YOU CAN</div>
+                        <p style={{ color: "#A9BBC3", fontSize: 11, lineHeight: 1.55, margin: "7px 0 11px" }}>
+                          Even if it wasn&apos;t ideal, fill it in anyway. A rough check-in is more useful than no data.
+                        </p>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                          <button type="button" className="t3d-btn t3d-btn-sm" onClick={startNormalMorningCheckin}>
+                            FILL IN A ROUGH CHECK-IN
+                          </button>
+                          <button
+                            type="button"
+                            disabled={savingSkippedMorning}
+                            onClick={markMorningNotToday}
+                            style={{ background: "none", border: 0, color: NEON3, cursor: savingSkippedMorning ? "wait" : "pointer", fontSize: 10, padding: 6, textDecoration: "underline" }}
+                          >
+                            {savingSkippedMorning ? "SAVING..." : "NOT TODAY"}
+                          </button>
+                        </div>
+                        {skipMorningError && <div role="alert" style={{ color: NEON3, fontSize: 10, marginTop: 8 }}>{skipMorningError}</div>}
+                      </div>
+                    )}
                   </div>
                 </>
               )}
