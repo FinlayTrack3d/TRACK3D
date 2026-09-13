@@ -75,16 +75,17 @@ const heatColor = (v) => {
 };
 
 const SUGGESTED_TASKS = [
-  { name: "Take supplements", duration: 5, type: "tick" },
+  { name: "Brush teeth", duration: 2, type: "tick" },
+  { name: "Drink water", duration: 2, type: "tick" },
+  { name: "Have breakfast", duration: 15, type: "tick" },
   { name: "Have a shower", duration: 15, type: "tick" },
+  { name: "Take supplements", duration: 2, type: "tick" },
+  { name: "Stretch / Mobility", duration: 15, type: "tick" },
   { name: "Go for a walk", duration: 30, type: "tick" },
   { name: "Meditate", duration: 10, type: "tick" },
-  { name: "Journaling", duration: 10, type: "tick" },
+  { name: "Review goals", duration: 5, type: "tick" },
   { name: "Read", duration: 20, type: "tick" },
   { name: "Cold shower", duration: 10, type: "tick" },
-  { name: "Stretch / Mobility", duration: 15, type: "tick" },
-  { name: "Drink water", duration: 2, type: "tick" },
-  { name: "Review goals", duration: 5, type: "tick" },
 ];
 
 const MORNING_QUOTES = [
