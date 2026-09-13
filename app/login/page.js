@@ -75,7 +75,10 @@ export default function Login() {
           WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
           marginBottom: 4, textAlign: "center",
         }}>TRACK3D</div>
-        <div style={{ fontSize: 10, color: "#FFFFFF", letterSpacing: 2, marginBottom: 32, textAlign: "center" }}>
+        <div style={{ fontSize: 12, color: "#AFC2CA", fontStyle: "italic", marginBottom: 6, textAlign: "center" }}>
+          Your self-improvement system
+        </div>
+        <div style={{ fontFamily: "'Orbitron', sans-serif", fontSize: 9, fontWeight: 700, color: "#FFFFFF", letterSpacing: 1.5, lineHeight: 1.5, marginBottom: 32, textAlign: "center" }}>
           Awareness. Strategy. Action. Results.
         </div>
 
