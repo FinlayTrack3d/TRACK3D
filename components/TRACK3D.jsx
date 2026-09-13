@@ -36,15 +36,19 @@ const getZonedDateInfo = (date = new Date(), timeZone = DEFAULT_HOME_TIME_ZONE) 
   };
 };
 
-const INITIAL_HABITS = [
-  { id: 1, name: "Morning workout", done: true, streak: 14, category: "fitness" },
-  { id: 2, name: "Drink 3L water", done: true, streak: 7, category: "health" },
-  { id: 3, name: "10 min meditation", done: false, streak: 3, category: "mindset" },
-  { id: 4, name: "Read 20 pages", done: false, streak: 21, category: "growth" },
-  { id: 5, name: "Cold shower", done: true, streak: 5, category: "discipline" },
-  { id: 6, name: "No social media before 10am", done: false, streak: 2, category: "mindset" },
-  { id: 7, name: "Protein goal hit", done: true, streak: 9, category: "nutrition" },
+const INITIAL_HABITS = [];
+const POPULAR_DAILY_HABITS = [
+  { name: "Drink enough water", category: "health" },
+  { name: "Go for a walk", category: "fitness" },
+  { name: "Read for 10 minutes", category: "growth" },
+  { name: "Stretch or move", category: "fitness" },
+  { name: "Meditate for 5 minutes", category: "mindset" },
+  { name: "Plan tomorrow", category: "growth" },
 ];
+
+const mealWasCompleted = value => value === true || value?.completed === true;
+const mealWasMissed = value => value === false || value?.completed === false;
+const completedMealCount = results => Object.entries(results || {}).filter(([key, value]) => key !== "_review_complete" && mealWasCompleted(value)).length;
 
 const WORKOUTS = [
   { name: "Bench Press", sets: "4x8", weight: "185 lbs", type: "PUSH" },
@@ -135,7 +139,7 @@ const css = `
   .t3d-date { font-size: 11px; color: #B4C5CC; letter-spacing: 1.4px; margin-top: 4px; }
   .t3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #00FFB2; box-shadow: 0 0 8px #00FFB2; animation: t3dpulse 2s infinite; }
   @keyframes t3dpulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-  @keyframes t3dfade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes t3dfade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
   .t3d-fade { animation: t3dfade .35s ease forwards; }
   .t3d-grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 14px; margin-bottom: 16px; }
@@ -147,12 +151,12 @@ const css = `
   body.t3d-workout-active .t3d-bottom-nav { display: none !important; }
   .t3d-workout-screen { height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
   .t3d-workout-screen .t3d-workout-card { flex: 1; min-height: 0; overflow: hidden; padding: 14px 18px; }
-  .t3d-compact-coach { flex: 0 0 174px; height: 174px !important; max-height: 174px; overflow: hidden; }
+  .t3d-compact-coach { flex: 0 0 190px; height: 190px !important; max-height: 190px; overflow: hidden; }
   @media (max-width: 768px) {
     body.t3d-workout-active .t3d-main { padding: 10px; }
     .t3d-workout-screen { gap: 7px; }
     .t3d-workout-screen .t3d-workout-card { padding: 10px !important; }
-    .t3d-compact-coach { flex-basis: 170px; height: 170px !important; max-height: 170px; }
+    .t3d-compact-coach { flex-basis: 190px; height: 190px !important; max-height: 190px; }
   }
   .t3d-card { background: #0D1318; border: 1px solid #1A2530; border-radius: 8px; padding: 20px; position: relative; overflow: hidden; }
   .t3d-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(0,255,178,.25),transparent); }
@@ -192,7 +196,7 @@ const css = `
   .t3d-ai-input:focus { border-color: rgba(0,255,178,.35); }
   .t3d-ai-input::placeholder { color: #607784; }
   .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
-  .t3d-compact-coach .t3d-ai-msg { padding: 7px 10px; margin-bottom: 5px; line-height: 1.45; }
+  .t3d-compact-coach .t3d-ai-msg { padding: 8px 10px; margin-bottom: 6px; line-height: 1.6; font-size: 12px; }
   .t3d-rough-checkin { max-height: calc(100dvh - 145px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: 8px; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
@@ -296,7 +300,7 @@ User data today:
         </div>
       ) : (
         <>
-          <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? 96 : 260, marginBottom: compact ? 5 : 10, scrollbarWidth: "thin" }}>
+          <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? 112 : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {(compact ? messages.slice(-2) : messages).map((m, i) => {
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
               const visibleContent = m.content.replace(/\[ACTION:[^\]]+\]/gi, "").trim();
@@ -308,7 +312,7 @@ User data today:
                 <div className="t3d-ai-tag" style={{ color: m.role === "user" ? NEON2 : NEON }}>
                   {m.role === "user" ? "YOU" : "AI"}
                 </div>
-                <span style={{ color: compact ? "#D8E5EA" : m.role === "user" ? "#C0D8E8" : "#8AABB8", whiteSpace: "pre-wrap" }}>{visibleContent}</span>
+                <span style={{ color: compact ? "#F1F6F8" : m.role === "user" ? "#C0D8E8" : "#8AABB8", fontSize: compact ? 12 : undefined, lineHeight: compact ? 1.65 : undefined, whiteSpace: "pre-wrap" }}>{visibleContent}</span>
                 {actionMatch && onAction && (
                   <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
                     <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout only." }]); }}>THIS WORKOUT</button>
@@ -2927,7 +2931,7 @@ function EndOfDayCheckin({ user, onComplete }) {
 
       // Build context
       const morningScore = morning.data?.score ?? "not completed";
-      const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${Object.values(nutrition.data.meals_completed||{}).filter(v=>v===true).length} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
+      const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${countCompletedMeals(nutrition.data.meals_completed)} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
       const fitnessData = fitness.data ? `${fitness.data.session_name}, ${fitness.data.duration_mins} mins, ${Math.round(fitness.data.total_volume||0)}kg volume` : "no workout logged";
       const calendarTasks = debrief.data ? `calendar score ${debrief.data.overall_score}/10` : calendar.data?.length ? `${calendar.data.filter(t=>t.status==="done").length}/${calendar.data.length} tasks done` : "no tasks";
 
@@ -3392,31 +3396,52 @@ Give me my weekly patterns and diet suggestions.` }],
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function Dashboard({ habits, setHabits, user }) {
+function Dashboard({ habits, setHabits, user, onNavigate }) {
   const done = habits.filter(h => h.done).length;
-  const score = Math.round((done / habits.length) * 58 + 16);
   const [eodDone, setEodDone] = useState(false);
   const [showEod, setShowEod] = useState(false);
   const [view, setView] = useState("home");
   const [activity7, setActivity7] = useState([]);
-
-  const getLocalDate = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
+  const [todayData, setTodayData] = useState({ morning: null, nutrition: null, nutritionPlan: null, sessions: [], workouts: [] });
+  const homeTimeZone = resolveHomeTimeZone(user);
+  const homeDate = getZonedDateInfo(new Date(), homeTimeZone);
+  const today = homeDate.dateKey;
 
   useEffect(() => {
     if (!user) return;
-    supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", getLocalDate()).single()
+    supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", today).maybeSingle()
       .then(({ data }) => { if (data) setEodDone(true); });
     fetchDailyActivity(user.id, 7).then(setActivity7);
-  }, [user]);
+    Promise.all([
+      supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
+      supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
+      supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
+      supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
+      supabase.from("workout_logs").select("session_name,date").eq("user_id", user.id).eq("date", today),
+    ]).then(([morning, nutrition, nutritionPlan, split, workouts]) => setTodayData({
+      morning: morning.data || null,
+      nutrition: nutrition.data || null,
+      nutritionPlan: nutritionPlan.data || null,
+      sessions: split.data?.sessions || [],
+      workouts: workouts.data || [],
+    }));
+  }, [user, today]);
+
+  const todaySession = todayData.sessions.find(session => (session.days || []).some(day => String(day).toUpperCase().startsWith(homeDate.dayCode)));
+  const fitnessDone = Boolean(todaySession && todayData.workouts.some(log => log.session_name?.toLowerCase() === todaySession.name?.toLowerCase()));
+  const morningDone = Boolean(todayData.morning);
+  const caloriesEaten = todayData.nutrition?.total_calories || 0;
+  const calorieGoal = todayData.nutritionPlan?.daily_calories || 0;
+  const scoreParts = [habits.length ? done / habits.length : 0, morningDone ? Math.min((todayData.morning?.score || 10) / 10, 1) : 0];
+  if (calorieGoal) scoreParts.push(Math.min(caloriesEaten / calorieGoal, 1));
+  if (todaySession) scoreParts.push(fitnessDone ? 1 : 0);
+  const score = Math.round((scoreParts.reduce((sum, value) => sum + value, 0) / scoreParts.length) * 100);
 
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   return (
     <div className="t3d-fade">
-      <div className="t3d-grid3">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14, marginBottom: 16 }}>
         <div className="t3d-card">
           <div className="t3d-ctitle">DAILY SCORE</div>
           <div style={{ display: "flex", justifyContent: "center", paddingTop: 4 }}>
@@ -3424,24 +3449,36 @@ function Dashboard({ habits, setHabits, user }) {
           </div>
         </div>
         <div className="t3d-card">
-          <div className="t3d-ctitle">HABITS TODAY</div>
-          <div className="t3d-sval" style={{ color: NEON }}>{done}<span style={{ fontSize: 15, color: "#E0EAF0" }}>/{habits.length}</span></div>
-          <div className="t3d-slabel">COMPLETED</div>
-          <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${(done/habits.length)*100}%`, background: "linear-gradient(90deg,#00FFB2,#00C8FF)" }} /></div>
-          <div className="t3d-sdelta t3d-up" style={{ marginTop: 10 }}>▲ 2 more than yesterday</div>
+          <div className="t3d-ctitle">MORNING ROUTINE</div>
+          <div style={{ fontSize: 46, color: morningDone ? NEON : BORDER, lineHeight: 1 }}>{morningDone ? "✓" : "○"}</div>
+          <div className="t3d-slabel" style={{ marginTop: 10 }}>{morningDone ? `DONE · ${todayData.morning?.score || 0}/10` : "NOT COMPLETED YET"}</div>
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : "GO TO MORNING"}</button>
+        </div>
+        <div className="t3d-card">
+          <div className="t3d-ctitle">FITNESS TODAY</div>
+          {todaySession ? <>
+            <div style={{ fontSize: 22, color: fitnessDone ? NEON : NEON2, fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>{fitnessDone ? "✓ " : ""}{todaySession.name}</div>
+            <div className="t3d-slabel" style={{ marginTop: 10 }}>{fitnessDone ? "SESSION COMPLETED" : "RECOMMENDED TODAY"}</div>
+          </> : <div style={{ color: "#8AABB8", fontSize: 12 }}>No session scheduled today.</div>}
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>OPEN FITNESS</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">CALORIES</div>
-          <div className="t3d-sval" style={{ color: NEON2 }}>{TOTAL_CALS}</div>
-          <div className="t3d-slabel">KCAL TODAY</div>
-          <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${(TOTAL_CALS/2400)*100}%`, background: "linear-gradient(90deg,#00C8FF,#0080FF)" }} /></div>
-          <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 10 }}>Goal: 2,400 kcal</div>
+          {calorieGoal ? <>
+            <div className="t3d-sval" style={{ color: NEON2 }}>{caloriesEaten}</div>
+            <div className="t3d-slabel">OF {calorieGoal} KCAL</div>
+            <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${Math.min((caloriesEaten/calorieGoal)*100,100)}%`, background: "linear-gradient(90deg,#00C8FF,#0080FF)" }} /></div>
+          </> : <>
+            <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6 }}>Set your daily calorie target first.</div>
+            <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("nutrition")}>SET DAILY TARGET</button>
+          </>}
         </div>
       </div>
 
       <div className="t3d-grid12">
         <div className="t3d-card">
-          <div className="t3d-ctitle">HABITS</div>
+          <div className="t3d-ctitle">DO YOUR DAILY HABITS</div>
+          {habits.length === 0 && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
           {habits.map(h => (
             <div key={h.id} className="t3d-hrow" onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}>
               <div className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</div>
@@ -3774,23 +3811,42 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       .sort((a, b) => new Date(a.date) - new Date(b.date));
   };
 
-  const startWorkout = (session) => {
-    let sessionToStart = JSON.parse(JSON.stringify(session));
-    const minuteLimit = parseInt(availableMinutes, 10);
-    if (minuteLimit > 0 && sessionToStart.exercises?.length) {
-      const estimatedMinutes = sessionToStart.exercises.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5);
-      if (minuteLimit < estimatedMinutes) {
-        const setBudget = Math.max(sessionToStart.exercises.length, Math.floor((minuteLimit - 5) / 3));
-        let remaining = setBudget;
-        sessionToStart.exercises = sessionToStart.exercises.map((exercise, index) => {
-          const exercisesLeft = sessionToStart.exercises.length - index - 1;
-          const sets = Math.max(1, Math.min(Number(exercise.sets) || 1, remaining - exercisesLeft));
-          remaining -= sets;
-          return { ...exercise, sets, reps: Array.isArray(exercise.reps) ? exercise.reps.slice(0, sets) : exercise.reps };
-        });
-        sessionToStart.sessionAdjustment = `Optimised to fit approximately ${minuteLimit} minutes`;
-      }
+  const fitSessionToMinutes = (session, minuteLimit) => {
+    const adjusted = JSON.parse(JSON.stringify(session));
+    if (!(minuteLimit > 0) || !adjusted.exercises?.length) return adjusted;
+    const originalExercises = adjusted.exercises.length;
+    const originalSets = adjusted.exercises.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0);
+    const estimatedMinutes = 5 + originalSets * 3;
+    if (minuteLimit >= estimatedMinutes) return adjusted;
+    const exerciseLimit = Math.max(1, Math.min(originalExercises, Math.floor(Math.max(minuteLimit - 2, 3) / 5)));
+    const selected = adjusted.exercises.slice(0, exerciseLimit);
+    const setBudget = Math.max(exerciseLimit, Math.floor(Math.max(minuteLimit - 2, 3) / 3));
+    const setCounts = selected.map(() => 1);
+    let remaining = setBudget - exerciseLimit;
+    while (remaining > 0) {
+      let added = false;
+      selected.forEach((exercise, index) => {
+        if (remaining > 0 && setCounts[index] < (Number(exercise.sets) || 1)) {
+          setCounts[index] += 1;
+          remaining -= 1;
+          added = true;
+        }
+      });
+      if (!added) break;
     }
+    adjusted.exercises = selected.map((exercise, index) => ({
+      ...exercise,
+      sets: setCounts[index],
+      reps: Array.isArray(exercise.reps) ? exercise.reps.slice(0, setCounts[index]) : exercise.reps,
+    }));
+    const adjustedSets = setCounts.reduce((total, value) => total + value, 0);
+    adjusted.sessionAdjustment = `Optimised for ${minuteLimit} minutes · ${adjusted.exercises.length} exercise${adjusted.exercises.length === 1 ? "" : "s"} · ${adjustedSets} set${adjustedSets === 1 ? "" : "s"} (full session: ${originalExercises} exercises · ${originalSets} sets)`;
+    return adjusted;
+  };
+
+  const startWorkout = (session) => {
+    const minuteLimit = parseInt(availableMinutes, 10);
+    const sessionToStart = fitSessionToMinutes(session, minuteLimit);
     sessionToStart.gymContext = { type: gymContext, name: gymName.trim() };
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
@@ -4026,6 +4082,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
               onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>▶</button>
           </div>
+          {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-7px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
 
           {/* Rest timer */}
           {restActive && (
@@ -4098,10 +4155,12 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               <div style={{ color: "#E0EAF0", fontFamily: "'Orbitron',monospace", fontSize: 8, marginBottom: 6 }}>
                 {exerciseCompletedSets.length} SET{exerciseCompletedSets.length === 1 ? "" : "S"} COMPLETE ✓
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(88px, 1fr))", gap: 5 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 }}>
                 {exerciseCompletedSets.map((set, index) => (
-                  <button key={index} type="button" onClick={() => setEditingSet({ exerciseIdx, setIdx: index, reps: set.reps, weight: set.weight })} style={{ background: "rgba(0,200,255,.04)", border: 0, borderRadius: 4, color: NEON2, cursor: "pointer", fontFamily: "'Space Mono',monospace", fontSize: 9, padding: "5px 6px", textAlign: "left", whiteSpace: "nowrap" }}>
-                    SET {index + 1}: {set.reps} REPS · {set.weight}KG · EDIT
+                  <button key={index} type="button" onClick={() => setEditingSet({ exerciseIdx, setIdx: index, reps: set.reps, weight: set.weight })} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 6, minWidth: 0, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.12)", borderRadius: 5, color: "#D8E5EA", cursor: "pointer", fontFamily: "'Inter',sans-serif", fontSize: 9, padding: "7px 8px", textAlign: "left" }}>
+                    <span style={{ color: "#8AABB8" }}>SET {index + 1}</span>
+                    <span style={{ color: NEON2, whiteSpace: "nowrap" }}>{set.reps} reps · {set.weight}kg</span>
+                    <span style={{ color: "#FFB547", fontWeight: 700, fontSize: 8 }}>EDIT</span>
                   </button>
                 ))}
               </div>
@@ -4629,6 +4688,8 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
       isToday: dateKey === today,
     };
   });
+  const pendingMinuteLimit = parseInt(availableMinutes, 10);
+  const pendingTimedSession = pendingSession ? fitSessionToMinutes(pendingSession, pendingMinuteLimit) : null;
 
   return (
     <div className="t3d-fade">
@@ -4713,15 +4774,16 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
           </div>
 
           {pendingSession && (
-            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.88)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
-              <div className="t3d-card" style={{ width: "100%", maxWidth: 380 }}>
+            <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 }}>
+              <div className="t3d-card" style={{ width: "100%", maxWidth: 380, maxHeight: "calc(100dvh - 40px)", overflowY: "auto" }}>
                 <div className="t3d-ctitle" style={{ color: NEON }}>BEFORE YOU START · OPTIONAL</div>
                 <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 14 }}>{pendingSession.name}</div>
                 <label style={{ display: "block", fontSize: 9, color: "#8AABB8", marginBottom: 14 }}>
                   HOW MANY MINUTES DO YOU HAVE?
-                  <input className="t3d-input" type="number" inputMode="numeric" min="10" placeholder="Leave blank for the full session" value={availableMinutes} onChange={event => setAvailableMinutes(event.target.value)} style={{ marginTop: 7 }} />
-                  <span style={{ display: "block", marginTop: 5, color: "#4A6070" }}>If needed, TRACK3D keeps every exercise but trims later sets first.</span>
+                  <input className="t3d-input" type="number" inputMode="numeric" min="1" placeholder="Leave blank for the full session" value={availableMinutes} onChange={event => setAvailableMinutes(event.target.value)} style={{ marginTop: 7 }} />
+                  <span style={{ display: "block", marginTop: 5, color: "#6F8792" }}>Short on time? TRACK3D keeps the highest-priority exercises and trims the workload.</span>
                 </label>
+                {pendingTimedSession?.sessionAdjustment && <div style={{ padding: 10, marginBottom: 12, background: "rgba(255,181,71,.07)", border: "1px solid rgba(255,181,71,.25)", borderRadius: 6, color: "#FFD08A", fontSize: 10, lineHeight: 1.5 }}>{pendingTimedSession.sessionAdjustment}</div>}
                 <div style={{ fontSize: 9, color: "#8AABB8", marginBottom: 7 }}>WHERE ARE YOU TRAINING?</div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                   {[["usual","USUAL GYM"],["different","DIFFERENT GYM"],["away","ONE-OFF / AWAY"]].map(([value,label]) => (
@@ -5246,6 +5308,7 @@ function Nutrition({ user, userSessions }) {
 
   // Setup
   const [setupStep, setSetupStep] = useState(0);
+  const [setupMode, setSetupMode] = useState(null);
   const [bodyWeight, setBodyWeight] = useState("");
   const [goal, setGoal] = useState("Maintain");
   const [activityLevel, setActivityLevel] = useState("Moderately active");
@@ -5282,6 +5345,7 @@ function Nutrition({ user, userSessions }) {
   const [editingHistoryIdx, setEditingHistoryIdx] = useState(null);
   const [planSaveError, setPlanSaveError] = useState(false);
   const [savingPlan, setSavingPlan] = useState(false);
+  const [quickLogStatus, setQuickLogStatus] = useState("");
 
   const getLocalDate = () => {
     const d = new Date();
@@ -5306,7 +5370,16 @@ function Nutrition({ user, userSessions }) {
       const { data: planData } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
       if (planData) setPlan(planData);
       const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
-      if (logData) { setLogs(logData); if (logData.find(l => l.date === today)) setTodayLogged(true); }
+      if (logData) {
+        setLogs(logData);
+        const currentLog = logData.find(l => l.date === today);
+        if (currentLog) {
+          setMealResults(currentLog.meals_completed || {});
+          setOffPlanFood(currentLog.off_plan_food || "");
+          setOffPlanCals(String(currentLog.off_plan_calories || ""));
+          setTodayLogged(currentLog.meals_completed?._review_complete !== false);
+        }
+      }
     } catch (e) { console.log("Load error:", e); }
     setLoading(false);
   };
@@ -5346,25 +5419,26 @@ function Nutrition({ user, userSessions }) {
     }
   };
 
-  const saveLog = async () => {
+  const saveLog = async (resultsOverride = mealResults, reviewComplete = true) => {
     if (!user) return;
     const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
-    const totalCals = Math.round(activeMeals.filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
-    const totalProtein = Math.round(activeMeals.filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.protein||0), 0));
-    await supabase.from("nutrition_logs").upsert({
-      user_id: user.id, date: today, meals_completed: mealResults,
+    const totalCals = Math.round(activeMeals.filter((_, i) => mealWasCompleted(resultsOverride[i])).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
+    const totalProtein = Math.round(activeMeals.filter((_, i) => mealWasCompleted(resultsOverride[i])).reduce((a, m) => a + (m.protein||0), 0));
+    const result = await supabase.from("nutrition_logs").upsert({
+      user_id: user.id, date: today, meals_completed: { ...resultsOverride, _review_complete: reviewComplete },
       off_plan_food: offPlanFood, off_plan_calories: parseInt(offPlanCals)||0,
       total_calories: totalCals, total_protein: totalProtein,
       ai_feedback: aiFeedback, is_training_day: isTrainingDay,
       created_at: new Date().toISOString(),
     }, { onConflict: "user_id,date" });
+    return !result.error;
   };
 
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
     const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
-    const completedCount = Object.values(mealResults).filter(v => v === true).length;
-    const totalCals = Math.round(activeMeals.filter((_, i) => mealResults[i] === true).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
+    const completedCount = countCompletedMeals(mealResults);
+    const totalCals = Math.round(activeMeals.filter((_, i) => mealWasCompleted(mealResults[i])).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
     const calorieTarget = plan?.daily_calories || 2000;
     const diff = totalCals - calorieTarget;
     try {
@@ -5372,7 +5446,7 @@ function Nutrition({ user, userSessions }) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           system: `You are TRACK3D's nutrition coach. Give honest, direct, motivating feedback in 2-3 sentences. Be real but encouraging. Never shame. Never give medical advice. If under 18 is mentioned be age-appropriate.`,
-          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals completed. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${Math.round(activeMeals.filter((_,i)=>mealResults[i]===true).reduce((a,m)=>a+(m.protein||0),0))}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
+          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals completed. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${Math.round(activeMeals.filter((_,i)=>mealWasCompleted(mealResults[i])).reduce((a,m)=>a+(m.protein||0),0))}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
         }),
       });
       const data = await res.json();
@@ -5421,7 +5495,7 @@ function Nutrition({ user, userSessions }) {
   const weekLogs = logs.filter(l => { const d = new Date(l.date); const now = new Date(); const ws = new Date(now); ws.setDate(now.getDate()-now.getDay()); return d >= ws; });
   const avgCals = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_calories||0),0)/weekLogs.length) : 0;
   const avgProtein = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_protein||0),0)/weekLogs.length) : 0;
-  const onPlanDays = weekLogs.filter(l => { const c = Object.values(l.meals_completed||{}).filter(v=>v===true).length; return c/(plan?.meals?.length||1) >= 0.8; }).length;
+  const onPlanDays = weekLogs.filter(l => countCompletedMeals(l.meals_completed)/(plan?.meals?.length||1) >= 0.8).length;
 
   const streak = (() => {
     let s = 0; const d = new Date();
@@ -5429,7 +5503,7 @@ function Nutrition({ user, userSessions }) {
       const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
       const log = logs.find(l => l.date === ds);
       if (!log) break;
-      const completed = Object.values(log.meals_completed||{}).filter(v=>v===true).length;
+      const completed = countCompletedMeals(log.meals_completed);
       if (completed/(plan?.meals?.length||1) < 0.8) break;
       s++; d.setDate(d.getDate()-1);
     }
@@ -5445,11 +5519,11 @@ function Nutrition({ user, userSessions }) {
     const isCompleteStep = reviewStep > meals.length;
 
     if (isCompleteStep) {
-      const totalCals = Math.round(meals.filter((_,i) => mealResults[i]===true).reduce((a,m) => a+(m.calories||0),0) + (parseInt(offPlanCals)||0));
-      const totalProtein = Math.round(meals.filter((_,i) => mealResults[i]===true).reduce((a,m) => a+(m.protein||0),0));
+      const totalCals = Math.round(meals.filter((_,i) => mealWasCompleted(mealResults[i])).reduce((a,m) => a+(m.calories||0),0) + (parseInt(offPlanCals)||0));
+      const totalProtein = Math.round(meals.filter((_,i) => mealWasCompleted(mealResults[i])).reduce((a,m) => a+(m.protein||0),0));
       const targetCals = plan?.daily_calories || 2000;
       const diff = totalCals - targetCals;
-      const completedMeals = Object.values(mealResults).filter(v=>v===true).length;
+      const completedMeals = countCompletedMeals(mealResults);
 
       return (
         <div className="t3d-fade">
@@ -5546,8 +5620,16 @@ function Nutrition({ user, userSessions }) {
             <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 16 }}>Did you have this exactly as planned?</div>
             <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
               <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(s => s+1); }}>✓</button>
-              <button className="t3d-cross-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: false })); setReviewStep(s => s+1); }}>✗</button>
+              <button className="t3d-cross-btn" onClick={() => setMealResults(r => ({ ...r, [reviewStep]: { completed: false, note: typeof r[reviewStep] === "object" ? r[reviewStep].note || "" : "" } }))}>✗</button>
             </div>
+            {mealWasMissed(mealResults[reviewStep]) && (
+              <div style={{ marginTop: 14, textAlign: "left" }}>
+                <label style={{ fontSize: 10, color: "#8AABB8" }}>HOW DID IT NOT GO TO PLAN?
+                  <textarea className="t3d-input" rows={3} autoFocus placeholder="e.g. ate something different, skipped it, portion changed..." value={typeof mealResults[reviewStep] === "object" ? mealResults[reviewStep].note || "" : ""} onChange={event => setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: event.target.value } }))} style={{ marginTop: 7 }} />
+                </label>
+                <button className="t3d-btn" style={{ width: "100%", marginTop: 9 }} onClick={() => setReviewStep(step => step + 1)}>CONTINUE →</button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -5570,9 +5652,27 @@ function Nutrition({ user, userSessions }) {
           </div>
 
           {/* Step 0: Goals */}
-          {setupStep === 0 && (
+          {setupStep === 0 && !setupMode && (
+            <div>
+              <div className="t3d-ctitle">HOW WOULD YOU LIKE TO SET YOUR TARGETS?</div>
+              <button className="t3d-btn" style={{ width: "100%", textAlign: "left", whiteSpace: "normal", padding: 16, marginBottom: 10 }} onClick={() => { setSetupMode("guided"); setUseCustomTargets(false); }}>
+                STEP-BY-STEP SETUP
+                <span style={{ display: "block", marginTop: 5, color: "#8AABB8", fontFamily: "'Inter',sans-serif", fontSize: 11, fontWeight: 400 }}>Use your weight, goal and activity to calculate a starting target.</span>
+              </button>
+              <button className="t3d-btn" style={{ width: "100%", textAlign: "left", whiteSpace: "normal", padding: 16, borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => {
+                setSetupMode("custom"); setUseCustomTargets(true);
+                setCustomCalories(String(plan?.daily_calories || "")); setCustomProtein(String(plan?.protein_target || "")); setCustomCarbs(String(plan?.carbs_target || "")); setCustomFats(String(plan?.fats_target || ""));
+              }}>
+                ENTER MY OWN TARGETS
+                <span style={{ display: "block", marginTop: 5, color: "#8AABB8", fontFamily: "'Inter',sans-serif", fontSize: 11, fontWeight: 400 }}>Fill in calories and macros yourself, then build your meals.</span>
+              </button>
+            </div>
+          )}
+
+          {setupStep === 0 && setupMode === "guided" && (
             <div>
               <div className="t3d-ctitle">YOUR GOALS & STATS</div>
+              <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setSetupMode(null)}>← CHANGE SETUP METHOD</button>
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>BODY WEIGHT (kg)</div>
                 <input className="t3d-input" type="number" placeholder="e.g. 80" value={bodyWeight} onChange={e => setBodyWeight(e.target.value)} />
@@ -5604,16 +5704,37 @@ function Nutrition({ user, userSessions }) {
             </div>
           )}
 
+          {setupStep === 0 && setupMode === "custom" && (
+            <div>
+              <div className="t3d-ctitle">ENTER YOUR DAILY TARGETS</div>
+              <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setSetupMode(null)}>← CHANGE SETUP METHOD</button>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginBottom: 14 }}>
+                {[["CALORIES", customCalories, setCustomCalories], ["PROTEIN (g)", customProtein, setCustomProtein], ["CARBS (g)", customCarbs, setCustomCarbs], ["FATS (g)", customFats, setCustomFats]].map(([label, value, setter]) => (
+                  <label key={label} style={{ fontSize: 9, color: "#8AABB8" }}>{label}<input className="t3d-input" type="number" inputMode="decimal" min="0" value={value} onChange={event => setter(event.target.value)} style={{ marginTop: 5 }} /></label>
+                ))}
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>HOW MANY MEALS PER DAY?</div>
+                <div style={{ display: "flex", gap: 8 }}>{[3,4,5,6].map(number => <button key={number} className="t3d-btn" style={{ flex: 1, padding: 10, background: mealsPerDay === number ? "rgba(0,255,178,.12)" : "transparent" }} onClick={() => setMealsPerDay(number)}>{number}</button>)}</div>
+              </div>
+              <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!customCalories || !customProtein} onClick={() => {
+                setCalculatedMacros({ calories: parseInt(customCalories) || 0, protein: parseInt(customProtein) || 0, carbs: parseInt(customCarbs) || 0, fats: parseInt(customFats) || 0, tdee: null });
+                setSetupStep(1);
+              }}>USE THESE TARGETS →</button>
+              <div style={{ color: "#6F8792", fontSize: 9, lineHeight: 1.5, marginTop: 9 }}>Use targets supplied by a qualified professional where appropriate.</div>
+            </div>
+          )}
+
           {/* Step 1: Targets + Meals */}
           {setupStep === 1 && calculatedMacros && (
             <div>
               {/* Recommended targets */}
               <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2 }}>RECOMMENDED TARGETS</div>
-                  <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.6 }} onClick={() => setUseCustomTargets(v => !v)}>
+                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2 }}>{setupMode === "custom" ? "YOUR TARGETS" : "RECOMMENDED TARGETS"}</div>
+                  {setupMode !== "custom" && <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.6 }} onClick={() => setUseCustomTargets(v => !v)}>
                     {useCustomTargets ? "USE RECOMMENDED" : "CUSTOMISE"}
-                  </button>
+                  </button>}
                 </div>
                 {!useCustomTargets ? (
                   <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
@@ -5632,7 +5753,7 @@ function Nutrition({ user, userSessions }) {
                     ))}
                   </div>
                 )}
-                <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Based on {bodyWeight}kg · {goal} · {activityLevel} · TDEE: {calculatedMacros.tdee} kcal</div>
+                {setupMode === "guided" && <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Based on {bodyWeight}kg · {goal} · {activityLevel} · TDEE: {calculatedMacros.tdee} kcal</div>}
               </div>
 
               {/* Rest day option */}
@@ -5912,7 +6033,7 @@ function Nutrition({ user, userSessions }) {
           <div style={{ fontSize: 40, marginBottom: 16 }}>🥗</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>NUTRITION</div>
           <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>Build your nutrition plan.<br />Track every meal. Hit every target.</div>
-          <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => { setSetupStep(0); setView("setup"); }}>SET UP MY NUTRITION</button>
+          <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => { setSetupStep(0); setSetupMode(null); setView("setup"); }}>SET UP MY NUTRITION</button>
           <div style={{ marginTop: 16, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>Calorie targets are estimates. Consult a dietitian for medical nutrition advice.</div>
         </div>
       ) : (
@@ -5947,6 +6068,36 @@ function Nutrition({ user, userSessions }) {
             </div>
           </div>
 
+          {/* Log meals as the day happens */}
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle">LOG AS YOU GO</div>
+            <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>Tick each planned meal when you have it. If it changes, tap × and briefly say what happened.</div>
+            {activeMeals.map((meal, index) => {
+              const result = mealResults[index];
+              const missed = mealWasMissed(result);
+              return <div key={`${meal.name}-${index}`} style={{ padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>
+                  <button aria-label={`${meal.name} went to plan`} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", background: mealWasCompleted(result) ? "rgba(0,255,178,.16)" : "transparent", borderColor: mealWasCompleted(result) ? NEON : BORDER }} onClick={async () => {
+                    const updated = { ...mealResults, [index]: true };
+                    setMealResults(updated); setQuickLogStatus("SAVING...");
+                    setQuickLogStatus(await saveLog(updated, todayLogged) ? "SAVED" : "COULD NOT SAVE");
+                  }}>✓</button>
+                  <button aria-label={`${meal.name} did not go to plan`} className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "6px 10px", background: missed ? "rgba(255,45,120,.14)" : "transparent" }} onClick={async () => {
+                    const updated = { ...mealResults, [index]: { completed: false, note: typeof result === "object" ? result.note || "" : "" } };
+                    setMealResults(updated); setQuickLogStatus("SAVING...");
+                    setQuickLogStatus(await saveLog(updated, todayLogged) ? "SAVED" : "COULD NOT SAVE");
+                  }}>×</button>
+                </div>
+                {missed && <div style={{ marginTop: 8 }}>
+                  <textarea className="t3d-input" rows={2} placeholder="How did it not go to plan?" value={typeof result === "object" ? result.note || "" : ""} onChange={event => setMealResults(current => ({ ...current, [index]: { completed: false, note: event.target.value } }))} />
+                  <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 6, borderColor: "rgba(255,181,71,.35)", color: "#FFB547" }} onClick={async () => { setQuickLogStatus("SAVING..."); setQuickLogStatus(await saveLog(mealResults, todayLogged) ? "SAVED" : "COULD NOT SAVE"); }}>SAVE NOTE</button>
+                </div>}
+              </div>;
+            })}
+            {quickLogStatus && <div role="status" style={{ color: quickLogStatus === "COULD NOT SAVE" ? NEON3 : NEON, fontSize: 9, marginTop: 9 }}>{quickLogStatus}</div>}
+          </div>
+
           {/* Day review button */}
           <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 28 }}>
             {todayLogged ? (
@@ -5961,7 +6112,7 @@ function Nutrition({ user, userSessions }) {
                 <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, letterSpacing: 1 }}>READY TO REVIEW YOUR DAY?</div>
                 <button className="t3d-big-btn"
                   style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
-                  onClick={() => { setReviewStep(0); setMealResults({}); setOffPlanFood(""); setOffPlanCals(""); setAiFeedback(""); setView("review"); }}>
+                  onClick={() => { setReviewStep(0); setAiFeedback(""); setView("review"); }}>
                   🥗 DAY REVIEW
                 </button>
               </>
@@ -5972,7 +6123,7 @@ function Nutrition({ user, userSessions }) {
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>{isTrainingDay?"TRAINING DAY MEALS":"REST DAY MEALS"}</div>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.5 }} onClick={() => { setSetupStep(0); setPlanMeals(plan.meals||[]); setRestDayMeals(plan.rest_day_meals||[]); setView("setup"); }}>EDIT PLAN</button>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.5 }} onClick={() => { setSetupStep(0); setSetupMode(null); setPlanMeals(plan.meals||[]); setRestDayMeals(plan.rest_day_meals||[]); setView("setup"); }}>EDIT PLAN</button>
             </div>
             {activeMeals.map((m, i) => (
               <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
@@ -6046,7 +6197,7 @@ function Nutrition({ user, userSessions }) {
                 {logs.length===0 ? (
                   <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No history yet!</div>
                 ) : logs.map((log, i) => {
-                  const completed = Object.values(log.meals_completed||{}).filter(v=>v===true).length;
+                  const completed = countCompletedMeals(log.meals_completed);
                   const total = plan?.meals?.length||1;
                   return (
                     <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
@@ -6595,20 +6746,39 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
 
 function HabitsPage({ habits, setHabits }) {
+  const [adding, setAdding] = useState(false);
+  const [newHabit, setNewHabit] = useState({ name: "", category: "health" });
   const cats = [...new Set(habits.map(h => h.category))];
+  const addHabit = (habit = newHabit) => {
+    const name = habit.name?.trim();
+    if (!name || habits.some(existing => existing.name.toLowerCase() === name.toLowerCase())) return;
+    setHabits(current => [...current, { id: Date.now(), name, category: habit.category || "health", done: false, streak: 0 }]);
+    setNewHabit({ name: "", category: "health" });
+    setAdding(false);
+  };
   return (
     <div className="t3d-fade">
+      {habits.length === 0 && (
+        <div className="t3d-card" style={{ marginBottom: 16, padding: 28, textAlign: "center" }}>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 15, color: NEON, letterSpacing: 2, marginBottom: 8 }}>ADD YOUR HABITS NOW</div>
+          <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 18 }}>Start with the few daily habits that genuinely matter to you. Nothing is selected automatically.</div>
+          <button className="t3d-btn" style={{ padding: "12px 22px", marginBottom: 18 }} onClick={() => setAdding(true)}>+ ADD A HABIT</button>
+          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1, marginBottom: 8 }}>POPULAR DAILY HABITS</div>
+          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 7, opacity: .58 }}>
+            {POPULAR_DAILY_HABITS.map(habit => <button key={habit.name} className="t3d-btn t3d-btn-sm" style={{ whiteSpace: "normal" }} onClick={() => addHabit(habit)}>+ {habit.name}</button>)}
+          </div>
+        </div>
+      )}
       <div className="t3d-grid3">
         <div className="t3d-card">
           <div className="t3d-ctitle">COMPLETION RATE</div>
-          <div className="t3d-sval" style={{ color: NEON }}>{Math.round((habits.filter(h=>h.done).length/habits.length)*100)}%</div>
+          <div className="t3d-sval" style={{ color: NEON }}>{habits.length ? Math.round((habits.filter(h=>h.done).length/habits.length)*100) : 0}%</div>
           <div className="t3d-slabel">TODAY</div>
-          <div className="t3d-sdelta t3d-up" style={{ marginTop: 8 }}>▲ 12% vs last week</div>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">BEST STREAK</div>
-          <div className="t3d-sval" style={{ color: "#FF8C00" }}>21 🔥</div>
-          <div className="t3d-slabel">READ 20 PAGES</div>
+          <div className="t3d-sval" style={{ color: "#FF8C00" }}>{habits.length ? Math.max(...habits.map(h => h.streak || 0)) : 0}</div>
+          <div className="t3d-slabel">DAYS</div>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">TOTAL HABITS</div>
@@ -6620,18 +6790,34 @@ function HabitsPage({ habits, setHabits }) {
         <div className="t3d-card" key={cat} style={{ marginBottom: 14 }}>
           <div className="t3d-ctitle">{cat.toUpperCase()}</div>
           {habits.filter(h => h.category === cat).map(h => (
-            <div key={h.id} className="t3d-hrow" onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x,done:!x.done} : x))}>
-              <div className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</div>
-              <div className="t3d-hname" style={{ color: h.done?"#E0EAF0":"#4A6070" }}>{h.name}</div>
+            <div key={h.id} className="t3d-hrow">
+              <button aria-label={`${h.done ? "Unselect" : "Complete"} ${h.name}`} onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x,done:!x.done} : x))} className={`t3d-hcheck ${h.done?"done":""}`} style={{ background: h.done ? "rgba(0,255,178,.1)" : "transparent", color: NEON, cursor: "pointer" }}>{h.done?"✓":""}</button>
+              <div className="t3d-hname" style={{ color: h.done?"#E0EAF0":"#8AABB8" }}>{h.name}</div>
               <div className="t3d-pbar" style={{ flex: 1, margin: "0 14px" }}>
                 <div className="t3d-pfill" style={{ width: `${Math.min((h.streak/30)*100,100)}%`, background: h.streak>=7?"#FF8C00":NEON }} />
               </div>
               <div className={`t3d-hstreak ${h.streak>=7?"fire":""}`}>{h.streak>=7?"🔥":"◆"} {h.streak}d</div>
+              <button aria-label={`Remove ${h.name}`} onClick={() => setHabits(current => current.filter(item => item.id !== h.id))} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 16, padding: 4 }}>×</button>
             </div>
           ))}
         </div>
       ))}
-      <button className="t3d-btn">+ ADD NEW HABIT</button>
+      {habits.length > 0 && <button className="t3d-btn" onClick={() => setAdding(true)}>+ ADD NEW HABIT</button>}
+      {adding && (
+        <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: 20 }}>
+          <div className="t3d-card" style={{ width: "100%", maxWidth: 360 }}>
+            <div className="t3d-ctitle" style={{ color: NEON }}>ADD A DAILY HABIT</div>
+            <input className="t3d-input" autoFocus placeholder="What do you want to do each day?" value={newHabit.name} onChange={event => setNewHabit(value => ({ ...value, name: event.target.value }))} onKeyDown={event => event.key === "Enter" && addHabit()} />
+            <select className="t3d-input" value={newHabit.category} onChange={event => setNewHabit(value => ({ ...value, category: event.target.value }))} style={{ marginTop: 10 }}>
+              <option value="health">Health</option><option value="fitness">Fitness</option><option value="mindset">Mindset</option><option value="growth">Growth</option><option value="nutrition">Nutrition</option>
+            </select>
+            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setAdding(false)}>CANCEL</button>
+              <button className="t3d-btn" style={{ flex: 1 }} disabled={!newHabit.name.trim()} onClick={() => addHabit()}>ADD HABIT</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -6645,9 +6831,27 @@ export default function App() {
   const [draftError, setDraftError] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [habits, setHabits] = useState(INITIAL_HABITS);
+  const [habitsReady, setHabitsReady] = useState(false);
   const [fitnessSessions, setFitnessSessions] = useState([]);
   const homeTimeZone = resolveHomeTimeZone(user);
   const todayLabel = new Date().toLocaleDateString("en-US", { timeZone: homeTimeZone, weekday: "long", month: "long", day: "numeric" });
+  const todayKey = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
+
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const savedDefinitions = JSON.parse(localStorage.getItem(`track3d_habits_${user.id}`) || "[]");
+      const savedToday = JSON.parse(localStorage.getItem(`track3d_habit_status_${user.id}_${todayKey}`) || "{}");
+      setHabits(savedDefinitions.map(habit => ({ ...habit, done: Boolean(savedToday[habit.id]) })));
+    } catch { setHabits([]); }
+    setHabitsReady(true);
+  }, [user?.id, todayKey]);
+
+  useEffect(() => {
+    if (!user || !habitsReady) return;
+    localStorage.setItem(`track3d_habits_${user.id}`, JSON.stringify(habits.map(({ done, ...habit }) => habit)));
+    localStorage.setItem(`track3d_habit_status_${user.id}_${todayKey}`, JSON.stringify(Object.fromEntries(habits.map(habit => [habit.id, Boolean(habit.done)]))));
+  }, [habits, habitsReady, todayKey, user?.id]);
 
   useEffect(() => {
     if (!user) return;
@@ -6788,7 +6992,7 @@ export default function App() {
               ACTIVE {kind === "morning" ? "MORNING ROUTINE" : "WORKOUT"} — CLICK TO CONTINUE →
             </button>
           ))}
-          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} />}
+          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} />}
           <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
           <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
