@@ -96,17 +96,18 @@ const MORNING_QUOTES = [
 ];
 
 const css = `
-  @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Space+Mono:wght@400;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Orbitron:wght@400;600;700;900&display=swap');
   .t3d * { box-sizing: border-box; margin: 0; padding: 0; }
-  .t3d { display: flex; min-height: 100vh; background: #080C10; color: #E0EAF0; font-family: 'Space Mono', monospace; }
+  .t3d { display: flex; min-height: 100vh; background: #080C10; color: #E0EAF0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  .t3d input, .t3d select, .t3d textarea { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
   .t3d-sidebar { width: 210px; background: #0D1318; border-right: 1px solid #1A2530; display: flex; flex-direction: column; padding: 28px 0; flex-shrink: 0; }
   .t3d-logo { font-family: 'Orbitron', monospace; font-weight: 900; font-size: 20px; letter-spacing: 4px; padding: 0 22px 28px; background: linear-gradient(90deg,#00FFB2,#00C8FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
   .t3d-logo small { font-size: 9px; letter-spacing: 1px; display: block; -webkit-text-fill-color: #FFFFFF; color: #FFFFFF; margin-top: 4px; font-weight: 400; text-align: center; }
-  .t3d-nav { display: flex; align-items: center; gap: 10px; padding: 12px 22px; cursor: pointer; font-size: 11px; letter-spacing: 1px; color: #E0EAF0; border-left: 2px solid transparent; transition: all .18s; }
+  .t3d-nav { display: flex; align-items: center; gap: 10px; padding: 12px 22px; cursor: pointer; font-size: 12px; font-weight: 500; letter-spacing: .7px; color: #E0EAF0; border-left: 2px solid transparent; transition: all .18s; }
   .t3d-nav:hover { color: #8AABB8; background: rgba(0,255,178,.04); }
   .t3d-nav.on { color: #00FFB2; border-left-color: #00FFB2; background: rgba(0,255,178,.06); }
   .t3d-nav-icon { width: 18px; text-align: center; font-size: 14px; }
-  .t3d-sfooter { margin-top: auto; padding: 22px; font-size: 11px; color: #2A3A48; letter-spacing: 1px; line-height: 1.6; }
+  .t3d-sfooter { margin-top: auto; padding: 22px; font-size: 11px; color: #607784; letter-spacing: .6px; line-height: 1.6; }
   .t3d-main { flex: 1; padding: 28px 28px 48px; min-width: 0; overflow-y: auto; }
   @media (max-width: 768px) {
     .t3d-sidebar { display: none !important; }
@@ -126,12 +127,12 @@ const css = `
   @media (max-width: 768px) {
     .t3d-bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; background: #0D1318; border-top: 1px solid #1A2530; padding: 8px 0 12px; z-index: 50; justify-content: space-around; align-items: center; }
   }
-  .t3d-bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; padding: 4px 12px; border-radius: 8px; transition: all .18s; color: #E0EAF0; font-family: 'Orbitron', monospace; font-size: 7px; letter-spacing: 1px; border: none; background: transparent; }
+  .t3d-bnav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; padding: 4px 12px; border-radius: 8px; transition: all .18s; color: #E0EAF0; font-family: 'Orbitron', sans-serif; font-size: 8px; letter-spacing: .8px; border: none; background: transparent; }
   .t3d-bnav-item.on { color: #00FFB2; }
   .t3d-bnav-icon { font-size: 20px; }
   .t3d-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; }
   .t3d-title { font-family: 'Orbitron', monospace; font-size: 18px; font-weight: 700; letter-spacing: 3px; }
-  .t3d-date { font-size: 10px; color: #E0EAF0; letter-spacing: 2px; margin-top: 4px; }
+  .t3d-date { font-size: 11px; color: #B4C5CC; letter-spacing: 1.4px; margin-top: 4px; }
   .t3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #00FFB2; box-shadow: 0 0 8px #00FFB2; animation: t3dpulse 2s infinite; }
   @keyframes t3dpulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   @keyframes t3dfade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
@@ -155,9 +156,9 @@ const css = `
   }
   .t3d-card { background: #0D1318; border: 1px solid #1A2530; border-radius: 8px; padding: 20px; position: relative; overflow: hidden; }
   .t3d-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(0,255,178,.25),transparent); }
-  .t3d-ctitle { font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 3px; color: #2A3A48; text-transform: uppercase; margin-bottom: 14px; }
+  .t3d-ctitle { font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 600; letter-spacing: 2px; color: #6F8792; text-transform: uppercase; margin-bottom: 14px; line-height: 1.45; }
   .t3d-sval { font-family: 'Orbitron', monospace; font-size: 30px; font-weight: 700; margin: 6px 0 3px; }
-  .t3d-slabel { font-size: 10px; color: #E0EAF0; letter-spacing: 1px; }
+  .t3d-slabel { font-size: 11px; color: #C6D3D8; letter-spacing: .6px; }
   .t3d-sdelta { font-size: 10px; margin-top: 8px; }
   .t3d-up { color: #00FFB2; } .t3d-dn { color: #FF2D78; }
   .t3d-pbar { height: 4px; background: #1A2530; border-radius: 2px; overflow: hidden; margin-top: 10px; }
@@ -166,7 +167,7 @@ const css = `
   .t3d-hrow:last-child { border-bottom: none; }
   .t3d-hcheck { width: 20px; height: 20px; border-radius: 4px; border: 1px solid #1A2530; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; transition: all .18s; }
   .t3d-hcheck.done { background: rgba(0,255,178,.1); border-color: #00FFB2; color: #00FFB2; }
-  .t3d-hname { flex: 1; font-size: 11px; }
+  .t3d-hname { flex: 1; font-size: 12px; line-height: 1.45; }
   .t3d-hstreak { font-family: 'Orbitron', monospace; font-size: 10px; color: #E0EAF0; }
   .t3d-hstreak.fire { color: #FF8C00; }
   .t3d-hmap { display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; margin-top: 8px; }
@@ -180,22 +181,22 @@ const css = `
   .t3d-mbar { flex: 1; height: 5px; background: #1A2530; border-radius: 3px; overflow: hidden; }
   .t3d-mfill { height: 100%; border-radius: 3px; transition: width .8s cubic-bezier(.16,1,.3,1); }
   .t3d-mval { font-family: 'Orbitron', monospace; font-size: 10px; width: 65px; text-align: right; }
-  .t3d-btn { background: rgba(0,255,178,.07); border: 1px solid rgba(0,255,178,.25); color: #00FFB2; font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 2px; padding: 9px 16px; border-radius: 5px; cursor: pointer; transition: all .18s; white-space: nowrap; }
+  .t3d-btn { background: rgba(0,255,178,.07); border: 1px solid rgba(0,255,178,.32); color: #00FFB2; font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 600; letter-spacing: 1.25px; line-height: 1.35; padding: 9px 16px; border-radius: 5px; cursor: pointer; transition: all .18s; white-space: nowrap; }
   .t3d-btn:hover { background: rgba(0,255,178,.14); }
   .t3d-btn:disabled { opacity: .35; cursor: not-allowed; }
-  .t3d-btn-sm { padding: 6px 12px; font-size: 8px; }
+  .t3d-btn-sm { padding: 6px 12px; font-size: 9px; }
   .t3d-btn-red { background: rgba(255,45,120,.07); border-color: rgba(255,45,120,.25); color: #FF2D78; }
-  .t3d-ai-msg { margin-bottom: 8px; padding: 10px 13px; border-radius: 6px; font-size: 11px; line-height: 1.65; animation: t3dfade .3s ease; }
+  .t3d-ai-msg { margin-bottom: 8px; padding: 10px 13px; border-radius: 6px; font-size: 12px; line-height: 1.55; animation: t3dfade .3s ease; }
   .t3d-ai-tag { font-family: 'Orbitron', monospace; font-size: 8px; letter-spacing: 2px; margin-bottom: 5px; }
-  .t3d-ai-input { flex: 1; background: #111921; border: 1px solid #1A2530; border-radius: 5px; padding: 9px 12px; color: #E0EAF0; font-family: 'Space Mono', monospace; font-size: 11px; outline: none; transition: border-color .18s; }
+  .t3d-ai-input { flex: 1; background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 12px; outline: none; transition: border-color .18s; }
   .t3d-ai-input:focus { border-color: rgba(0,255,178,.35); }
-  .t3d-ai-input::placeholder { color: #1E2E3A; }
+  .t3d-ai-input::placeholder { color: #607784; }
   .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
   .t3d-compact-coach .t3d-ai-msg { padding: 7px 10px; margin-bottom: 5px; line-height: 1.45; }
   .t3d-rough-checkin { max-height: calc(100dvh - 145px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: 8px; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
-  .t3d-input { background: #111921; border: 1px solid #1A2530; border-radius: 5px; padding: 9px 12px; color: #E0EAF0; font-family: 'Space Mono', monospace; font-size: 12px; outline: none; transition: border-color .18s; width: 100%; }
+  .t3d-input { background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 13px; line-height: 1.4; outline: none; transition: border-color .18s; width: 100%; }
   .t3d-input:focus { border-color: rgba(0,255,178,.35); }
   .t3d-input::placeholder { color: #1E2E3A; }
   .t3d-checkin-step { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; }
@@ -3602,6 +3603,10 @@ function Fitness({ user, isActive = true }) {
   const [editingSet, setEditingSet] = useState(null);
   const [completionFeedback, setCompletionFeedback] = useState("");
   const [completionFeedbackLoading, setCompletionFeedbackLoading] = useState(false);
+  const [approvalReview, setApprovalReview] = useState(null);
+  const [approvalQuestion, setApprovalQuestion] = useState("");
+  const [approvalMessages, setApprovalMessages] = useState([]);
+  const [approvalLoading, setApprovalLoading] = useState(false);
 
   // Workout logger state - track sets per exercise independently
   const [activeSession, setActiveSession] = useState(null);
@@ -4552,6 +4557,27 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
     }
   };
 
+  const askApprovalCoach = async () => {
+    const question = approvalQuestion.trim();
+    if (!question || approvalLoading) return;
+    const updated = [...approvalMessages, { role: "user", content: question }];
+    const reviewedSessions = approvalReview === "all" ? sessions : [sessions[approvalReview]].filter(Boolean);
+    setApprovalMessages(updated);
+    setApprovalQuestion("");
+    setApprovalLoading(true);
+    try {
+      const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        system: `You are TRACK3D's fitness coach helping a user decide whether to approve a programme. Answer directly in 2-5 short bullets with no emojis. Explain the purpose of the day selection, recovery spacing, duration, exercise order, sets and rep ranges. Listen to feedback and suggest reasonable adjustments, but warn clearly against unsafe or counterproductive requests. Approval is optional and means an 8-week commitment with review afterwards. Sessions may move within a rolling 8-day cycle. Home timezone: ${homeTimeZone}.`,
+        messages: [{ role: "user", content: `Programme under review: ${JSON.stringify(reviewedSessions)}` }, ...updated],
+      }) });
+      if (!response.ok) throw new Error("Coach request failed");
+      const data = await response.json();
+      const reply = data.content?.map(block => block.text || "").join("") || "I could not answer that just now.";
+      setApprovalMessages([...updated, { role: "assistant", content: reply }]);
+    } catch { setApprovalMessages([...updated, { role: "assistant", content: "I could not connect just now. Please try again." }]); }
+    setApprovalLoading(false);
+  };
+
   // ── HOME VIEW ─────────────────────────────────────────────────────────────
   const dayCodes = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
   const dayNames = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"];
@@ -4649,7 +4675,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                   {!recommendedSession.approval?.approved && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, color: "#FFB547", fontSize: 8 }}>
                       <span>AWAITING YOUR APPROVAL</span>
-                      <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 8px", borderColor: "#FFB547", color: "#FFB547" }} onClick={() => approveProgramme(sessions.indexOf(recommendedSession))}>APPROVE</button>
+                      <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 8px", borderColor: "#FFB547", color: "#FFB547" }} onClick={() => { setApprovalMessages([]); setApprovalReview(sessions.indexOf(recommendedSession)); }}>REVIEW &amp; APPROVE</button>
                     </div>
                   )}
                 </div>
@@ -4806,7 +4832,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               <div style={{ fontSize: 9, color: programmeApproved ? NEON : "#FFB547", marginBottom: programmeApproved ? 0 : 7 }}>
                 {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${sessions[0]?.approval?.reviewAfter}` : "REVIEW THE DAYS, ORDER AND EXERCISES. APPROVAL IS RECOMMENDED, NOT REQUIRED."}
               </div>
-              {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => approveProgramme()}>APPROVE FULL SPLIT FOR 8 WEEKS</button>}
+              {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalMessages([]); setApprovalReview("all"); }}>REVIEW &amp; APPROVE 8-WEEK SPLIT</button>}
             </div>
             {DAYS.map(day => {
               const isToday = day === homeDate.dayCode;
@@ -4820,6 +4846,49 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               );
             })}
           </div>
+
+          {approvalReview !== null && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 18 }}>
+              <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="approval-review-title" style={{ width: "100%", maxWidth: 620, maxHeight: "88dvh", overflowY: "auto", borderColor: "rgba(255,181,71,.45)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                  <div id="approval-review-title" className="t3d-ctitle" style={{ color: "#FFB547", margin: 0 }}>REVIEW BEFORE APPROVAL</div>
+                  <button className="t3d-btn t3d-btn-sm" onClick={() => setApprovalReview(null)}>CLOSE</button>
+                </div>
+                <p style={{ fontSize: 12, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 14 }}>
+                  Approval is optional. It means committing to these sessions for eight weeks, completing them within each rolling eight-day cycle, then reviewing progress, stalls or the need for a deload.
+                </p>
+                {(approvalReview === "all" ? sessions : [sessions[approvalReview]].filter(Boolean)).map((session, sessionIndex) => (
+                  <div key={`${session.name}-${sessionIndex}`} style={{ padding: 13, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 7, marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 7 }}>
+                      <strong style={{ color: NEON, fontSize: 12 }}>{session.name}</strong>
+                      <span style={{ color: NEON2, fontSize: 10 }}>{(session.days || []).join(" / ") || "FLEXIBLE"} · {session.duration_mins || session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0} MIN</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 9 }}>
+                      {session.reasoning || "This older plan does not include a saved coach explanation. Ask below about its placement, recovery or exercise choices before approving."}
+                    </div>
+                    {(session.exercises || []).map((exercise, exerciseIndex) => (
+                      <div key={`${exercise.name}-${exerciseIndex}`} style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1fr) auto", gap: 7, padding: "6px 0", borderTop: `1px solid ${BORDER}`, fontSize: 10 }}>
+                        <span style={{ color: "#6F8792" }}>{exerciseIndex + 1}</span>
+                        <span style={{ color: "#D5E0E4" }}>{exercise.name}</span>
+                        <span style={{ color: "#8AABB8" }}>{exercise.sets} sets · {Array.isArray(exercise.reps) ? exercise.reps.join("/") : exercise.reps} reps</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+                {approvalMessages.length > 0 && <div style={{ maxHeight: 180, overflowY: "auto", margin: "12px 0" }}>
+                  {approvalMessages.map((message, index) => <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, whiteSpace: "pre-wrap" }}><div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>{message.content}</div>)}
+                </div>}
+                <div style={{ display: "flex", gap: 7, marginTop: 12 }}>
+                  <input className="t3d-ai-input" placeholder="Ask why, question a day, or suggest a change..." value={approvalQuestion} onChange={event => setApprovalQuestion(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askApprovalCoach(); } }} />
+                  <button className="t3d-btn t3d-btn-sm" onClick={askApprovalCoach} disabled={approvalLoading || !approvalQuestion.trim()}>{approvalLoading ? "ASKING..." : "ASK"}</button>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+                  <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalReview(null); setEditDaysModal(true); }}>ADJUST PLAN FIRST</button>
+                  <button className="t3d-btn" style={{ flex: 1, borderColor: NEON, background: "rgba(0,255,178,.12)" }} onClick={async () => { await approveProgramme(approvalReview === "all" ? null : approvalReview); setApprovalReview(null); }}>APPROVE {approvalReview === "all" ? "FULL 8-WEEK SPLIT" : "THIS SESSION"}</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Edit Days Modal */}
           {editDaysModal && (
