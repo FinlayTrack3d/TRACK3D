@@ -783,13 +783,22 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
                   {locked ? "🔒" : "≡"}
                 </div>
 
-                <input
-                  className="t3d-input"
-                  value={task.name}
-                  disabled={locked}
-                  onChange={e => updateTask(i, "name", e.target.value)}
-                  style={{ padding: "9px 10px" }}
-                />
+                <div style={{ minWidth: 0 }}>
+                  <input
+                    className="t3d-input"
+                    value={task.name}
+                    disabled={locked}
+                    onChange={e => updateTask(i, "name", e.target.value)}
+                    style={{ padding: "9px 10px" }}
+                  />
+                  {!locked && (
+                    <select className="t3d-input" value={task.routineDay || "daily"} onChange={e => updateTask(i, "routineDay", e.target.value)} style={{ padding: "5px 7px", marginTop: 5, fontSize: 8 }}>
+                      <option value="daily">EVERY DAY</option>
+                      <option value="A">ALTERNATING DAY A</option>
+                      <option value="B">ALTERNATING DAY B</option>
+                    </select>
+                  )}
+                </div>
 
                 <input
                   type="time"
@@ -965,6 +974,7 @@ function MorningSection({ user }) {
   const [showMissedRoutineChoice, setShowMissedRoutineChoice] = useState(false);
   const [savingSkippedMorning, setSavingSkippedMorning] = useState(false);
   const [skipMorningError, setSkipMorningError] = useState("");
+  const [reviewingMissed, setReviewingMissed] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1212,7 +1222,9 @@ function MorningSection({ user }) {
     setView("setup");
   };
 
-  const allSteps = scheduledTasks.length > 0 ? scheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
+  const rotationDay = Math.floor(Date.parse(`${today}T00:00:00Z`) / 86400000) % 2 === 0 ? "A" : "B";
+  const activeScheduledTasks = scheduledTasks.filter(task => !task.routineDay || task.routineDay === "daily" || task.routineDay === rotationDay || task.id === "checkin");
+  const allSteps = scheduledTasks.length > 0 ? activeScheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
 
   const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
   const currentLiveTask = liveRoutineSteps[liveTaskIndex];
@@ -1353,7 +1365,8 @@ function MorningSection({ user }) {
 
   const finishLiveInputStep = () => {
     if (!liveInputActive) {
-      setCheckinStep(s => s + 1);
+      setCheckinStep(s => reviewingMissed ? allSteps.length : s + 1);
+      setReviewingMissed(false);
       return;
     }
 
@@ -1395,7 +1408,7 @@ function MorningSection({ user }) {
     return Math.round((points / total) * 10);
   };
 
-  const finishTime = isSetup ? calcFinishTime(wakeTime, scheduledTasks) : "--:--";
+  const finishTime = isSetup ? calcFinishTime(wakeTime, activeScheduledTasks) : "--:--";
 
   // 7-day chart data
   const last7 = Array.from({ length: 7 }, (_, i) => {
@@ -1458,9 +1471,9 @@ function MorningSection({ user }) {
             for (const angle of PHOTO_ANGLES) {
               const file = photoFiles[angle];
               if (!file) continue;
-              const extension = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "") || "jpg";
-              const path = `${user.id}/${today}/${angle}-${crypto.randomUUID()}.${extension}`;
-              const { error: uploadError } = await supabase.storage.from("checkin-photos").upload(path, file);
+              const extension = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
+              const path = `${user.id}/${today}/${angle}.${extension}`;
+              const { error: uploadError } = await supabase.storage.from("checkin-photos").upload(path, file, { upsert: true, contentType: file.type || undefined });
               if (uploadError) throw uploadError;
               updatedPhotos[angle] = path;
             }
@@ -1475,8 +1488,8 @@ function MorningSection({ user }) {
             if (error) throw error;
             await loadData();
             setView("home");
-          } catch {
-            setSubmissionError("Your changes could not be saved. Please try again.");
+          } catch (error) {
+            setSubmissionError(error?.message ? `Your changes could not be saved: ${error.message}` : "Your changes could not be saved. Please try again.");
           } finally {
             setSavingCheckin(false);
           }
@@ -1791,7 +1804,7 @@ function MorningSection({ user }) {
             {/* Today's schedule */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY'S SCHEDULE</div>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE · DAY {rotationDay}</div>
                 <div style={{ display: "flex", gap: 8 }}>
   <button
     className="t3d-btn t3d-btn-sm"
@@ -1808,10 +1821,10 @@ function MorningSection({ user }) {
   </button>           
 </div>
               </div>
-              {scheduledTasks.map((t, i) => (
+              {activeScheduledTasks.map((t, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, width: 45 }}>{t.scheduledTime}</div>
-                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
+                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}{t.routineDay && t.routineDay !== "daily" ? ` · DAY ${t.routineDay}` : ""}</div>
                   <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
                 </div>
               ))}
@@ -2749,8 +2762,15 @@ function MorningSection({ user }) {
                     </button>
                   )}
                   <div style={{ fontSize: 10, color: "#E0EAF0", margin: "16px 0 6px", lineHeight: 1.5 }}>
-                    Skipping makes it harder to track your visual progress over time.
+                    You can skip photos or leave them until the final review.
                   </div>
+                  <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 7 }}
+                    onClick={() => {
+                      setCheckinData(data => ({ ...data, photos: Object.fromEntries(PHOTO_ANGLES.map(item => [item, photoFiles[item] ? "captured" : "deferred"])) }));
+                      finishLiveInputStep();
+                    }}>
+                    ADD PHOTOS AT THE END
+                  </button>
                   <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", opacity: 0.6 }}
                     onClick={() => finishPhotos()}>
                     SKIP REMAINING PHOTOS
@@ -2762,11 +2782,11 @@ function MorningSection({ user }) {
             {currentStep.type === "tick" && (
               <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
                 <button className="t3d-tick-btn"
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: true })); setCheckinStep(s => s + 1); }}>
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: true })); setCheckinStep(s => reviewingMissed ? allSteps.length : s + 1); setReviewingMissed(false); }}>
                   ✓
                 </button>
                 <button className="t3d-cross-btn"
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: false })); setCheckinStep(s => s + 1); }}>
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: false })); setCheckinStep(s => reviewingMissed ? allSteps.length : s + 1); setReviewingMissed(false); }}>
                   ✗
                 </button>
               </div>
@@ -2788,6 +2808,12 @@ function MorningSection({ user }) {
   if (view === "checkin" && checkinStep >= allSteps.length) {
     const score = morningScore(checkinData);
     const quote = MORNING_QUOTES[Math.floor(Math.random() * MORNING_QUOTES.length)];
+    const missedSteps = allSteps.map((step, index) => ({ step, index })).filter(({ step }) => {
+      const value = checkinData[step.id || step.name];
+      if (step.type === "tick") return value !== true;
+      if (step.type === "photos3") return PHOTO_ANGLES.some(angle => !photoFiles[angle] && !value?.[angle]?.includes?.("/"));
+      return value === undefined || value === null || value === "";
+    });
 
     // Save handled via button click
 
@@ -2808,6 +2834,22 @@ function MorningSection({ user }) {
           <div style={{ fontSize: 13, color: "#8AABB8", fontStyle: "italic", marginBottom: 32, lineHeight: 1.7, padding: "0 20px" }}>
             "{quote}"
           </div>
+          {missedSteps.length > 0 && (
+            <div style={{ textAlign: "left", padding: 12, marginBottom: 16, border: "1px solid rgba(255,181,71,.3)", borderRadius: 7, background: "rgba(255,181,71,.05)" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FFB547", letterSpacing: 1, marginBottom: 6 }}>MISSED SOMETHING?</div>
+              <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 9 }}>Add it now if you can. You will return straight to this review.</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {missedSteps.map(({ step, index }) => (
+                  <button key={step.id || step.name} className="t3d-btn t3d-btn-sm" onClick={() => {
+                    setReviewingMissed(true);
+                    setTempInput("");
+                    if (step.type === "photos3") setPhotoAngleIdx(Math.max(0, PHOTO_ANGLES.findIndex(angle => !photoFiles[angle])));
+                    setCheckinStep(index);
+                  }}>{step.type === "photos3" ? "ADD PHOTOS" : `DO ${step.name}`}</button>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ marginBottom: 24 }}>
             {Object.entries(checkinData).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
