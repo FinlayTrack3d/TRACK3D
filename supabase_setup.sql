@@ -59,6 +59,9 @@ alter table nutrition_plans add column if not exists goal text;
 alter table nutrition_plans add column if not exists rest_day_meals jsonb;
 alter table nutrition_plans add column if not exists updated_at timestamptz;
 
+-- The live nutrition logger records whether today's plan is for a training day.
+alter table nutrition_logs add column if not exists is_training_day boolean not null default true;
+
 -- 4. End-of-workout check-ins (effort, body feeling, mental state, "more in the tank")
 create table if not exists workout_checkins (
   id uuid primary key default gen_random_uuid(),

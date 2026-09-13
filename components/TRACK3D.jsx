@@ -3475,8 +3475,8 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
         </div>
       </div>
 
-      <div className="t3d-grid12">
-        <div className="t3d-card">
+      <div style={{ marginBottom: 16 }}>
+        <div className="t3d-card" style={{ marginBottom: 14 }}>
           <div className="t3d-ctitle">DO YOUR DAILY HABITS</div>
           {habits.length === 0 && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
           {habits.map(h => (
