@@ -6864,14 +6864,14 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
 function HabitsPage({ habits, setHabits }) {
   const [adding, setAdding] = useState(false);
-  const [newHabit, setNewHabit] = useState({ name: "", category: "health" });
+  const [newHabit, setNewHabit] = useState({ name: "" });
   const cats = [...new Set(habits.map(h => h.category))];
   const remainingSuggestions = POPULAR_DAILY_HABITS.filter(suggestion => !habits.some(habit => habit.name.toLowerCase() === suggestion.name.toLowerCase()));
   const addHabit = (habit = newHabit) => {
     const name = habit.name?.trim();
     if (!name || habits.some(existing => existing.name.toLowerCase() === name.toLowerCase())) return;
-    setHabits(current => [...current, { id: Date.now(), name, category: habit.category || "health", done: false, streak: 0 }]);
-    setNewHabit({ name: "", category: "health" });
+    setHabits(current => [...current, { id: Date.now(), name, category: habit.category || "daily", done: false, streak: 0 }]);
+    setNewHabit({ name: "" });
     setAdding(false);
   };
   return (
@@ -6935,9 +6935,6 @@ function HabitsPage({ habits, setHabits }) {
           <div className="t3d-card" style={{ width: "100%", maxWidth: 360 }}>
             <div className="t3d-ctitle" style={{ color: NEON }}>ADD A DAILY HABIT</div>
             <input className="t3d-input" autoFocus placeholder="What do you want to do each day?" value={newHabit.name} onChange={event => setNewHabit(value => ({ ...value, name: event.target.value }))} onKeyDown={event => event.key === "Enter" && addHabit()} />
-            <select className="t3d-input" value={newHabit.category} onChange={event => setNewHabit(value => ({ ...value, category: event.target.value }))} style={{ marginTop: 10 }}>
-              <option value="health">Health</option><option value="fitness">Fitness</option><option value="mindset">Mindset</option><option value="growth">Growth</option><option value="nutrition">Nutrition</option>
-            </select>
             <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
               <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setAdding(false)}>CANCEL</button>
               <button className="t3d-btn" style={{ flex: 1 }} disabled={!newHabit.name.trim()} onClick={() => addHabit()}>ADD HABIT</button>
