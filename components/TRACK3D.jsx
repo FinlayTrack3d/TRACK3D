@@ -49,6 +49,14 @@ const POPULAR_DAILY_HABITS = [
 const mealWasCompleted = value => value === true || value?.completed === true;
 const mealWasMissed = value => value === false || value?.completed === false;
 const completedMealCount = results => Object.entries(results || {}).filter(([key, value]) => key !== "_review_complete" && mealWasCompleted(value)).length;
+const cleanAiText = value => String(value || "")
+  .replace(/^\s*(?:\*{3,}|-{3,}|_{3,})\s*$/gm, "")
+  .replace(/\*\*(.*?)\*\*/g, "$1")
+  .replace(/__(.*?)__/g, "$1")
+  .replace(/^\s*#{1,6}\s*/gm, "")
+  .replace(/^\s*\*\s+/gm, "• ")
+  .replace(/\n{3,}/g, "\n\n")
+  .trim();
 
 const WORKOUTS = [
   { name: "Bench Press", sets: "4x8", weight: "185 lbs", type: "PUSH" },
@@ -303,7 +311,7 @@ User data today:
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? 112 : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {(compact ? messages.slice(-2) : messages).map((m, i) => {
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
-              const visibleContent = m.content.replace(/\[ACTION:[^\]]+\]/gi, "").trim();
+              const visibleContent = cleanAiText(m.content.replace(/\[ACTION:[^\]]+\]/gi, ""));
               return (
               <div key={i} className="t3d-ai-msg" style={{
                 background: m.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2,
@@ -483,7 +491,7 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
           {aiConversation.filter(message => !message.hidden).map((message, index) => (
             <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2 }}>
               <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "AI COACH"}</div>
-              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0" }}>{message.content}</div>
+              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</div>
             </div>
           ))}
           {aiLoading && <p role="status" style={{ fontSize: 11, color: NEON }}>Thinking about your routine...</p>}
@@ -3274,7 +3282,6 @@ function DashboardHistory({ user, onBack }) {
 
 // ─── Weekly Report ──────────────────────────────────────────────────────────────
 function WeeklyReport({ user }) {
-  const [reportDay, setReportDay] = useState(0);
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -3285,9 +3292,7 @@ function WeeklyReport({ user }) {
 
   const init = async () => {
     setLoading(true);
-    const { data: settings } = await supabase.from("user_settings").select("report_day").eq("user_id", user.id).single();
-    const day = settings?.report_day ?? 0;
-    setReportDay(day);
+    const day = 0;
 
     const { data: latest } = await supabase.from("weekly_reports").select("*").eq("user_id", user.id).order("report_date", { ascending: false }).limit(1).single();
     setReport(latest || null);
@@ -3297,11 +3302,6 @@ function WeeklyReport({ user }) {
       await generateReport();
     }
     setLoading(false);
-  };
-
-  const saveReportDay = async (day) => {
-    setReportDay(day);
-    await supabase.from("user_settings").upsert({ user_id: user.id, report_day: day, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
   };
 
   const generateReport = async () => {
@@ -3360,14 +3360,16 @@ Give me my weekly patterns and diet suggestions.` }],
     </div>
   );
 
+  const homeToday = getZonedDateInfo(new Date(), resolveHomeTimeZone(user));
+  const nextSunday = new Date(`${homeToday.dateKey}T12:00:00Z`);
+  nextSunday.setUTCDate(nextSunday.getUTCDate() + (7 - nextSunday.getUTCDay()));
+  const nextReportLabel = nextSunday.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
+
   return (
     <div className="t3d-card" style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+      <div style={{ marginBottom: 14 }}>
         <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY REPORT</div>
-        <select value={reportDay} onChange={e => saveReportDay(parseInt(e.target.value))}
-          style={{ background: SURFACE2, border: `1px solid ${BORDER}`, color: "#8AABB8", fontSize: 10, borderRadius: 5, padding: "4px 8px" }}>
-          {DAY_NAMES.map((n, i) => <option key={i} value={i}>{n}</option>)}
-        </select>
+        <div style={{ fontSize: 9, color: "#6F8792", marginTop: 4 }}>Your next report is due on {nextReportLabel}.</div>
       </div>
       {generating ? (
         <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>Generating this week's report...</div>
@@ -3378,17 +3380,17 @@ Give me my weekly patterns and diet suggestions.` }],
           </div>
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 10, color: NEON2, letterSpacing: 1, marginBottom: 6 }}>PATTERNS</div>
-            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}>{report.patterns || "Not enough data yet."}</div>
+            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{cleanAiText(report.patterns) || "Not enough data yet."}</div>
           </div>
           <div>
             <div style={{ fontSize: 10, color: "#FF8C00", letterSpacing: 1, marginBottom: 6 }}>DIET SUGGESTIONS</div>
-            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6 }}>{report.diet_suggestions || "Nothing to flag this week."}</div>
+            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{cleanAiText(report.diet_suggestions) || "Nothing to flag this week."}</div>
             <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Suggestions only — update your plan in Nutrition if you agree.</div>
           </div>
         </div>
       ) : (
         <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>
-          Next report: {DAY_NAMES[reportDay]}
+          Your report will appear here on {nextReportLabel}.
         </div>
       )}
     </div>
@@ -4250,7 +4252,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             );
           })}
           </details>
-          {completionFeedback && <div style={{ textAlign: "left", whiteSpace: "pre-wrap", color: "#C5D6DC", background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 12, fontSize: 10, lineHeight: 1.55, marginBottom: 10 }}>{completionFeedback}</div>}
+          {completionFeedback && <div style={{ textAlign: "left", whiteSpace: "pre-wrap", color: "#C5D6DC", background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 12, fontSize: 10, lineHeight: 1.55, marginBottom: 10 }}>{cleanAiText(completionFeedback)}</div>}
           <button className="t3d-btn" style={{ width: "100%", padding: 11, marginBottom: 8, borderColor: NEON2, color: NEON2 }} onClick={getCompletionFeedback} disabled={completionFeedbackLoading}>{completionFeedbackLoading ? "GETTING FEEDBACK..." : completionFeedback ? "COACH FEEDBACK SHOWN" : "VIEW YOUR COACH'S FEEDBACK"}</button>
           <button className="t3d-btn" style={{ width: "100%", padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={() => { setActiveSession(null); setCompletionFeedback(""); setView("home"); }}>BACK TO FITNESS</button>
         </div>
@@ -4863,7 +4865,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                 {coachMessages.map((message, index) => (
                   <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
                     <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-                    <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.content}</span>
+                    <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
                   </div>
                 ))}
                 {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
@@ -4938,7 +4940,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                   </div>
                 ))}
                 {approvalMessages.length > 0 && <div style={{ maxHeight: 180, overflowY: "auto", margin: "12px 0" }}>
-                  {approvalMessages.map((message, index) => <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, whiteSpace: "pre-wrap" }}><div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>{message.content}</div>)}
+                  {approvalMessages.map((message, index) => <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, whiteSpace: "pre-wrap" }}><div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</div>)}
                 </div>}
                 <div style={{ display: "flex", gap: 7, marginTop: 12 }}>
                   <input className="t3d-ai-input" placeholder="Ask why, question a day, or suggest a change..." value={approvalQuestion} onChange={event => setApprovalQuestion(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askApprovalCoach(); } }} />
@@ -5281,7 +5283,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
         {messages.map((m, i) => (
           <div key={i} style={{ marginBottom: 10 }}>
             <div style={{ fontSize: 8, letterSpacing: 1, color: m.role === "user" ? NEON2 : NEON, fontFamily: "'Orbitron',monospace", marginBottom: 3 }}>{m.role === "user" ? "YOU" : "AI"}</div>
-            <div style={{ fontSize: 12, color: m.role === "user" ? "#C0D8E8" : "#8AABB8", lineHeight: 1.65 }}>{m.content}</div>
+            <div style={{ fontSize: 12, color: m.role === "user" ? "#C0D8E8" : "#8AABB8", lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{m.role === "assistant" ? cleanAiText(m.content) : m.content}</div>
           </div>
         ))}
         {loading && <div style={{ fontSize: 11, color: "#E0EAF0" }}>Thinking...</div>}
@@ -5346,6 +5348,7 @@ function Nutrition({ user, userSessions }) {
   const [planSaveError, setPlanSaveError] = useState(false);
   const [savingPlan, setSavingPlan] = useState(false);
   const [quickLogStatus, setQuickLogStatus] = useState("");
+  const [nutritionSaveError, setNutritionSaveError] = useState("");
 
   const getLocalDate = () => {
     const d = new Date();
@@ -5420,18 +5423,32 @@ function Nutrition({ user, userSessions }) {
   };
 
   const saveLog = async (resultsOverride = mealResults, reviewComplete = true) => {
-    if (!user) return;
+    if (!user) return false;
+    setNutritionSaveError("");
     const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
     const totalCals = Math.round(activeMeals.filter((_, i) => mealWasCompleted(resultsOverride[i])).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
     const totalProtein = Math.round(activeMeals.filter((_, i) => mealWasCompleted(resultsOverride[i])).reduce((a, m) => a + (m.protein||0), 0));
-    const result = await supabase.from("nutrition_logs").upsert({
-      user_id: user.id, date: today, meals_completed: { ...resultsOverride, _review_complete: reviewComplete },
+    const row = {
+      meals_completed: { ...resultsOverride, _review_complete: reviewComplete },
       off_plan_food: offPlanFood, off_plan_calories: parseInt(offPlanCals)||0,
       total_calories: totalCals, total_protein: totalProtein,
       ai_feedback: aiFeedback, is_training_day: isTrainingDay,
       created_at: new Date().toISOString(),
-    }, { onConflict: "user_id,date" });
-    return !result.error;
+    };
+    try {
+      const { data: existing, error: lookupError } = await supabase.from("nutrition_logs").select("id").eq("user_id", user.id).eq("date", today).maybeSingle();
+      if (lookupError) throw lookupError;
+      const result = existing
+        ? await supabase.from("nutrition_logs").update(row).eq("id", existing.id).eq("user_id", user.id).select("id").single()
+        : await supabase.from("nutrition_logs").insert({ user_id: user.id, date: today, ...row }).select("id").single();
+      if (result.error) throw result.error;
+      setLogs(current => [{ ...(current.find(log => log.date === today) || {}), id: result.data.id, user_id: user.id, date: today, ...row }, ...current.filter(log => log.date !== today)]);
+      return true;
+    } catch (error) {
+      console.error("Nutrition save error:", error);
+      setNutritionSaveError(error?.message || "Your nutrition could not be saved. Please try again.");
+      return false;
+    }
   };
 
   const getAIFeedback = async () => {
@@ -5552,7 +5569,8 @@ function Nutrition({ user, userSessions }) {
             {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>GET AI FEEDBACK</button>}
             {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
             {aiFeedback && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
-            <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { await saveLog(); setTodayLogged(true); await loadData(); setView("home"); }}>SAVE & FINISH</button>
+            {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>Could not save: {nutritionSaveError}</div>}
+            <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { const saved = await saveLog(); if (!saved) return; setTodayLogged(true); await loadData(); setView("home"); }}>SAVE & FINISH</button>
           </div>
         </div>
       );
@@ -6096,6 +6114,7 @@ function Nutrition({ user, userSessions }) {
               </div>;
             })}
             {quickLogStatus && <div role="status" style={{ color: quickLogStatus === "COULD NOT SAVE" ? NEON3 : NEON, fontSize: 9, marginTop: 9 }}>{quickLogStatus}</div>}
+            {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{nutritionSaveError}</div>}
           </div>
 
           {/* Day review button */}
@@ -6749,6 +6768,7 @@ function HabitsPage({ habits, setHabits }) {
   const [adding, setAdding] = useState(false);
   const [newHabit, setNewHabit] = useState({ name: "", category: "health" });
   const cats = [...new Set(habits.map(h => h.category))];
+  const remainingSuggestions = POPULAR_DAILY_HABITS.filter(suggestion => !habits.some(habit => habit.name.toLowerCase() === suggestion.name.toLowerCase()));
   const addHabit = (habit = newHabit) => {
     const name = habit.name?.trim();
     if (!name || habits.some(existing => existing.name.toLowerCase() === name.toLowerCase())) return;
@@ -6786,6 +6806,15 @@ function HabitsPage({ habits, setHabits }) {
           <div className="t3d-slabel">ACTIVE HABITS</div>
         </div>
       </div>
+      {habits.length > 0 && remainingSuggestions.length > 0 && (
+        <div className="t3d-card" style={{ marginBottom: 14 }}>
+          <div className="t3d-ctitle">POPULAR DAILY HABITS</div>
+          <div style={{ fontSize: 10, color: "#6F8792", marginBottom: 10 }}>Optional ideas — keep your list focused.</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 7, opacity: .65 }}>
+            {remainingSuggestions.map(habit => <button key={habit.name} className="t3d-btn t3d-btn-sm" style={{ whiteSpace: "normal" }} onClick={() => addHabit(habit)}>+ {habit.name}</button>)}
+          </div>
+        </div>
+      )}
       {cats.map(cat => (
         <div className="t3d-card" key={cat} style={{ marginBottom: 14 }}>
           <div className="t3d-ctitle">{cat.toUpperCase()}</div>
