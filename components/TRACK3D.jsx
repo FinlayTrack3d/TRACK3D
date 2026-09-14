@@ -160,11 +160,13 @@ const css = `
   .t3d-workout-screen { height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
   .t3d-workout-screen .t3d-workout-card { flex: 1; min-height: 0; overflow: hidden; padding: 14px 18px; }
   .t3d-compact-coach { flex: 0 0 190px; height: 190px !important; max-height: 190px; overflow: hidden; }
+  .t3d-compact-coach.t3d-coach-expanded { position: fixed; inset: 10px; z-index: 180; width: auto; height: auto !important; max-height: none; overflow: hidden; box-shadow: 0 0 0 9999px rgba(0,0,0,.88); }
   @media (max-width: 768px) {
     body.t3d-workout-active .t3d-main { padding: 10px; }
     .t3d-workout-screen { gap: 7px; }
     .t3d-workout-screen .t3d-workout-card { padding: 10px !important; }
     .t3d-compact-coach { flex-basis: 190px; height: 190px !important; max-height: 190px; }
+    .t3d-compact-coach.t3d-coach-expanded { inset: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom)); height: auto !important; max-height: none; }
   }
   .t3d-card { background: #0D1318; border: 1px solid #1A2530; border-radius: 8px; padding: 20px; position: relative; overflow: hidden; }
   .t3d-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(0,255,178,.25),transparent); }
@@ -250,13 +252,30 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, storageKey }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [started, setStarted] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [restored, setRestored] = useState(!storageKey);
   const endRef = useRef(null);
   const messageListRef = useRef(null);
+
+  useEffect(() => {
+    if (!storageKey) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem(`track3d-coach-${storageKey}`) || "null");
+      if (Array.isArray(saved?.messages)) setMessages(saved.messages);
+      if (saved?.started || saved?.messages?.length) setStarted(true);
+    } catch { /* Ignore an unreadable local draft. */ }
+    setRestored(true);
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!storageKey || !restored) return;
+    localStorage.setItem(`track3d-coach-${storageKey}`, JSON.stringify({ started, messages }));
+  }, [storageKey, restored, started, messages]);
 
   const scroll = () => messageListRef.current?.scrollTo({ top: messageListRef.current.scrollHeight, behavior: "smooth" });
 
@@ -296,8 +315,11 @@ User data today:
   const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
 
   return (
-    <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
-      <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
+    <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
+        {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
+      </div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
@@ -308,8 +330,8 @@ User data today:
         </div>
       ) : (
         <>
-          <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? 112 : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
-            {(compact ? messages.slice(-2) : messages).map((m, i) => {
+          <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
+            {(compact && !expanded ? messages.slice(-2) : messages).map((m, i) => {
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
               const visibleContent = cleanAiText(m.content.replace(/\[ACTION:[^\]]+\]/gi, ""));
               return (
@@ -345,6 +367,7 @@ User data today:
           <div style={{ display: "flex", gap: 7, marginBottom: 7 }}>
             <input className="t3d-ai-input" placeholder="Ask anything..." value={input}
               onChange={e => setInput(e.target.value)}
+              onFocus={() => compact && setExpanded(true)}
               onKeyDown={e => e.key === "Enter" && send(input)} />
             <button className="t3d-btn t3d-btn-sm" onClick={() => send(input)} disabled={loading || !input.trim()}>SEND</button>
           </div>
@@ -966,6 +989,15 @@ function wakeTimingSummary(timing) {
     ? `${difference} min later than planned` : `${Math.abs(difference)} min earlier than planned`;
   return `Wake-up: ${timing.actual} · Planned: ${timing.planned} · ${comparison}`;
 }
+function routineTimingSummary(timing) {
+  const planned = Number(timing?.plannedMinutes);
+  const actual = timing?.actualMinutes === null || timing?.actualMinutes === undefined ? null : Number(timing.actualMinutes);
+  if (!planned) return "Routine timing not recorded";
+  if (actual === null || Number.isNaN(actual)) return `Routine plan: ${planned} min · live timing was not recorded`;
+  const difference = actual - planned;
+  const comparison = Math.abs(difference) <= 1 ? "on time" : difference > 0 ? `${difference} min over` : `${Math.abs(difference)} min quicker`;
+  return `Routine time: ${actual} min · plan ${planned} min · ${comparison}`;
+}
 function MorningSection({ user }) {
   const [view, setView] = useState("home");
   const [setupStep, setSetupStep] = useState(0);
@@ -1241,6 +1273,11 @@ function MorningSection({ user }) {
 
   const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
   const currentLiveTask = liveRoutineSteps[liveTaskIndex];
+  const captureLiveRoutineTiming = () => ({
+    plannedMinutes: liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0),
+    actualMinutes: liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null,
+    completedAt: new Date().toISOString(),
+  });
 
   const currentStep = allSteps[checkinStep];
   const isRoughCheckin = view === "roughCheckin";
@@ -1329,7 +1366,7 @@ function MorningSection({ user }) {
       setLiveDeadline(null);
       setCheckinStep(allSteps.findIndex(step => step.id === "checkin"));
       setCheckinData(prev => {
-        const updated = { ...prev };
+        const updated = { ...prev, routineTiming: captureLiveRoutineTiming() };
 
         liveRoutineSteps.forEach(step => {
           const key = step.id || step.name;
@@ -1389,6 +1426,7 @@ function MorningSection({ user }) {
 
     if (nextIndex >= liveRoutineSteps.length) {
       setLiveDeadline(null);
+      setCheckinData(previous => ({ ...previous, routineTiming: captureLiveRoutineTiming() }));
       const checkinIndex = allSteps.findIndex(
         step => step.id === "checkin"
       );
@@ -1647,6 +1685,9 @@ function MorningSection({ user }) {
                       </div>
                       <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
                         {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
+                      </p>
+                      <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7, marginTop: -6 }}>
+                        {routineTimingSummary(history.find(h => h.date === today)?.data?.routineTiming)}
                       </p>
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
                     <button type="button" onClick={() => setCompletedAction("edit")}
@@ -2821,12 +2862,10 @@ function MorningSection({ user }) {
   if (view === "checkin" && checkinStep >= allSteps.length) {
     const score = morningScore(checkinData);
     const quote = MORNING_QUOTES[Math.floor(Math.random() * MORNING_QUOTES.length)];
-    const missedSteps = allSteps.map((step, index) => ({ step, index })).filter(({ step }) => {
-      const value = checkinData[step.id || step.name];
-      if (step.type === "tick") return value !== true;
-      if (step.type === "photos3") return PHOTO_ANGLES.some(angle => !photoFiles[angle] && !value?.[angle]?.includes?.("/"));
-      return value === undefined || value === null || value === "";
-    });
+    const editableSteps = allSteps.map((step, index) => ({ step, index }));
+    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
+    const routineTimingText = routineTimingSummary({ plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes });
 
     // Save handled via button click
 
@@ -2844,27 +2883,28 @@ function MorningSection({ user }) {
           <p style={{ fontSize: 12, color: NEON2, lineHeight: 1.7 }}>
             {wakeTimingSummary(checkinData.wakeTiming)}
           </p>
+          <p style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.7, marginTop: -4 }}>
+            {routineTimingText}
+          </p>
           <div style={{ fontSize: 13, color: "#8AABB8", fontStyle: "italic", marginBottom: 32, lineHeight: 1.7, padding: "0 20px" }}>
             "{quote}"
           </div>
-          {missedSteps.length > 0 && (
-            <div style={{ textAlign: "left", padding: 12, marginBottom: 16, border: "1px solid rgba(255,181,71,.3)", borderRadius: 7, background: "rgba(255,181,71,.05)" }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FFB547", letterSpacing: 1, marginBottom: 6 }}>MISSED SOMETHING?</div>
-              <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 9 }}>Add it now if you can. You will return straight to this review.</div>
+          <details style={{ textAlign: "left", padding: 12, marginBottom: 16, border: `1px solid ${BORDER}`, borderRadius: 7, background: "rgba(0,200,255,.03)" }}>
+            <summary style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON2, letterSpacing: 1, cursor: "pointer" }}>EDIT THIS CHECK-IN</summary>
+              <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, margin: "9px 0" }}>Change any answer or add/change photos before saving.</div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {missedSteps.map(({ step, index }) => (
+                {editableSteps.map(({ step, index }) => (
                   <button key={step.id || step.name} className="t3d-btn t3d-btn-sm" onClick={() => {
                     setReviewingMissed(true);
                     setTempInput("");
-                    if (step.type === "photos3") setPhotoAngleIdx(Math.max(0, PHOTO_ANGLES.findIndex(angle => !photoFiles[angle])));
+                    if (step.type === "photos3") setPhotoAngleIdx(0);
                     setCheckinStep(index);
-                  }}>{step.type === "photos3" ? "ADD PHOTOS" : `DO ${step.name}`}</button>
+                  }}>{step.type === "photos3" ? "EDIT PHOTOS" : `EDIT ${step.name}`}</button>
                 ))}
               </div>
-            </div>
-          )}
+          </details>
           <div style={{ marginBottom: 24 }}>
-            {Object.entries(checkinData).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
+            {Object.entries(checkinData).filter(([key]) => !["wakeTiming", "routineTiming"].includes(key)).map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                 <span style={{ color: "#4A6070" }}>{k}</span>
                 <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
@@ -2874,9 +2914,19 @@ function MorningSection({ user }) {
               </div>
             ))}
           </div>
+          <div style={{ textAlign: "left", marginBottom: 16 }}>
+            <AICoach
+              title="MORNING COACH"
+              introduction="Ask about today's result, timing, or what to improve tomorrow."
+              activationLabel="CHAT ABOUT THIS MORNING"
+              openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
+              storageKey={`morning-review-${user.id}-${today}`}
+              system={`You are TRACK3D's morning coach. Be concise, friendly and practical. Use short bullets with no emojis. Never claim something was missed simply because the user answered no or skipped optional photos. Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(checkinData.wakeTiming)}. Routine timing: ${routineTimingText}. Answers: ${JSON.stringify(checkinData)}.`}
+            />
+          </div>
           <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={savingCheckin} onClick={async () => {
             setSavingCheckin(true);
-            const finalData = { ...checkinData };
+            const finalData = { ...checkinData, routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
             if (finalData.photos) {
               const uploaded = {};
               for (const angle of PHOTO_ANGLES) {
@@ -3600,6 +3650,20 @@ function ExerciseLineChart({ points }) {
   );
 }
 
+function normalizeFitnessSessions(sessions = []) {
+  return sessions.map(session => ({
+    ...session,
+    exercises: (session.exercises || []).map(exercise => {
+      const sets = Math.max(1, parseInt(exercise.sets, 10) || 3);
+      const suppliedRanges = Array.isArray(exercise.reps)
+        ? exercise.reps.map(value => String(value || "").trim()).filter(Boolean)
+        : String(exercise.reps || "").split("/").map(value => value.trim()).filter(Boolean);
+      const fallbackRange = suppliedRanges.at(-1) || "8-12";
+      return { ...exercise, sets, reps: Array.from({ length: sets }, (_, index) => suppliedRanges[index] || fallbackRange) };
+    }),
+  }));
+}
+
 function Fitness({ user, isActive = true }) {
   const homeTimeZone = resolveHomeTimeZone(user);
   const homeDate = getZonedDateInfo(new Date(), homeTimeZone);
@@ -3724,7 +3788,11 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setLoading(true);
     try {
       const { data: splitData } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
-      if (splitData) { setSplit(splitData); setSessions(splitData.sessions || []); }
+      if (splitData) {
+        const normalizedSessions = normalizeFitnessSessions(splitData.sessions || []);
+        setSplit({ ...splitData, sessions: normalizedSessions });
+        setSessions(normalizedSessions);
+      }
       const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(20);
       if (logs) setHistory(logs);
     } catch (e) { console.log("Load error:", e); }
@@ -3734,18 +3802,20 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   const saveSplit = async (sessionsData) => {
     if (!user) return;
     try {
+      const normalizedSessions = normalizeFitnessSessions(sessionsData);
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
       
       let result;
       if (existing) {
-        result = await supabase.from("workout_splits").update({ sessions: sessionsData }).eq("user_id", user.id);
+        result = await supabase.from("workout_splits").update({ sessions: normalizedSessions }).eq("user_id", user.id);
       } else {
-        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: sessionsData, split_name: "My Split" });
+        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: normalizedSessions, split_name: "My Split" });
       }
       
       if (result.error) {
         console.error("saveSplit error:", result.error);
       } else {
+        setSessions(normalizedSessions);
         console.log("Split saved!");
       }
     } catch (e) {
@@ -3758,7 +3828,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const dateStr = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
     const exerciseData = activeSession.exercises.map((ex, eIdx) => ({
       name: ex.name,
-      sets: (setsToSave[eIdx] || []).map(s => ({ weight: s.weight, reps: s.reps })),
+      sets: (setsToSave[eIdx] || []).map((s, setIndex) => ({ weight: s.weight, reps: s.reps, repRange: Array.isArray(ex.reps) ? ex.reps[setIndex] : ex.reps })),
       context: activeSession?.gymContext || { type: "usual", name: "" },
     }));
     const totalVol = exerciseData.reduce((a, ex) => a + ex.sets.reduce((b, s) => b + (parseFloat(s.weight)||0) * (parseInt(s.reps)||0), 0), 0);
@@ -3785,8 +3855,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     return null;
   };
 
-  // Calculate suggested weight based on last session performance
-  const getSuggestedWeight = (exName, setIdx, repRange) => {
+  // Recommend the next load from performance against this set's own rep range.
+  const getWeightGuidance = (exName, setIdx, repRange) => {
     const lastSets = getLastSessionData(exName);
     if (!lastSets || !lastSets[setIdx]) return null;
     const lastSet = lastSets[setIdx];
@@ -3794,12 +3864,18 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const lastReps = parseInt(lastSet.reps) || 0;
     if (!lastWeight) return null;
 
-    // Parse rep range top end
-    const rangeTop = repRange ? parseInt(String(repRange).split("-").pop()) : null;
-    if (rangeTop && lastReps >= rangeTop) {
-      return (lastWeight + 2.5).toFixed(1); // Hit top of range — increase
+    const rangeValues = String(repRange || "8-12").match(/\d+/g)?.map(Number) || [8, 12];
+    const rangeBottom = rangeValues[0];
+    const rangeTop = rangeValues.at(-1);
+    if (lastReps >= rangeTop) {
+      const nextWeight = (lastWeight + 2.5).toFixed(1);
+      return { weight: nextWeight, message: `Top of range reached last time (${lastReps}/${rangeTop}). Try ${nextWeight}kg.` };
     }
-    return lastWeight.toFixed(1); // Keep same
+    if (lastReps >= rangeBottom) {
+      return { weight: lastWeight.toFixed(1), message: `Within range last time (${lastReps}). Keep ${lastWeight.toFixed(1)}kg and aim for ${rangeTop} reps.` };
+    }
+    const lowerWeight = Math.max(0, lastWeight - 2.5).toFixed(1);
+    return { weight: lowerWeight, message: `Below the ${rangeBottom}-rep minimum last time. Use ${lowerWeight}kg and aim for the top of the range before increasing.` };
   };
 
   // All logged occurrences of an exercise, oldest first, for the progression graph
@@ -3848,7 +3924,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const startWorkout = (session) => {
     const minuteLimit = parseInt(availableMinutes, 10);
-    const sessionToStart = fitSessionToMinutes(session, minuteLimit);
+    const sessionToStart = fitSessionToMinutes(normalizeFitnessSessions([session])[0], minuteLimit);
     sessionToStart.gymContext = { type: gymContext, name: gymName.trim() };
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
@@ -4023,9 +4099,10 @@ Respond ONLY with valid JSON:
         title="AI FITNESS COACH"
         introduction="Talk through your programme, exercise technique, progress, or changes that fit your goals and schedule."
         activationLabel="CHAT WITH FITNESS COACH"
-        openingMessage="Review my current training context, then ask what I would like help with. If my goals or constraints are missing, ask rather than assuming."
+        openingMessage="Give me a brief, practical snapshot of today's training and the single most useful thing to focus on. Do not ask a generic opening question. Finish by inviting me to type if I need help with something specific."
+        storageKey={`fitness-${user.id}`}
         onAction={applyWorkoutCoachAction}
-        system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain. When you make one concrete change suggestion, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], or [ACTION:remove_sets|exercise|number]. Do not say it has been applied; the user chooses whether it affects this workout or future sessions.
+        system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Never open with a vague question such as "what would you like help with?" Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain. When you make one concrete change suggestion, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], or [ACTION:remove_sets|exercise|number]. Do not say it has been applied; the user chooses whether it affects this workout or future sessions.
  Home timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.
  Saved programme: ${JSON.stringify(split?.sessions || [])}
 Current programme shown in the app: ${JSON.stringify(sessions)}
@@ -4056,13 +4133,18 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
     const totalSets = currentExercise.sets || 0;
     const totalExercises = activeSession.exercises.length;
     const exerciseCompletedSets = getCompletedForExercise(exerciseIdx);
-    const currentSetRepRange = Array.isArray(currentExercise.reps) ? currentExercise.reps[sIdx] : currentExercise.reps;
-    const suggestedWeight = getSuggestedWeight(currentExercise.name, sIdx, currentSetRepRange);
+    const currentSetRepRange = (Array.isArray(currentExercise.reps) ? currentExercise.reps[sIdx] : currentExercise.reps) || "8-12";
+    const weightGuidance = getWeightGuidance(currentExercise.name, sIdx, currentSetRepRange);
+    const suggestedWeight = weightGuidance?.weight;
     const lastSets = getLastSessionData(currentExercise.name);
     const weight = currentInputs[exerciseIdx]?.weight || "";
     const reps = currentInputs[exerciseIdx]?.reps || "";
     const valuesLookSwapped = Number(reps) >= 30 && Number(weight) > 0 && Number(weight) <= 30;
     const exerciseIsComplete = exerciseCompletedSets.length >= totalSets;
+    const plannedSetCount = activeSession.exercises.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0);
+    const completedSetCount = Object.values(completedSets).reduce((total, sets) => total + sets.length, 0);
+    const remainingSetCount = Math.max(0, plannedSetCount - completedSetCount);
+    const estimatedMinutesLeft = remainingSetCount * 3;
 
     return (
       <div className="t3d-fade t3d-workout-screen">
@@ -4083,6 +4165,9 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
             </div>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
               onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>▶</button>
+          </div>
+          <div style={{ margin: "-8px 0 10px", textAlign: "center", color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
+            {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ABOUT {estimatedMinutesLeft} MIN
           </div>
           {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-7px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
 
@@ -4121,12 +4206,9 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               </div>
 
               {/* Suggested weight hint */}
-              {suggestedWeight && (
-                <div style={{ marginTop: 10, fontSize: 10, color: NEON, letterSpacing: 1 }}>
-                  {getLastSessionData(currentExercise.name)?.[sIdx]?.reps >= (currentSetRepRange ? parseInt(String(currentSetRepRange).split("-").pop()) : 999)
-                    ? `↑ Try ${suggestedWeight}kg — you hit the top of your range last time!`
-                    : `Last session: ${suggestedWeight}kg`
-                  }
+              {weightGuidance && (
+                <div style={{ marginTop: 10, fontSize: 10, color: NEON, lineHeight: 1.5 }}>
+                  {weightGuidance.message}
                 </div>
               )}
               {valuesLookSwapped && (
@@ -4301,7 +4383,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
               setAiPlanSaving(true);
               setAiPlanError("");
               try {
-                const unapprovedSessions = aiPlan.sessions.map(session => ({ ...session, approval: { approved: false } }));
+                const unapprovedSessions = normalizeFitnessSessions(aiPlan.sessions).map(session => ({ ...session, approval: { approved: false } }));
                 const programme = { sessions: unapprovedSessions, split_name: aiPlan.split_name || "My Programme" };
                 const { error } = split
                   ? await supabase.from("workout_splits").update(programme).eq("user_id", user.id)
@@ -4565,7 +4647,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                 <button className="t3d-btn" style={{ flex: 1 }} disabled={!newEx.name}
                   onClick={() => {
                     setSessions(prev => prev.map((s, i) => i === addExerciseModal ? {
-                      ...s, exercises: [...(s.exercises||[]), { name: newEx.name, sets: newEx.sets || 3, reps: newEx.reps, tempo: newEx.tempo }]
+                      ...s, exercises: [...(s.exercises||[]), { name: newEx.name, sets: newEx.sets || 3, reps: Array.from({ length: newEx.sets || 3 }, (_, index) => newEx.reps[index]?.trim() || "8-12"), tempo: newEx.tempo }]
                     } : s));
                     setAddExerciseModal(null);
                     setNewEx({ name: "", sets: 3, reps: [], tempo: "" });
@@ -4970,19 +5052,35 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                             onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
                               ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, name: e.target.value } : ex2)
                             } : s))} />
-                          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                            <input style={{ background: "transparent", border: "none", color: "#E0EAF0", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 40 }}
-                              value={ex.sets} placeholder="sets"
+                          <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#8AABB8", fontSize: 9, marginTop: 6 }}>
+                            SETS
+                            <input type="number" inputMode="numeric" min="1" max="10" style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 4, color: "#E0EAF0", fontSize: 10, outline: "none", width: 48, padding: 5 }}
+                              value={ex.sets}
                               onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
-                                ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, sets: e.target.value } : ex2)
+                                ...s, exercises: s.exercises.map((ex2, j) => {
+                                  if (j !== eIdx) return ex2;
+                                  const sets = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1));
+                                  const ranges = Array.isArray(ex2.reps) ? ex2.reps : [ex2.reps || "8-12"];
+                                  return { ...ex2, sets, reps: Array.from({ length: sets }, (_, index) => ranges[index] || ranges.at(-1) || "8-12") };
+                                })
                               } : s))} />
-                            <span style={{ color: "#2A3A48", fontSize: 10 }}>sets ×</span>
-                            <input style={{ background: "transparent", border: "none", color: "#E0EAF0", fontFamily: "'Space Mono',monospace", fontSize: 10, outline: "none", width: 60 }}
-                              value={Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps} placeholder="reps"
-                              onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
-                                ...s, exercises: s.exercises.map((ex2, j) => j === eIdx ? { ...ex2, reps: e.target.value } : ex2)
-                              } : s))} />
-                            <span style={{ color: "#2A3A48", fontSize: 10 }}>reps</span>
+                          </label>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 5, marginTop: 7 }}>
+                            {Array.from({ length: Number(ex.sets) || 1 }, (_, setIndex) => (
+                              <label key={setIndex} style={{ display: "flex", alignItems: "center", gap: 4, color: "#8AABB8", fontSize: 8 }}>
+                                S{setIndex + 1}
+                                <input style={{ minWidth: 0, width: "100%", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 4, color: "#E0EAF0", fontSize: 9, padding: 5 }}
+                                  value={(Array.isArray(ex.reps) ? ex.reps[setIndex] : ex.reps) || ""} placeholder="8-12"
+                                  onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
+                                    ...s, exercises: s.exercises.map((ex2, j) => {
+                                      if (j !== eIdx) return ex2;
+                                      const ranges = Array.isArray(ex2.reps) ? [...ex2.reps] : Array.from({ length: Number(ex2.sets) || 1 }, () => ex2.reps || "8-12");
+                                      ranges[setIndex] = e.target.value;
+                                      return { ...ex2, reps: ranges };
+                                    })
+                                  } : s))} />
+                              </label>
+                            ))}
                           </div>
                         </div>
                         <button style={{ background: "none", border: "none", color: "#E0EAF0", cursor: "pointer", fontSize: 16, padding: "0 4px" }}
@@ -4998,7 +5096,7 @@ Current workout: ${JSON.stringify(view === "workout" ? { session: activeSession?
                         const sets = prompt("Sets?") || "3";
                         const reps = prompt("Reps? (e.g. 8-10)") || "8-10";
                         setSessions(prev => prev.map((s, i) => i === sIdx ? {
-                          ...s, exercises: [...(s.exercises||[]), { name, sets: parseInt(sets)||3, reps, tempo: "" }]
+                          ...s, exercises: [...(s.exercises||[]), { name, sets: parseInt(sets)||3, reps: Array.from({ length: parseInt(sets) || 3 }, () => reps), tempo: "" }]
                         } : s));
                       }}>+ ADD EXERCISE</button>
                   </div>
