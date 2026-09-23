@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
-import { useSessionDraft } from "../lib/session-drafts";
+import { useSessionDraft, clearDrafts } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 
 const NEON = "#00FFB2";
@@ -252,7 +252,7 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, storageKey }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -305,6 +305,11 @@ User data today:
       const data = await res.json();
       const reply = data.content?.map(b => b.text || "").join("") || "Unable to connect.";
       setMessages([...updated, { role: "assistant", content: reply }]);
+      // A coach that carries a running memory ends every reply with a hidden
+      // updated summary - persist it so the next conversation (even on a
+      // different device) picks up where this one left off.
+      const memoryMatch = reply.match(/\[MEMORY\]([\s\S]*?)\[\/MEMORY\]/i);
+      if (memoryMatch && onMemoryUpdate) onMemoryUpdate(memoryMatch[1].trim());
     } catch {
       setMessages([...updated, { role: "assistant", content: "Connection error." }]);
     }
@@ -313,6 +318,18 @@ User data today:
   };
 
   const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
+
+  // A caller (e.g. the 1-week review banner) can hand this coach a message to
+  // send right away, opening it fully expanded so the conversation is
+  // immediately visible rather than needing the user to find and open it.
+  useEffect(() => {
+    if (!pendingPrompt || !restored) return;
+    setStarted(true);
+    if (compact) setExpanded(true);
+    send(pendingPrompt);
+    onConsumedPrompt?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPrompt, restored]);
 
   return (
     <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
@@ -333,7 +350,16 @@ User data today:
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {(compact && !expanded ? messages.slice(-2) : messages).map((m, i) => {
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets|add_sets|log_set)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
-              const visibleContent = cleanAiText(m.content.replace(/\[ACTION:[^\]]+\]/gi, ""));
+              // Bigger, structured changes (a whole session/programme rewrite) travel as
+              // JSON in a fenced block rather than the pipe-delimited marker above, which
+              // can't safely hold arbitrary JSON (it contains "|" and "]" characters).
+              const jsonActionMatch = m.role === "assistant" ? m.content.match(/\[ACTION_JSON:(replace_session)\]([\s\S]*?)\[\/ACTION_JSON\]/i) : null;
+              let jsonActionPayload = null;
+              if (jsonActionMatch) { try { jsonActionPayload = JSON.parse(jsonActionMatch[2]); } catch { jsonActionPayload = null; } }
+              const visibleContent = cleanAiText(m.content
+                .replace(/\[ACTION:[^\]]+\]/gi, "")
+                .replace(/\[ACTION_JSON:[^\]]+\][\s\S]*?\[\/ACTION_JSON\]/gi, "")
+                .replace(/\[MEMORY\][\s\S]*?\[\/MEMORY\]/gi, ""));
               return (
               <div key={i} className="t3d-ai-msg" style={{
                 background: m.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2,
@@ -353,6 +379,12 @@ User data today:
                         <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, true); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout and future sessions." }]); }}>MAKE PERMANENT</button>
                       </>
                     )}
+                  </div>
+                )}
+                {jsonActionPayload && onAction && (
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
+                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, false); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout only." }]); }}>THIS WORKOUT</button>
+                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, true); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout and future sessions." }]); }}>MAKE PERMANENT</button>
                   </div>
                 )}
               </div>
@@ -4140,6 +4172,20 @@ function Fitness({ user, isActive = true }) {
   const [approvalQuestion, setApprovalQuestion] = useState("");
   const [approvalMessages, setApprovalMessages] = useState([]);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  // A short running summary the fitness coach keeps and updates itself, so it
+  // has continuity across sessions/devices rather than only this browser tab.
+  const [coachMemory, setCoachMemory] = useState("");
+  const saveCoachMemory = async (summary) => {
+    setCoachMemory(summary);
+    if (!user) return;
+    try {
+      await supabase.from("coach_memory").upsert({ user_id: user.id, summary, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    } catch (e) { console.log("Coach memory save error:", e); }
+  };
+
+  // 1-week programme review: a one-off prompt handed to the fitness coach.
+  const [weekReviewPrompt, setWeekReviewPrompt] = useState(null);
+  const [weekReviewDismissed, setWeekReviewDismissed] = useState(false);
 
   // Workout logger state - track sets per exercise independently
   const [activeSession, setActiveSession] = useState(null);
@@ -4178,8 +4224,16 @@ function Fitness({ user, isActive = true }) {
     } : null
   ), [workoutInProgress, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
     restTimerEnabled, restSeconds, restActive, restDeadline, activeWorkoutLogId]);
-  useSessionDraft(user?.id, "fitness", fitnessDraft, draft => {
+  useSessionDraft(user?.id, "fitness", fitnessDraft, async draft => {
     if (!draft.activeSession?.exercises?.length) return;
+    if (draft.activeWorkoutLogId) {
+      // The server may have already finalized this row (idle past the
+      // 2-hour resume window) even though the local draft still thinks
+      // it's live - don't reopen a workout that's already been logged.
+      const { data: logRow } = await supabase.from("workout_logs")
+        .select("in_progress").eq("id", draft.activeWorkoutLogId).eq("user_id", user.id).single();
+      if (!logRow || !logRow.in_progress) return;
+    }
     setActiveSession(draft.activeSession);
     setExerciseIdx(draft.exerciseIdx || 0);
     setSetProgress(draft.setProgress || {});
@@ -4250,29 +4304,34 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
         setSplit({ ...splitData, sessions: normalizedSessions });
         setSessions(normalizedSessions);
       }
-      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).eq("in_progress", false).order("created_at", { ascending: false }).limit(20);
+      // A generous window so an exercise's history still surfaces ("last time")
+      // even after a session gets restructured or an exercise sits unused for a while.
+      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).eq("in_progress", false).order("created_at", { ascending: false }).limit(60);
       if (logs) setHistory(logs);
+      const { data: memoryRow } = await supabase.from("coach_memory").select("summary").eq("user_id", user.id).single();
+      if (memoryRow?.summary) setCoachMemory(memoryRow.summary);
     } catch (e) { console.log("Load error:", e); }
     setLoading(false);
   };
 
-  const saveSplit = async (sessionsData) => {
+  const saveSplit = async (sessionsData, extra = {}) => {
     if (!user) return;
     try {
       const normalizedSessions = normalizeFitnessSessions(sessionsData);
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
-      
+
       let result;
       if (existing) {
-        result = await supabase.from("workout_splits").update({ sessions: normalizedSessions }).eq("user_id", user.id);
+        result = await supabase.from("workout_splits").update({ sessions: normalizedSessions, ...extra }).eq("user_id", user.id);
       } else {
-        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: normalizedSessions, split_name: "My Split" });
+        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: normalizedSessions, split_name: "My Split", ...extra });
       }
-      
+
       if (result.error) {
         console.error("saveSplit error:", result.error);
       } else {
         setSessions(normalizedSessions);
+        setSplit(previous => ({ ...(previous || {}), sessions: normalizedSessions, ...extra }));
         console.log("Split saved!");
       }
     } catch (e) {
@@ -4493,7 +4552,11 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     } : session);
     setSessions(updated);
     setSplit(previous => ({ ...previous, sessions: updated }));
-    await saveSplit(updated);
+    // The first approval of any session in a split starts its 1-week review
+    // clock; re-approving later (editing an existing, already-running plan)
+    // doesn't reset it.
+    const extra = !split?.programme_started_at ? { programme_started_at: now.toISOString(), week_reviewed_at: null } : {};
+    await saveSplit(updated, extra);
   };
 
   const getCompletionFeedback = async () => {
@@ -4605,6 +4668,27 @@ Respond ONLY with valid JSON:
       if (sIdx + 1 < totalSets) setSetProgress(previous => ({ ...previous, [eIdx]: sIdx + 1 }));
       return;
     }
+    // A whole session rewrite (restructuring the day, swapping several
+    // exercises at once) arrives as JSON rather than a single exercise tweak.
+    if (action.type === "replace_session") {
+      const payload = action.payload || {};
+      const targetName = payload.sessionName || activeSession?.name;
+      if (!targetName || !Array.isArray(payload.exercises)) return;
+      const [normalized] = normalizeFitnessSessions([{ name: targetName, exercises: payload.exercises }]);
+      if (activeSession && activeSession.name.toLowerCase() === targetName.toLowerCase()) {
+        setActiveSession(previous => previous ? { ...previous, exercises: normalized.exercises } : previous);
+      }
+      if (permanent) {
+        const exists = sessions.some(session => session.name.toLowerCase() === targetName.toLowerCase());
+        const updated = exists
+          ? sessions.map(session => session.name.toLowerCase() === targetName.toLowerCase() ? { ...session, exercises: normalized.exercises } : session)
+          : [...sessions, { name: targetName, exercises: normalized.exercises }];
+        setSessions(updated);
+        setSplit(previous => ({ ...previous, sessions: updated }));
+        await saveSplit(updated);
+      }
+      return;
+    }
     const changeSession = session => {
       if (!session) return session;
       const target = action.exercise.toLowerCase();
@@ -4657,9 +4741,15 @@ Respond ONLY with valid JSON:
         openingMessage="Give me a brief, practical snapshot of today's training and the single most useful thing to focus on. Do not ask a generic opening question. Finish by inviting me to type if I need help with something specific."
         storageKey={`fitness-${user.id}`}
         onAction={applyWorkoutCoachAction}
+        onMemoryUpdate={saveCoachMemory}
+        pendingPrompt={weekReviewPrompt}
+        onConsumedPrompt={() => setWeekReviewPrompt(null)}
         system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Never open with a vague question such as "what would you like help with?" Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain.
 STRUCTURED ACTIVE-WORKOUT STATE is the single source of truth for exactly what has been lifted this session, per exercise and per set. Always read it fresh for any question about reps, weight or completion - never rely on numbers mentioned earlier in this conversation, since the user has likely moved on to a different exercise since then and old messages may describe a different one.
-When you make one concrete change, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], [ACTION:remove_sets|exercise|number], or [ACTION:add_sets|exercise|number] to change the plan; do not say it has been applied, the user chooses whether it affects this workout or future sessions. During an active workout you can also log a completed set directly for the exercise the user is currently on with [ACTION:log_set|exercise|reps x weight] (e.g. [ACTION:log_set|Bench Press|10x60]) when the user tells you what they just did instead of entering it themselves - use the exact exercise name from the structured state and only when isCurrentExercise is true for it.
+For a single small change, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], [ACTION:remove_sets|exercise|number], or [ACTION:add_sets|exercise|number]. During an active workout you can also log a completed set directly for the exercise the user is currently on with [ACTION:log_set|exercise|reps x weight] (e.g. [ACTION:log_set|Bench Press|10x60]) when the user tells you what they just did instead of entering it themselves - use the exact exercise name from the structured state and only when isCurrentExercise is true for it.
+For a bigger change - restructuring a whole day's session, swapping several exercises at once, or building a session that doesn't exist yet - never write out JSON or a plan as plain chat text. Instead append exactly this fenced block on its own lines: [ACTION_JSON:replace_session]{"sessionName":"exact session name","exercises":[{"name":"Exercise","sets":3,"reps":"8-12","tempo":"3-0-1-0","rest_seconds":90}]}[/ACTION_JSON] - valid JSON only inside the fence, one exercise object per exercise in the new session, "reps" as a rep-range string (or "8-12/6-10" per set if it varies by set). Whichever kind of marker you use, never say the change has been applied - the user chooses whether it affects this workout only or future sessions too, and the app shows that choice as buttons.
+COACH MEMORY is a short running summary you maintain yourself, carried between separate conversations (even on a different day or device) - it is how you remember this user over time beyond what's in today's chat history. Read it below for anything relevant. At the very end of every reply, on its own line, append an updated version: [MEMORY]a concise 2-4 sentence running summary of durable facts worth carrying forward - goals, injuries or limitations, preferences, notable decisions or changes made, recurring patterns worth remembering. Carry forward anything from the memory below that's still true, fold in anything new from this conversation, and drop anything no longer relevant.[/MEMORY] - always include this, even for short replies; it is stripped from what the user sees.
+Coach memory so far: ${coachMemory || "None yet - this is the first conversation."}
  Home timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.
  Saved programme: ${JSON.stringify(split?.sessions || [])}
 Current programme shown in the app: ${JSON.stringify(sessions)}
@@ -4709,24 +4799,42 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           ← BACK TO FITNESS · PROGRESS SAVED
         </button>
         <div className="t3d-card t3d-workout-card">
-          {/* Exercise navigation */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          {/* Exercise navigation - name only, with a tiny replace-exercise icon */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === 0 ? 0.3 : 1 }}
               onClick={() => { if (exerciseIdx > 0) setExerciseIdx(e => e-1); }}>◀</button>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, letterSpacing: 2, color: "#E0EAF0" }}>{currentExercise.name}</div>
-              <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 3 }}>Exercise {exerciseIdx+1} of {totalExercises}</div>
-              {exerciseCompletedSets.length > 0 && <div style={{ fontSize: 9, color: exerciseIsComplete ? NEON : NEON2, marginTop: 3 }}>{exerciseCompletedSets.length} OF {totalSets} SETS{exerciseIsComplete ? " ✓" : ""}</div>}
-              {currentExercise.tempo && <div style={{ fontSize: 10, color: NEON2, marginTop: 2 }}>TEMPO: {currentExercise.tempo}</div>}
-              {currentSetRepRange && <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 2 }}>REP RANGE: {currentSetRepRange}</div>}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, letterSpacing: 2, color: "#E0EAF0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{currentExercise.name}</div>
+              <button type="button" title="Replace exercise" aria-label="Replace exercise" onClick={() => setReplaceWarning(exerciseIdx)}
+                style={{ flex: "0 0 auto", background: "none", border: 0, color: "#3A4A54", cursor: "pointer", fontSize: 13, padding: 2, lineHeight: 1 }}>⇄</button>
             </div>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
               onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>▶</button>
           </div>
-          <div style={{ margin: "-8px 0 10px", textAlign: "center", color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
-            {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ABOUT {estimatedMinutesLeft} MIN
+
+          {/* Mini progress box */}
+          <div style={{ textAlign: "center", padding: "8px 10px", marginBottom: 10, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 6 }}>
+            <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1 }}>EXERCISE {exerciseIdx+1} OF {totalExercises}</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, letterSpacing: 2, color: exerciseIsComplete ? NEON : "#E0EAF0", marginTop: 3 }}>
+              {exerciseIsComplete ? "COMPLETED ✓" : `SET ${sIdx+1} OF ${totalSets}`}
+            </div>
           </div>
-          {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-7px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
+
+          {/* Sets left / time left, with the primary end-of-workout action on the same line */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+            <div style={{ color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
+              {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN
+            </div>
+            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }}
+              onClick={async () => { await saveWorkoutLog(); setWorkoutInProgress(false); setActiveSession(null); await loadData(); setView("home"); }}>END WORKOUT</button>
+          </div>
+          {/* Delete session - kept nearby but deliberately unobtrusive */}
+          <div style={{ textAlign: "right", marginBottom: 10 }}>
+            <button type="button" onClick={() => setDiscardWorkoutWarning(true)}
+              style={{ background: "none", border: 0, color: "#3A4A54", cursor: "pointer", fontSize: 7, padding: "3px 2px", textDecoration: "underline" }}>delete session</button>
+          </div>
+
+          {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-4px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
 
           {/* Rest timer */}
           {restActive && (
@@ -4737,12 +4845,9 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
           )}
 
-          {/* Current set */}
+          {/* Current set - the reps/weight inputs and the confirm button are the one decision that matters here */}
           {!restActive && (
             <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 16 }}>
-                SET {sIdx+1} OF {totalSets}
-              </div>
               <div style={{ display: "flex", gap: 16, justifyContent: "center", alignItems: "center" }}>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS</div>
@@ -4750,27 +4855,31 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                     placeholder="0"
                     style={{ width: 80, height: 80, background: "#E0EAF0", border: "none", borderRadius: 8, fontSize: 28, fontWeight: 700, textAlign: "center", color: "#080C10", outline: "none" }} />
+                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST: {lastSets[sIdx].reps}</div>}
                 </div>
                 <button onClick={confirmSet} disabled={!weight || !reps}
-                  style={{ width: 60, height: 60, background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 8, fontSize: 24, cursor: "pointer", color: "#080C10", fontWeight: 700 }}>▶</button>
+                  style={{ width: 68, height: 68, background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 10, fontSize: 26, cursor: "pointer", color: "#080C10", fontWeight: 700, boxShadow: weight && reps ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>▶</button>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>WEIGHT (kg)</div>
                   <input type="number" inputMode="decimal" value={weight}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                     placeholder={suggestedWeight || "0"}
                     style={{ width: 80, height: 80, background: "#E0EAF0", border: "none", borderRadius: 8, fontSize: suggestedWeight && !weight ? 16 : 28, fontWeight: 700, textAlign: "center", color: "#080C10", outline: "none" }} />
+                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST: {lastSets[sIdx].weight}kg</div>}
                 </div>
               </div>
 
-              {/* What you actually did last time, shown alongside the recommendation */}
-              {lastSets?.[sIdx] && (
-                <div style={{ marginTop: 10, fontSize: 10, color: "#8AABB8" }}>
-                  LAST TIME: {lastSets[sIdx].weight}kg × {lastSets[sIdx].reps} reps
+              {/* Rep range and tempo for this set, directly below the inputs */}
+              {(currentSetRepRange || currentExercise.tempo) && (
+                <div style={{ marginTop: 14, display: "flex", justifyContent: "center", gap: 16, fontSize: 10, color: "#8AABB8", letterSpacing: 1 }}>
+                  {currentSetRepRange && <div>REPS {currentSetRepRange}</div>}
+                  {currentExercise.tempo && <div>TEMPO {currentExercise.tempo}</div>}
                 </div>
               )}
+
               {/* Suggested weight hint */}
               {weightGuidance && (
-                <div style={{ marginTop: lastSets?.[sIdx] ? 4 : 10, fontSize: 10, color: NEON, lineHeight: 1.5 }}>
+                <div style={{ marginTop: 10, fontSize: 10, color: NEON, lineHeight: 1.5 }}>
                   {weightGuidance.message}
                 </div>
               )}
@@ -4813,12 +4922,6 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
             </div>
           )}
-
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setReplaceWarning(exerciseIdx)}>REPLACE EXERCISE</button>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { await saveWorkoutLog(); setWorkoutInProgress(false); setActiveSession(null); await loadData(); setView("home"); }}>END WORKOUT</button>
-            <button type="button" onClick={() => setDiscardWorkoutWarning(true)} style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 8, padding: "5px 7px", textDecoration: "underline" }}>DELETE SESSION</button>
-          </div>
 
           {replaceWarning !== null && (
             <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
@@ -5338,6 +5441,16 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const pendingMinuteLimit = parseInt(availableMinutes, 10);
   const pendingTimedSession = pendingSession ? fitSessionToMinutes(pendingSession, pendingMinuteLimit) : null;
 
+  const programmeStartedAt = split?.programme_started_at ? new Date(split.programme_started_at) : null;
+  const weekAlreadyReviewed = Boolean(split?.week_reviewed_at);
+  const weekReviewDue = Boolean(programmeStartedAt) && !weekAlreadyReviewed && !weekReviewDismissed
+    && (Date.now() - programmeStartedAt.getTime() >= 7 * 24 * 60 * 60 * 1000);
+  const startWeekReview = async () => {
+    const sessionsSince = history.filter(log => programmeStartedAt && new Date(log.created_at) >= programmeStartedAt).length;
+    setWeekReviewPrompt(`It's been a week since I started this programme (${sessions.map(s => s.name).join(", ") || "current split"}). I've logged ${sessionsSince} session${sessionsSince === 1 ? "" : "s"} since then. Talk me through how the week's gone - adherence, progression, anything that felt off - and suggest any worthwhile changes.`);
+    await saveSplit(sessions, { week_reviewed_at: new Date().toISOString() });
+  };
+
   return (
     <div className="t3d-fade">
       {!split ? (
@@ -5354,6 +5467,16 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         </div>
       ) : (
         <>
+          {weekReviewDue && (
+            <div className="t3d-card" style={{ marginBottom: 16, borderColor: NEON, background: "rgba(0,255,178,.05)" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 8 }}>ONE WEEK IN</div>
+              <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12, lineHeight: 1.6 }}>It's been a week since you started this programme. Want to review how it's gone with your coach and make any changes?</div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <button className="t3d-btn" onClick={startWeekReview}>REVIEW MY WEEK</button>
+                <button type="button" onClick={() => setWeekReviewDismissed(true)} style={{ background: "none", border: 0, color: "#4A6070", cursor: "pointer", fontSize: 9, textDecoration: "underline" }}>remind me later</button>
+              </div>
+            </div>
+          )}
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle" style={{ color: NEON }}>{workoutInProgress && activeSession ? "ACTIVE WORKOUT" : "RECOMMENDED NEXT SESSION"}</div>
             {workoutInProgress && activeSession ? (
@@ -7721,7 +7844,7 @@ export default function App() {
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
+                onClick={async () => { if (user) await clearDrafts(user.id).catch(() => {}); clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
                 SIGN OUT
               </button>
             </div>
