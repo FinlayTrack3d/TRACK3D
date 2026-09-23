@@ -4178,8 +4178,16 @@ function Fitness({ user, isActive = true }) {
     } : null
   ), [workoutInProgress, activeSession, exerciseIdx, setProgress, completedSets, currentInputs, workoutStart,
     restTimerEnabled, restSeconds, restActive, restDeadline, activeWorkoutLogId]);
-  useSessionDraft(user?.id, "fitness", fitnessDraft, draft => {
+  useSessionDraft(user?.id, "fitness", fitnessDraft, async draft => {
     if (!draft.activeSession?.exercises?.length) return;
+    if (draft.activeWorkoutLogId) {
+      // The server may have already finalized this row (idle past the
+      // 2-hour resume window) even though the local draft still thinks
+      // it's live - don't reopen a workout that's already been logged.
+      const { data: logRow } = await supabase.from("workout_logs")
+        .select("in_progress").eq("id", draft.activeWorkoutLogId).eq("user_id", user.id).single();
+      if (!logRow || !logRow.in_progress) return;
+    }
     setActiveSession(draft.activeSession);
     setExerciseIdx(draft.exerciseIdx || 0);
     setSetProgress(draft.setProgress || {});
