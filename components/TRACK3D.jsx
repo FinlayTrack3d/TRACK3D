@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
-import { useSessionDraft, clearDrafts } from "../lib/session-drafts";
+import { useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 
 const NEON = "#00FFB2";
@@ -7844,7 +7844,7 @@ export default function App() {
               <div className="t3d-dot" />
               <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
-                onClick={async () => { if (user) await clearDrafts(user.id).catch(() => {}); clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
+                onClick={async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
                 SIGN OUT
               </button>
             </div>
