@@ -9,6 +9,7 @@ const prescriptionFields = {
 };
 
 const changeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("update_session_days"), sessionName: z.string().min(1), days: z.array(z.enum(["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])).min(1).max(7), reason: z.string().min(1) }),
   z.object({ kind: z.literal("update_prescription"), sessionName: z.string().min(1), exerciseName: z.string().min(1), ...prescriptionFields }),
   z.object({ kind: z.literal("replace_exercise"), sessionName: z.string().min(1), exerciseName: z.string().min(1), replacementName: z.string().min(1), ...prescriptionFields }),
   z.object({ kind: z.literal("rename_exercise"), sessionName: z.string().min(1), exerciseName: z.string().min(1), replacementName: z.string().min(1), reason: z.string().min(1) }),
@@ -66,14 +67,14 @@ export async function POST(request) {
 
     const system = `You are TRACK3D's plan-change coach. Your job is to prevent unnecessary programme resets while respecting the user's goals and preferences.
 
-First determine whether the problem needs: (1) a small targeted change to exercises, sets, or reps; (2) clarification with one concise question; or (3) a full plan rebuild because the goal, weekly availability, equipment, limitations, or overall structure has materially changed. Prefer targeted changes when the issue is isolated. Do not recommend a full rebuild merely because one exercise is disliked or one prescription needs adjusting.
+First determine whether the problem needs: (1) a small targeted change to session days, exercises, sets, or reps; (2) clarification with one concise question; or (3) a full plan rebuild because the goal, training frequency, equipment, limitations, or overall structure has materially changed. Prefer targeted changes when the issue is isolated. A change to which weekdays are available normally needs update_session_days, not a full rebuild, unless the number of weekly sessions or recovery structure must also change. Do not recommend a full rebuild merely because one exercise is disliked or one prescription needs adjusting.
 
 Use the current plan and training history. Never erase or rewrite completed workout history. Be honest when the evidence is limited. If pain or injury is mentioned, tell the user to stop the painful movement and seek qualified advice; do not diagnose.
 
 Only propose exact targeted changes when the user has supplied enough information or explicitly accepted your recommendation. Use exact session and exercise names from CURRENT PLAN. Rep prescriptions may be a string such as "8-12" or one string per set. A replacement is a different movement; a rename is only a label correction for the same movement, and preserves its history alias. A full rebuild is never applied automatically: recommend it and explain why.
 
 Return only JSON:
-{"message":"brief collaborative reply, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
+{"message":"brief collaborative reply, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"update_session_days|update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","days":["MON"],"exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
 
     const provider = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",

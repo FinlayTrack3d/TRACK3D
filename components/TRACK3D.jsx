@@ -5733,6 +5733,11 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     await moveScheduledWorkout(dragged.sessionName, dragged.sourceDay, targetDay);
   };
 
+  const cancelSessionEdits = () => {
+    setSessions(normalizeFitnessSessions(split?.sessions || []));
+    setEditDaysModal(false);
+  };
+
   const askPlanCoach = async (suggestedQuestion) => {
     const question = (suggestedQuestion || coachQuestion).trim();
     if (!question || coachLoading) return;
@@ -6074,26 +6079,34 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
               {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalMessages([]); setApprovalReview("all"); }}>REVIEW &amp; APPROVE 8-WEEK SPLIT</button>}
             </div>
+            {draggedWorkoutDay && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "10px 12px", border: "1px solid rgba(0,200,255,.45)", borderRadius: 6, background: "rgba(0,200,255,.08)", color: NEON2, fontSize: 9 }}>
+                <span>MOVE {draggedWorkoutDay.sessionName.toUpperCase()} · TAP A DAY OR DRAG IT THERE</span>
+                <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setDraggedWorkoutDay(null)}>CANCEL</button>
+              </div>
+            )}
             {DAYS.map(day => {
               const isToday = day === homeDate.dayCode;
               const session = sessions.find(s => s.days?.includes(day));
+              const isMoveTarget = draggedWorkoutDay && draggedWorkoutDay.sourceDay !== day;
               return (
                 <div key={day} data-workout-day={day}
                   onDragOver={event => event.preventDefault()}
                   onDrop={event => { event.preventDefault(); finishWorkoutDayDrag(day); }}
-                  style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}`, background: draggedWorkoutDay && draggedWorkoutDay.sourceDay !== day ? "rgba(0,200,255,.025)" : "transparent" }}>
+                  onClick={() => { if (isMoveTarget) finishWorkoutDayDrag(day); }}
+                  style={{ display: "flex", alignItems: "center", gap: 12, minHeight: 48, padding: "9px 10px", margin: "0 -10px", borderBottom: `1px solid ${BORDER}`, borderRadius: isMoveTarget ? 6 : 0, outline: isMoveTarget ? "1px dashed rgba(0,200,255,.42)" : "none", background: isMoveTarget ? "rgba(0,200,255,.09)" : "transparent", cursor: isMoveTarget ? "pointer" : "default" }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 32, color: isToday ? NEON : "#E0EAF0" }}>{day}</div>
-                  <div style={{ flex: 1, fontSize: 11, color: session ? (isToday ? "#E0EAF0" : "#4A6070") : "#2A3A48" }}>{session ? `${session.name} · ${session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0} min` : "REST"}</div>
+                  <div style={{ flex: 1, fontSize: 11, color: isMoveTarget ? NEON2 : session ? (isToday ? "#E0EAF0" : "#4A6070") : "#2A3A48" }}>
+                    {isMoveTarget ? `PLACE HERE · ${session ? `swap with ${session.name}` : "rest day"}` : session ? `${session.name} · ${session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0} min` : "REST"}
+                  </div>
                   {isToday && <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, padding: "2px 7px", borderRadius: 10, background: "rgba(0,255,178,.1)", color: NEON, border: "1px solid rgba(0,255,178,.25)" }}>TODAY</span>}
-                  {session && <button type="button" draggable aria-label={`Move ${session.name} from ${day}`} title="Drag to another day"
-                    onDragStart={() => setDraggedWorkoutDay({ sessionName: session.name, sourceDay: day })}
-                    onDragEnd={() => setDraggedWorkoutDay(null)}
-                    onPointerDown={event => { event.currentTarget.setPointerCapture?.(event.pointerId); setDraggedWorkoutDay({ sessionName: session.name, sourceDay: day }); }}
-                    onPointerUp={event => {
-                      const targetDay = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("[data-workout-day]")?.dataset?.workoutDay;
-                      if (targetDay) finishWorkoutDayDrag(targetDay); else setDraggedWorkoutDay(null);
+                  {session && <button type="button" draggable aria-label={`Move ${session.name} from ${day}`} title="Drag or tap to move to another day"
+                    onClick={event => {
+                      event.stopPropagation();
+                      setDraggedWorkoutDay(current => current?.sessionName === session.name && current?.sourceDay === day ? null : { sessionName: session.name, sourceDay: day });
                     }}
-                    style={{ background: "none", border: 0, color: draggedWorkoutDay?.sessionName === session.name ? NEON2 : "#334650", cursor: "grab", fontSize: 14, padding: "4px 6px", touchAction: "none", letterSpacing: -2 }}>⋮⋮</button>}
+                    onDragStart={event => { event.stopPropagation(); setDraggedWorkoutDay({ sessionName: session.name, sourceDay: day }); }}
+                    style={{ background: draggedWorkoutDay?.sessionName === session.name ? "rgba(0,200,255,.12)" : "none", border: `1px solid ${draggedWorkoutDay?.sessionName === session.name ? "rgba(0,200,255,.45)" : "transparent"}`, borderRadius: 5, color: draggedWorkoutDay?.sessionName === session.name ? NEON2 : "#526975", cursor: "grab", fontSize: 16, padding: "8px 10px", touchAction: "manipulation", letterSpacing: -2 }}>⋮⋮</button>}
                 </div>
               );
             })}
@@ -6144,9 +6157,12 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
           {/* Edit Days Modal */}
           {editDaysModal && (
-            <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.88)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
-              <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "80vh", overflowY: "auto" }}>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>EDIT SESSIONS</div>
+            <div onClick={cancelSessionEdits} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.88)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+              <div role="dialog" aria-modal="true" aria-labelledby="edit-sessions-title" onClick={event => event.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "80vh", overflowY: "auto" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+                  <div id="edit-sessions-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2 }}>EDIT SESSIONS</div>
+                  <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={cancelSessionEdits}>CLOSE</button>
+                </div>
                 {sessions.map((session, sIdx) => (
                   <div key={sIdx} style={{ marginBottom: 20, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` }}>
                     <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON, letterSpacing: 2, marginBottom: 10 }}>{session.name}</div>
@@ -6208,7 +6224,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   </div>
                 ))}
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => setEditDaysModal(false)}>CANCEL</button>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={cancelSessionEdits}>CANCEL</button>
                   <button className="t3d-btn" style={{ flex: 1 }} onClick={async () => {
                     await saveSplit(sessions);
                     setSplit(prev => ({ ...prev, sessions }));

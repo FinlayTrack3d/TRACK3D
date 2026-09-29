@@ -32,3 +32,10 @@ test("replacing one exercise does not merge the old movement's performance histo
   assert.equal(exerciseMatchesHistory(updated[0].exercises[1], "Cable Fly"), false);
   assert.deepEqual(updated[0].exercises[1].reps, ["12-15", "12-15"]);
 });
+
+test("the coach can move a session without rebuilding its exercises", () => {
+  const updated = applyPlanChangeProposal(plan, [{ kind: "update_session_days", sessionName: "Push", days: ["TUE", "SAT"], reason: "Availability changed" }]);
+  assert.deepEqual(updated[0].days, ["TUE", "SAT"]);
+  assert.deepEqual(updated[0].exercises, plan[0].exercises);
+  assert.equal(updated[0].approval, null);
+});
