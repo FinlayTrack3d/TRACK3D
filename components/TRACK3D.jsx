@@ -8282,7 +8282,10 @@ export default function App() {
           ))}
           <div className="t3d-sfooter">
             STREAK: 14 DAYS 🔥<br />
-            <span style={{ color: "#1A2530" }}>v1.0 · TRACK3D</span>
+            <span style={{ color: "#1A2530" }}>v1.0 · TRACK3D</span><br />
+            <a href="/privacy" style={{ color: "#6F8792", textDecoration: "underline" }}>PRIVACY</a>
+            <span style={{ color: "#334650" }}> · </span>
+            <a href="/terms" style={{ color: "#6F8792", textDecoration: "underline" }}>TERMS</a>
           </div>
         </nav>
 
