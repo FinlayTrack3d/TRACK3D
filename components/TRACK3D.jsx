@@ -2,6 +2,11 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
+import { sendCoachMessage } from "../lib/coaching/coach-client";
+import { COACH_PERSONALITIES } from "../lib/coaching/personality";
+import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
+import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
+import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -252,13 +257,16 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [started, setStarted] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [restored, setRestored] = useState(!storageKey);
+  const [actions, setActions] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
+  const [personality, setPersonality] = useState("balanced");
   const endRef = useRef(null);
   const messageListRef = useRef(null);
 
@@ -271,6 +279,15 @@ function AICoach({ habits = [], system, title, introduction, activationLabel, op
     } catch { /* Ignore an unreadable local draft. */ }
     setRestored(true);
   }, [storageKey]);
+
+  useEffect(() => {
+    if (!coachingV12) return;
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (!user) return;
+      const { data } = await supabase.from("coach_profiles").select("personality").eq("user_id", user.id).maybeSingle();
+      if (data?.personality) setPersonality(data.personality);
+    });
+  }, [coachingV12]);
 
   useEffect(() => {
     if (!storageKey || !restored) return;
@@ -294,6 +311,15 @@ User data today:
     setInput("");
     setTimeout(scroll, 50);
     try {
+      if (coachingV12) {
+        const data = await sendCoachMessage(msg, conversationId, coachContext);
+        setConversationId(data.conversationId);
+        setActions((data.actions || []).map(action => ({ ...action, type: action.type || action.action_type })));
+        setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet." }]);
+        setLoading(false);
+        setTimeout(scroll, 50);
+        return;
+      }
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -319,6 +345,25 @@ User data today:
 
   const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
 
+  const choosePersonality = async nextPersonality => {
+    setPersonality(nextPersonality);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) await supabase.from("coach_profiles").upsert({ user_id: user.id, personality: nextPersonality, updated_at: new Date().toISOString() });
+  };
+
+  const decideStructuredAction = async (action, decision) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return;
+    const response = await fetch("/api/coach-action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ actionId: action.id, decision }),
+    });
+    if (!response.ok) return;
+    setActions(current => current.map(item => item.id === action.id ? { ...item, status: decision === "reject" ? "rejected" : "applied" } : item));
+    if (decision !== "reject") onStructuredAction?.(action);
+  };
+
   // A caller (e.g. the 1-week review banner) can hand this coach a message to
   // send right away, opening it fully expanded so the conversation is
   // immediately visible rather than needing the user to find and open it.
@@ -337,6 +382,9 @@ User data today:
         <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
         {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
+      {coachingV12 && (!compact || expanded) && <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
+        {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
+      </div>}
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
@@ -395,6 +443,17 @@ User data today:
                 <span className="t3d-cursor" style={{ color: "#E0EAF0", fontSize: 11 }}>Thinking</span>
               </div>
             )}
+            {coachingV12 && actions.filter(action => !["rejected", "applied"].includes(action.status)).map(action => {
+              const permanent = action.scope === "permanent";
+              return <div key={action.id} style={{ background: "rgba(0,200,255,.05)", border: `1px solid ${permanent ? "rgba(255,140,0,.35)" : "rgba(0,200,255,.25)"}`, borderRadius: 6, padding: 10, marginBottom: 8 }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: permanent ? "#FF8C00" : NEON2, letterSpacing: 1, marginBottom: 5 }}>{permanent ? "PERMANENT CHANGE — APPROVAL REQUIRED" : "TEMPORARY CHANGE"}</div>
+                <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 8 }}>{action.payload?.reason || "Coach suggested a workout update."}</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="t3d-btn t3d-btn-sm" onClick={() => decideStructuredAction(action, permanent ? "approve" : "apply")}>{permanent ? "APPROVE & APPLY" : "APPLY"}</button>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => decideStructuredAction(action, "reject")}>NO CHANGE</button>
+                </div>
+              </div>;
+            })}
             <div ref={endRef} />
           </div>
           {messages.at(-1)?.role === "assistant" && messages.at(-1)?.content?.includes("?") && (
@@ -4398,6 +4457,18 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const saveWorkoutLog = async (setsToSave = completedSets) => {
     await persistWorkoutLog(setsToSave, { finalize: true });
+    try {
+      await saveStructuredWorkout({
+        userId: user.id,
+        activeSession,
+        completedSets: setsToSave,
+        startedAt: workoutStart,
+        legacyWorkoutLogId: String(workoutLogIdRef.current || "") || null,
+      });
+    } catch (error) {
+      // The V1.2 migration can be deployed independently; legacy workout saving remains authoritative until then.
+      console.warn("Structured workout history was not saved:", error.message);
+    }
   };
 
   // Autosave every time a set is confirmed or an already-logged set is edited.
@@ -4422,27 +4493,42 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     return null;
   };
 
-  // Recommend the next load from performance against this set's own rep range.
-  const getWeightGuidance = (exName, setIdx, repRange) => {
-    const lastSets = getLastSessionData(exName);
-    if (!lastSets || !lastSets[setIdx]) return null;
-    const lastSet = lastSets[setIdx];
-    const lastWeight = parseFloat(lastSet.weight) || 0;
-    const lastReps = parseInt(lastSet.reps) || 0;
-    if (!lastWeight) return null;
+  const getExerciseHistory = exName => history.flatMap(log => {
+    const exercise = log.exercises?.find(item => item.name?.toLowerCase() === exName?.toLowerCase());
+    return exercise ? [{ ...exercise, date: log.date }] : [];
+  });
 
-    const rangeValues = String(repRange || "8-12").match(/\d+/g)?.map(Number) || [8, 12];
-    const rangeBottom = rangeValues[0];
-    const rangeTop = rangeValues.at(-1);
-    if (lastReps >= rangeTop) {
-      const nextWeight = (lastWeight + 2.5).toFixed(1);
-      return { weight: nextWeight, message: `Top of range reached last time (${lastReps}/${rangeTop}). Try ${nextWeight}kg.` };
-    }
-    if (lastReps >= rangeBottom) {
-      return { weight: lastWeight.toFixed(1), message: `Within range last time (${lastReps}). Keep ${lastWeight.toFixed(1)}kg and aim for ${rangeTop} reps.` };
-    }
-    const lowerWeight = Math.max(0, lastWeight - 2.5).toFixed(1);
-    return { weight: lowerWeight, message: `Below the ${rangeBottom}-rep minimum last time. Use ${lowerWeight}kg and aim for the top of the range before increasing.` };
+  const getProgressionRecommendation = exercise => {
+    const exposures = getExerciseHistory(exercise.name);
+    const lastExposure = exposures[0];
+    if (!lastExposure?.sets?.length) return null;
+    const currentWeight = Number(lastExposure.sets[0]?.weight) || 0;
+    const equipmentHistory = exposures.flatMap(item => item.sets || []).map(set => Number(set.weight)).filter(Number.isFinite);
+    const repRange = Array.isArray(exercise.reps) ? exercise.reps[0] : exercise.reps;
+    return evaluateProgression({
+      prescriptionType: exercise.prescription_type || "straight_sets",
+      sets: lastExposure.sets,
+      repRange,
+      currentWeight,
+      equipmentHistory,
+      week: exercise.week || 2,
+      previousExposure: exercise.previous_progression,
+      repeatedOvershoot: Boolean(exercise.repeated_overshoot),
+      restAppropriate: Boolean(exercise.rest_checked),
+      executionAppropriate: Boolean(exercise.execution_checked),
+      consecutiveStalledExposures: Number(exercise.stalled_exposures || 0),
+      pain: Boolean(exercise.active_pain),
+    });
+  };
+
+  const getWeightGuidance = (exercise, setIdx) => {
+    const lastSets = getLastSessionData(exercise.name);
+    if (!lastSets?.[setIdx]) return null;
+    const recommendation = getProgressionRecommendation(exercise);
+    if (!recommendation || Array.isArray(recommendation)) return null;
+    const lastWeight = Number(lastSets[setIdx].weight);
+    const weight = Number.isFinite(recommendation.nextWeight) ? recommendation.nextWeight : lastWeight;
+    return { weight: Number.isFinite(weight) ? weight.toFixed(1) : null, message: recommendation.cue ? `${recommendation.cue} — ${recommendation.reason}` : recommendation.reason, recommendation };
   };
 
   // All logged occurrences of an exercise, oldest first, for the progression graph
@@ -4489,10 +4575,21 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     return adjusted;
   };
 
-  const startWorkout = (session) => {
+  const startWorkout = async session => {
     const minuteLimit = parseInt(availableMinutes, 10);
     const sessionToStart = fitSessionToMinutes(normalizeFitnessSessions([session])[0], minuteLimit);
     sessionToStart.gymContext = { type: gymContext, name: gymName.trim() };
+    try {
+      const { data } = await supabase.from("training_sessions").insert({
+        user_id: user.id,
+        session_key: exerciseKey(sessionToStart.name || "workout"),
+        session_name: sessionToStart.name || "Workout",
+        started_at: new Date().toISOString(),
+        status: "in_progress",
+        temporary_context: {},
+      }).select("id").single();
+      if (data?.id) sessionToStart.trainingSessionId = data.id;
+    } catch { /* The legacy workout remains usable until the V1.2 migration is installed. */ }
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
     setExerciseIdx(0);
@@ -4583,7 +4680,10 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const reps = currentInputs[eIdx]?.reps || "";
     if (!weight || !reps) return;
 
-    const newSet = { weight, reps, setNum: sIdx + 1 };
+    const priorSets = getExerciseHistory(activeSession.exercises[eIdx].name).flatMap(exposure => exposure.sets || []);
+    const personalBest = detectPersonalBest({ weight, reps }, priorSets);
+    const progressionDecision = getProgressionRecommendation(activeSession.exercises[eIdx]);
+    const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision };
     const newCompleted = { ...completedSets, [eIdx]: [...(completedSets[eIdx] || []), newSet] };
     setCompletedSets(newCompleted);
     setCurrentInputs(prev => ({ ...prev, [eIdx]: { weight: "", reps: "" } }));
@@ -4731,10 +4831,22 @@ Respond ONLY with valid JSON:
     loggedSets: (completedSets[idx] || []).map((s, i) => ({ setNumber: i + 1, weight: s.weight, reps: s.reps })),
   })) : null;
 
+  const applyStructuredCoachAction = async action => {
+    if (action.scope === "permanent") {
+      const updated = applyCoachActionToProgramme(sessions, action);
+      setSessions(updated);
+      setSplit(previous => ({ ...(previous || {}), sessions: updated }));
+      await saveSplit(updated);
+      return;
+    }
+    setActiveSession(previous => applyCoachActionToWorkout(previous, action));
+  };
+
   const fitnessCoach = (
     <div style={{ flex: "0 0 auto" }}>
       <AICoach
         compact
+        coachingV12
         title="AI FITNESS COACH"
         introduction="Talk through your programme, exercise technique, progress, or changes that fit your goals and schedule."
         activationLabel="CHAT WITH FITNESS COACH"
@@ -4744,6 +4856,8 @@ Respond ONLY with valid JSON:
         onMemoryUpdate={saveCoachMemory}
         pendingPrompt={weekReviewPrompt}
         onConsumedPrompt={() => setWeekReviewPrompt(null)}
+        coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14) }}
+        onStructuredAction={applyStructuredCoachAction}
         system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Never open with a vague question such as "what would you like help with?" Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain.
 STRUCTURED ACTIVE-WORKOUT STATE is the single source of truth for exactly what has been lifted this session, per exercise and per set. Always read it fresh for any question about reps, weight or completion - never rely on numbers mentioned earlier in this conversation, since the user has likely moved on to a different exercise since then and old messages may describe a different one.
 For a single small change, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], [ACTION:remove_sets|exercise|number], or [ACTION:add_sets|exercise|number]. During an active workout you can also log a completed set directly for the exercise the user is currently on with [ACTION:log_set|exercise|reps x weight] (e.g. [ACTION:log_set|Bench Press|10x60]) when the user tells you what they just did instead of entering it themselves - use the exact exercise name from the structured state and only when isCurrentExercise is true for it.
@@ -4781,7 +4895,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const totalExercises = activeSession.exercises.length;
     const exerciseCompletedSets = getCompletedForExercise(exerciseIdx);
     const currentSetRepRange = (Array.isArray(currentExercise.reps) ? currentExercise.reps[sIdx] : currentExercise.reps) || "8-12";
-    const weightGuidance = getWeightGuidance(currentExercise.name, sIdx, currentSetRepRange);
+    const weightGuidance = getWeightGuidance(currentExercise, sIdx);
     const suggestedWeight = weightGuidance?.weight;
     const lastSets = getLastSessionData(currentExercise.name);
     const weight = currentInputs[exerciseIdx]?.weight || "";
@@ -4915,7 +5029,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 {exerciseCompletedSets.map((set, index) => (
                   <button key={index} type="button" onClick={() => setEditingSet({ exerciseIdx, setIdx: index, reps: set.reps, weight: set.weight })} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 6, minWidth: 0, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.12)", borderRadius: 5, color: "#D8E5EA", cursor: "pointer", fontFamily: "'Inter',sans-serif", fontSize: 9, padding: "7px 8px", textAlign: "left" }}>
                     <span style={{ color: "#8AABB8" }}>SET {index + 1}</span>
-                    <span style={{ color: NEON2, whiteSpace: "nowrap" }}>{set.reps} reps · {set.weight}kg</span>
+                    <span style={{ color: NEON2, whiteSpace: "nowrap" }}>{set.reps} reps · {set.weight}kg{set.personalBest ? ` · ${set.personalBest.label}` : ""}</span>
                     <span style={{ color: "#FFB547", fontWeight: 700, fontSize: 8 }}>EDIT</span>
                   </button>
                 ))}

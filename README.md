@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## TRACK3D Coaching V1.2
+
+The fitness coach now uses a server-side, safety-first coaching layer with deterministic exercise progression, 14-day context, on-demand historical retrieval, persistent Coach memory, structured temporary actions, and explicit approval for permanent programme changes.
+
+Before enabling it in a deployed environment:
+
+1. Review and apply `supabase/migrations/202609290001_track3d_coaching_v12.sql` to a non-production Supabase branch first.
+2. Configure `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `ANTHROPIC_API_KEY` on the server. The existing `NEXT_PUBLIC_SUPABASE_*` variables remain supported.
+3. Run `npm test`, `npm run lint`, and `npm run build`.
+
+Legacy `workout_logs` writes remain authoritative and continue if the additive migration is not installed. Normalized V1.2 session/set writes fail softly until it is available. The migration is intentionally additive and does not backfill legacy workout JSON; write a backfill only after validating representative production rows.
+
 ## Getting Started
 
 First, run the development server:
