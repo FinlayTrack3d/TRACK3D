@@ -8,6 +8,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
+import { buildLoggedExercises, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -41,6 +42,23 @@ const getZonedDateInfo = (date = new Date(), timeZone = DEFAULT_HOME_TIME_ZONE) 
     time: `${parts.hour}:${parts.minute}`,
   };
 };
+
+function useZonedDateKey(timeZone) {
+  const [dateKey, setDateKey] = useState(() => getZonedDateInfo(new Date(), timeZone).dateKey);
+  useEffect(() => {
+    const update = () => setDateKey(getZonedDateInfo(new Date(), timeZone).dateKey);
+    update();
+    const timer = setInterval(update, 5000);
+    window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [timeZone]);
+  return dateKey;
+}
 
 const INITIAL_HABITS = [];
 const POPULAR_DAILY_HABITS = [
@@ -1316,6 +1334,9 @@ function routineTimingSummary(timing) {
   return `Routine time: ${actual} min · plan ${planned} min · ${comparison}`;
 }
 function MorningSection({ user }) {
+  const homeTimeZone = DEFAULT_HOME_TIME_ZONE;
+  const today = useZonedDateKey(homeTimeZone);
+  const previousTodayRef = useRef(today);
   const [view, setView] = useState("home");
   const [setupStep, setSetupStep] = useState(0);
   const [wakeTime, setWakeTime] = useState("06:00");
@@ -1361,7 +1382,7 @@ function MorningSection({ user }) {
     } : null
   ), [view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
     liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive]);
-  useSessionDraft(user?.id, "morning", morningDraft, draft => {
+  useSessionDraft(user?.id, `morning-${today}`, morningDraft, draft => {
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(draft.view)) return;
     setCheckinStep(draft.checkinStep || 0);
     setCheckinData(draft.checkinData || {});
@@ -1380,12 +1401,6 @@ function MorningSection({ user }) {
   });
   const fileRef = useRef(null);
 
-  const getLocalDate = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
-  const today = getLocalDate();
-
   const NON_NEGS = [
     { id: "sleep", name: "Work out sleep duration", type: "sleep", icon: "😴", duration: 1 },
     { id: "weight", name: "Check body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
@@ -1398,7 +1413,27 @@ function MorningSection({ user }) {
   useEffect(() => {
     if (!user) return;
     loadData();
-  }, [user]);
+  }, [user, today]);
+
+  useEffect(() => {
+    if (previousTodayRef.current === today) return;
+    previousTodayRef.current = today;
+    setView("home");
+    setCompletedToday(false);
+    setSkippedToday(false);
+    setShowMissedRoutineChoice(false);
+    setCompletedAction(null);
+    setCheckinStep(0);
+    setCheckinData({});
+    setTempInput("");
+    setPhotoAngleIdx(0);
+    setPhotoFiles({ front: null, side: null, back: null });
+    setPhotoPreviews({ front: null, side: null, back: null });
+    setLiveTaskIndex(0);
+    setLiveDeadline(null);
+    setLiveStartedAt(null);
+    setLiveInputActive(false);
+  }, [today]);
 
   const loadData = async () => {
     setLoading(true);
@@ -1696,7 +1731,7 @@ function MorningSection({ user }) {
     const now = new Date();
     setCheckinData({
       wakeTiming: {
-        actual: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+        actual: getZonedDateInfo(now, homeTimeZone).time,
         planned: wakeTime,
         source: "live",
         startedAt: now.toISOString(),
@@ -4188,7 +4223,8 @@ function normalizeFitnessSessions(sessions = []) {
 
 function Fitness({ user, isActive = true }) {
   const homeTimeZone = resolveHomeTimeZone(user);
-  const homeDate = getZonedDateInfo(new Date(), homeTimeZone);
+  const zonedToday = useZonedDateKey(homeTimeZone);
+  const homeDate = { ...getZonedDateInfo(new Date(), homeTimeZone), dateKey: zonedToday };
   const [view, setView] = useState("home");
   const [split, setSplit] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4224,6 +4260,10 @@ function Fitness({ user, isActive = true }) {
   const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], tempo: "" });
   const [viewingSession, setViewingSession] = useState(null); // log entry shown in the history popup
   const [viewingExercise, setViewingExercise] = useState(null); // exercise name shown as a graph within the popup
+  const [editingHistorySession, setEditingHistorySession] = useState(false);
+  const [historyEditOriginal, setHistoryEditOriginal] = useState(null);
+  const [historySaving, setHistorySaving] = useState(false);
+  const [draggedWorkoutDay, setDraggedWorkoutDay] = useState(null);
   const [showOtherWorkouts, setShowOtherWorkouts] = useState(false);
   const [discardWorkoutWarning, setDiscardWorkoutWarning] = useState(false);
   const [pendingSession, setPendingSession] = useState(null);
@@ -4270,10 +4310,6 @@ function Fitness({ user, isActive = true }) {
   const workoutLogPendingRef = useRef(null);
   const workoutFinalizedRef = useRef(false);
   useEffect(() => { workoutLogIdRef.current = activeWorkoutLogId; }, [activeWorkoutLogId]);
-
-  // A session with no activity for this long is treated as abandoned rather
-  // than resumable - whatever was last autosaved becomes the finished log.
-  const WORKOUT_RESUME_WINDOW_MS = 2 * 60 * 60 * 1000;
 
   useEffect(() => {
     if (view !== "workout" || !isActive) return;
@@ -4333,7 +4369,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments — or none" },
   ];
 
-  useEffect(() => { if (!user) return; loadData(); }, [user]);
+  useEffect(() => { if (!user) return; loadData(); }, [user, today]);
 
   useEffect(() => {
     if (!restActive || !restDeadline) return;
@@ -4348,14 +4384,13 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", update); };
   }, [restActive, restDeadline]);
 
-  // A workout still marked in_progress with no autosave in the last 2 hours
-  // gets presumed finished: whatever was last saved becomes the log entry.
+  // Only yesterday's abandoned workouts are finalized. A workout started
+  // today remains resumable until the user ends it or the UK/home date rolls.
   const finalizeStaleWorkouts = async () => {
     if (!user) return;
-    const cutoff = new Date(Date.now() - WORKOUT_RESUME_WINDOW_MS).toISOString();
     try {
       await supabase.from("workout_logs").update({ in_progress: false })
-        .eq("user_id", user.id).eq("in_progress", true).lt("created_at", cutoff);
+        .eq("user_id", user.id).eq("in_progress", true).lt("date", today);
     } catch (e) { console.log("Stale workout cleanup error:", e); }
   };
 
@@ -4364,10 +4399,35 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     try {
       await finalizeStaleWorkouts();
       const { data: splitData } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
+      let normalizedSessions = [];
       if (splitData) {
-        const normalizedSessions = normalizeFitnessSessions(splitData.sessions || []);
+        normalizedSessions = normalizeFitnessSessions(splitData.sessions || []);
         setSplit({ ...splitData, sessions: normalizedSessions });
         setSessions(normalizedSessions);
+      }
+      const { data: activeLog } = await supabase.from("workout_logs").select("*")
+        .eq("user_id", user.id).eq("date", today).eq("in_progress", true)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (activeLog) {
+        const plannedSession = normalizedSessions.find(session => session.name?.toLowerCase() === activeLog.session_name?.toLowerCase());
+        const recovered = recoverWorkoutState(activeLog, plannedSession);
+        if (recovered) {
+          if (!recovered.activeSession.trainingSessionId) {
+            const { data: structuredActive } = await supabase.from("training_sessions").select("id")
+              .eq("user_id", user.id).eq("session_name", activeLog.session_name).eq("status", "in_progress")
+              .order("created_at", { ascending: false }).limit(1).maybeSingle();
+            if (structuredActive?.id) recovered.activeSession.trainingSessionId = structuredActive.id;
+          }
+          setActiveSession(recovered.activeSession);
+          setCompletedSets(recovered.completedSets);
+          setSetProgress(recovered.setProgress);
+          setExerciseIdx(recovered.exerciseIdx);
+          setWorkoutStart(recovered.workoutStart);
+          setActiveWorkoutLogId(recovered.workoutLogId);
+          workoutLogIdRef.current = recovered.workoutLogId;
+          workoutFinalizedRef.current = false;
+          setWorkoutInProgress(true);
+        }
       }
       // A generous window so an exercise's history still surfaces ("last time")
       // even after a session gets restructured or an exercise sits unused for a while.
@@ -4406,12 +4466,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
   const buildWorkoutLogPayload = (setsToSave) => {
     const dateStr = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
-    const exerciseData = activeSession.exercises.map((ex, eIdx) => ({
-      name: ex.name,
-      sets: (setsToSave[eIdx] || []).map((s, setIndex) => ({ weight: s.weight, reps: s.reps, repRange: Array.isArray(ex.reps) ? ex.reps[setIndex] : ex.reps })),
-      context: activeSession?.gymContext || { type: "usual", name: "" },
-    }));
-    const totalVol = exerciseData.reduce((a, ex) => a + ex.sets.reduce((b, s) => b + (parseFloat(s.weight)||0) * (parseInt(s.reps)||0), 0), 0);
+    const exerciseData = buildLoggedExercises(activeSession, setsToSave);
+    const totalVol = workoutVolume(exerciseData);
     return {
       user_id: user.id, date: dateStr, session_name: activeSession?.name || "Workout",
       exercises: exerciseData, total_volume: totalVol,
@@ -4585,6 +4641,10 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const minuteLimit = parseInt(availableMinutes, 10);
     const sessionToStart = fitSessionToMinutes(normalizeFitnessSessions([session])[0], minuteLimit);
     sessionToStart.gymContext = { type: gymContext, name: gymName.trim() };
+    const startedAt = Date.now();
+    if (workoutLogIdRef.current && workoutInProgress) {
+      await supabase.from("workout_logs").update({ in_progress: false }).eq("id", workoutLogIdRef.current).eq("user_id", user.id);
+    }
     try {
       const { data } = await supabase.from("training_sessions").insert({
         user_id: user.id,
@@ -4596,15 +4656,29 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       }).select("id").single();
       if (data?.id) sessionToStart.trainingSessionId = data.id;
     } catch { /* The legacy workout remains usable until the V1.2 migration is installed. */ }
+    let createdWorkoutLogId = null;
+    try {
+      const { data } = await supabase.from("workout_logs").insert({
+        user_id: user.id,
+        date: getZonedDateInfo(new Date(startedAt), homeTimeZone).dateKey,
+        session_name: sessionToStart.name || "Workout",
+        exercises: buildLoggedExercises(sessionToStart, {}),
+        total_volume: 0,
+        duration_mins: 0,
+        in_progress: true,
+        created_at: new Date(startedAt).toISOString(),
+      }).select("id").single();
+      createdWorkoutLogId = data?.id || null;
+    } catch (error) { console.log("Workout start save error:", error); }
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
     setExerciseIdx(0);
     setSetProgress({});
     setCompletedSets({});
     setCurrentInputs({});
-    setWorkoutStart(Date.now());
-    setActiveWorkoutLogId(null);
-    workoutLogIdRef.current = null;
+    setWorkoutStart(startedAt);
+    setActiveWorkoutLogId(createdWorkoutLogId);
+    workoutLogIdRef.current = createdWorkoutLogId;
     workoutFinalizedRef.current = false;
     setPendingSession(null);
     setView("workout");
@@ -4623,6 +4697,10 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     if (workoutLogIdRef.current) {
       supabase.from("workout_logs").delete().eq("id", workoutLogIdRef.current).eq("user_id", user.id)
         .then(({ error }) => { if (error) console.log("Discard cleanup error:", error); });
+    }
+    if (activeSession?.trainingSessionId) {
+      supabase.from("training_sessions").delete().eq("id", activeSession.trainingSessionId).eq("user_id", user.id)
+        .then(({ error }) => { if (error) console.log("Structured discard cleanup error:", error); });
     }
     workoutLogIdRef.current = null;
     workoutFinalizedRef.current = true;
@@ -5075,6 +5153,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   <label style={{ fontSize: 9, color: "#8AABB8" }}>WEIGHT KG<input className="t3d-input" type="number" inputMode="decimal" value={editingSet.weight} onChange={event => setEditingSet(value => ({ ...value, weight: event.target.value }))} /></label>
                 </div>
                 <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => {
+                    const remaining = (completedSets[editingSet.exerciseIdx] || []).filter((_, index) => index !== editingSet.setIdx).map((set, index) => ({ ...set, setNum: index + 1 }));
+                    const updated = { ...completedSets, [editingSet.exerciseIdx]: remaining };
+                    setCompletedSets(updated);
+                    setSetProgress(progress => ({ ...progress, [editingSet.exerciseIdx]: remaining.length }));
+                    persistWorkoutLog(updated);
+                    setEditingSet(null);
+                  }}>DELETE SET</button>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => setEditingSet(null)}>CANCEL</button>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => {
                     setCompletedSets(previous => ({ ...previous, [editingSet.exerciseIdx]: previous[editingSet.exerciseIdx].map((set, index) => index === editingSet.setIdx ? { ...set, reps: editingSet.reps, weight: editingSet.weight } : set) }));
@@ -5560,6 +5646,93 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     </div>
   ) : null;
 
+  const beginHistoryEdit = () => {
+    setHistoryEditOriginal(structuredClone(viewingSession));
+    setEditingHistorySession(true);
+    setViewingExercise(null);
+  };
+
+  const cancelHistoryEdit = () => {
+    setViewingSession(historyEditOriginal);
+    setHistoryEditOriginal(null);
+    setEditingHistorySession(false);
+  };
+
+  const updateHistorySet = (exerciseIndex, setIndex, field, value) => {
+    setViewingSession(current => ({
+      ...current,
+      exercises: (current.exercises || []).map((exercise, index) => index !== exerciseIndex ? exercise : {
+        ...exercise,
+        sets: (exercise.sets || []).map((set, index2) => index2 === setIndex ? { ...set, [field]: value } : set),
+      }),
+    }));
+  };
+
+  const deleteHistorySet = (exerciseIndex, setIndex) => {
+    setViewingSession(current => ({
+      ...current,
+      exercises: (current.exercises || []).map((exercise, index) => index !== exerciseIndex ? exercise : {
+        ...exercise,
+        sets: (exercise.sets || []).filter((_, index2) => index2 !== setIndex).map((set, index2) => ({ ...set, setNum: index2 + 1 })),
+      }),
+    }));
+  };
+
+  const saveHistoryEdit = async () => {
+    if (!viewingSession?.id || historySaving) return;
+    setHistorySaving(true);
+    try {
+      const updated = { ...viewingSession, total_volume: workoutVolume(viewingSession.exercises || []) };
+      const { error } = await supabase.from("workout_logs").update({ exercises: updated.exercises, total_volume: updated.total_volume }).eq("id", updated.id).eq("user_id", user.id);
+      if (error) throw error;
+
+      const { data: structuredSession } = await supabase.from("training_sessions").select("id").eq("user_id", user.id).eq("legacy_workout_log_id", String(updated.id)).maybeSingle();
+      if (structuredSession?.id) {
+        const { error: deleteError } = await supabase.from("training_sets").delete().eq("user_id", user.id).eq("session_id", structuredSession.id);
+        if (deleteError) throw deleteError;
+        const rows = (updated.exercises || []).flatMap(exercise => (exercise.sets || []).map((set, index) => ({
+          user_id: user.id,
+          session_id: structuredSession.id,
+          exercise_key: exerciseKey(exercise.name),
+          exercise_name: exercise.name,
+          set_index: index + 1,
+          set_kind: "working",
+          weight: Number(set.weight) || null,
+          reps: Number(set.reps) || null,
+          performed_at: updated.created_at || new Date(`${updated.date}T12:00:00Z`).toISOString(),
+        })));
+        if (rows.length) {
+          const { error: insertError } = await supabase.from("training_sets").insert(rows);
+          if (insertError) throw insertError;
+        }
+      }
+
+      setHistory(current => current.map(log => log.id === updated.id ? updated : log));
+      setViewingSession(updated);
+      setHistoryEditOriginal(null);
+      setEditingHistorySession(false);
+    } catch (error) {
+      console.error("Workout history edit error:", error.message);
+    } finally {
+      setHistorySaving(false);
+    }
+  };
+
+  const moveScheduledWorkout = async (sessionName, sourceDay, targetDay) => {
+    const updated = moveWorkoutDay(sessions, sessionName, sourceDay, targetDay);
+    if (updated === sessions) return;
+    setSessions(updated);
+    setSplit(previous => ({ ...(previous || {}), sessions: updated }));
+    await saveSplit(updated);
+  };
+
+  const finishWorkoutDayDrag = async (targetDay) => {
+    if (!draggedWorkoutDay) return;
+    const dragged = draggedWorkoutDay;
+    setDraggedWorkoutDay(null);
+    await moveScheduledWorkout(dragged.sessionName, dragged.sourceDay, targetDay);
+  };
+
   const askPlanCoach = async (suggestedQuestion) => {
     const question = (suggestedQuestion || coachQuestion).trim();
     if (!question || coachLoading) return;
@@ -5905,10 +6078,22 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               const isToday = day === homeDate.dayCode;
               const session = sessions.find(s => s.days?.includes(day));
               return (
-                <div key={day} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <div key={day} data-workout-day={day}
+                  onDragOver={event => event.preventDefault()}
+                  onDrop={event => { event.preventDefault(); finishWorkoutDayDrag(day); }}
+                  style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 0", borderBottom: `1px solid ${BORDER}`, background: draggedWorkoutDay && draggedWorkoutDay.sourceDay !== day ? "rgba(0,200,255,.025)" : "transparent" }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 32, color: isToday ? NEON : "#E0EAF0" }}>{day}</div>
                   <div style={{ flex: 1, fontSize: 11, color: session ? (isToday ? "#E0EAF0" : "#4A6070") : "#2A3A48" }}>{session ? `${session.name} · ${session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0} min` : "REST"}</div>
                   {isToday && <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, padding: "2px 7px", borderRadius: 10, background: "rgba(0,255,178,.1)", color: NEON, border: "1px solid rgba(0,255,178,.25)" }}>TODAY</span>}
+                  {session && <button type="button" draggable aria-label={`Move ${session.name} from ${day}`} title="Drag to another day"
+                    onDragStart={() => setDraggedWorkoutDay({ sessionName: session.name, sourceDay: day })}
+                    onDragEnd={() => setDraggedWorkoutDay(null)}
+                    onPointerDown={event => { event.currentTarget.setPointerCapture?.(event.pointerId); setDraggedWorkoutDay({ sessionName: session.name, sourceDay: day }); }}
+                    onPointerUp={event => {
+                      const targetDay = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("[data-workout-day]")?.dataset?.workoutDay;
+                      if (targetDay) finishWorkoutDayDrag(targetDay); else setDraggedWorkoutDay(null);
+                    }}
+                    style={{ background: "none", border: 0, color: draggedWorkoutDay?.sessionName === session.name ? NEON2 : "#334650", cursor: "grab", fontSize: 14, padding: "4px 6px", touchAction: "none", letterSpacing: -2 }}>⋮⋮</button>}
                 </div>
               );
             })}
@@ -6041,8 +6226,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
             {historyOpen && (
               <div style={{ marginTop: 16 }}>
+                {workoutInProgress && activeSession && (
+                  <button className="t3d-btn" style={{ width: "100%", marginBottom: 12, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", borderColor: NEON, background: "rgba(0,255,178,.06)" }} onClick={() => setView("workout")}>
+                    <span><span style={{ display: "block", color: NEON, fontSize: 9 }}>ACTIVE TODAY</span><span style={{ display: "block", marginTop: 4, color: "#E0EAF0" }}>{activeSession.name}</span></span>
+                    <span style={{ color: NEON }}>CONTINUE SESSION →</span>
+                  </button>
+                )}
                 {history.length === 0 ? (
-                  <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No workouts logged yet!</div>
+                  !workoutInProgress && <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No workouts logged yet!</div>
                 ) : history.map((log, i) => (
                   <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}`, cursor: "pointer" }}
                     onClick={() => { setViewingSession(log); setViewingExercise(null); }}>
@@ -6063,30 +6254,40 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {/* Session detail / exercise progression popup */}
           {viewingSession && (
             <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.92)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}
-              onClick={() => { setViewingSession(null); setViewingExercise(null); }}>
+              onClick={() => { setViewingSession(null); setViewingExercise(null); setEditingHistorySession(false); setHistoryEditOriginal(null); }}>
               <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380, maxHeight: "85vh", overflowY: "auto" }}
                 onClick={e => e.stopPropagation()}>
                 {!viewingExercise ? (
                   <>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2 }}>{viewingSession.session_name}</div>
-                      <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => setViewingSession(null)}>✕</div>
+                      <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => { setViewingSession(null); setEditingHistorySession(false); setHistoryEditOriginal(null); }}>✕</div>
                     </div>
-                    <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 18 }}>{viewingSession.date}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                      <div style={{ fontSize: 10, color: "#E0EAF0" }}>{viewingSession.date}</div>
+                      {!editingHistorySession ? <button className="t3d-btn t3d-btn-sm" onClick={beginHistoryEdit}>EDIT WORKOUT</button> : <div style={{ display: "flex", gap: 5 }}>
+                        <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={cancelHistoryEdit}>CANCEL</button>
+                        <button className="t3d-btn t3d-btn-sm" onClick={saveHistoryEdit} disabled={historySaving}>{historySaving ? "SAVING..." : "SAVE CHANGES"}</button>
+                      </div>}
+                    </div>
                     {(viewingSession.exercises || []).map((ex, i) => (
-                      <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: "pointer" }}
-                        onClick={() => setViewingExercise(ex.name)}>
+                      <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: editingHistorySession ? "default" : "pointer" }}
+                        onClick={() => { if (!editingHistorySession) setViewingExercise(ex.name); }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                           <div style={{ fontSize: 12 }}>{ex.name}</div>
-                          <div style={{ fontSize: 10, color: NEON2 }}>VIEW PROGRESS →</div>
+                          {!editingHistorySession && <div style={{ fontSize: 10, color: NEON2 }}>VIEW PROGRESS →</div>}
                         </div>
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {(ex.sets || []).map((s, j) => (
-                            <span key={j} style={{ fontSize: 10, color: "#E0EAF0", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: "3px 8px" }}>
-                              {s.weight || 0}kg × {s.reps || 0}
-                            </span>
-                          ))}
-                        </div>
+                        {editingHistorySession ? <div style={{ display: "grid", gap: 6 }}>
+                          {(ex.sets || []).map((set, setIndex) => <div key={setIndex} style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr auto", alignItems: "end", gap: 6 }}>
+                            <span style={{ color: "#6F8792", fontSize: 8, paddingBottom: 8 }}>S{setIndex + 1}</span>
+                            <label style={{ color: "#8AABB8", fontSize: 7 }}>KG<input className="t3d-input" type="number" inputMode="decimal" value={set.weight ?? ""} onChange={event => updateHistorySet(i, setIndex, "weight", event.target.value)} /></label>
+                            <label style={{ color: "#8AABB8", fontSize: 7 }}>REPS<input className="t3d-input" type="number" inputMode="numeric" value={set.reps ?? ""} onChange={event => updateHistorySet(i, setIndex, "reps", event.target.value)} /></label>
+                            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "7px 9px" }} onClick={() => deleteHistorySet(i, setIndex)}>×</button>
+                          </div>)}
+                          {(ex.sets || []).length === 0 && <div style={{ color: "#6F8792", fontSize: 9 }}>No sets remain for this exercise.</div>}
+                        </div> : <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {(ex.sets || []).map((s, j) => <span key={j} style={{ fontSize: 10, color: "#E0EAF0", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: "3px 8px" }}>{s.weight || 0}kg × {s.reps || 0}</span>)}
+                        </div>}
                       </div>
                     ))}
                   </>
