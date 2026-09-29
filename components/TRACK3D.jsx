@@ -7,6 +7,7 @@ import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
+import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -4212,6 +4213,11 @@ function Fitness({ user, isActive = true }) {
   const [coachMessages, setCoachMessages] = useState([]);
   const [coachQuestion, setCoachQuestion] = useState("");
   const [coachLoading, setCoachLoading] = useState(false);
+  const [planChangeOpen, setPlanChangeOpen] = useState(false);
+  const [planChangeMessages, setPlanChangeMessages] = useState([]);
+  const [planChangeInput, setPlanChangeInput] = useState("");
+  const [planChangeLoading, setPlanChangeLoading] = useState(false);
+  const [planChangeRecommendation, setPlanChangeRecommendation] = useState(null);
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
@@ -4365,7 +4371,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       }
       // A generous window so an exercise's history still surfaces ("last time")
       // even after a session gets restructured or an exercise sits unused for a while.
-      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).eq("in_progress", false).order("created_at", { ascending: false }).limit(60);
+      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).eq("in_progress", false).order("created_at", { ascending: false }).limit(250);
       if (logs) setHistory(logs);
       const { data: memoryRow } = await supabase.from("coach_memory").select("summary").eq("user_id", user.id).single();
       if (memoryRow?.summary) setCoachMemory(memoryRow.summary);
@@ -4479,11 +4485,11 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   }, [completedSets, workoutInProgress, activeSession]);
 
   // Get last session's data for a specific exercise
-  const getLastSessionData = (exName) => {
+  const getLastSessionData = (exercise) => {
     const currentContext = activeSession?.gymContext || { type: "usual", name: "" };
     if (currentContext.type === "away") return null;
     for (const log of history) {
-      const ex = log.exercises?.find(e => e.name?.toLowerCase() === exName?.toLowerCase());
+      const ex = log.exercises?.find(item => exerciseMatchesHistory(exercise, item.name));
       const savedContext = ex?.context || { type: "usual", name: "" };
       const sameContext = currentContext.type === "usual"
         ? savedContext.type === "usual"
@@ -4493,13 +4499,13 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     return null;
   };
 
-  const getExerciseHistory = exName => history.flatMap(log => {
-    const exercise = log.exercises?.find(item => item.name?.toLowerCase() === exName?.toLowerCase());
-    return exercise ? [{ ...exercise, date: log.date }] : [];
+  const getExerciseHistory = exercise => history.flatMap(log => {
+    const historicalExercise = log.exercises?.find(item => exerciseMatchesHistory(exercise, item.name));
+    return historicalExercise ? [{ ...historicalExercise, date: log.date }] : [];
   });
 
   const getProgressionRecommendation = exercise => {
-    const exposures = getExerciseHistory(exercise.name);
+    const exposures = getExerciseHistory(exercise);
     const lastExposure = exposures[0];
     if (!lastExposure?.sets?.length) return null;
     const currentWeight = Number(lastExposure.sets[0]?.weight) || 0;
@@ -4522,7 +4528,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   };
 
   const getWeightGuidance = (exercise, setIdx) => {
-    const lastSets = getLastSessionData(exercise.name);
+    const lastSets = getLastSessionData(exercise);
     if (!lastSets?.[setIdx]) return null;
     const recommendation = getProgressionRecommendation(exercise);
     if (!recommendation || Array.isArray(recommendation)) return null;
@@ -4532,10 +4538,10 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   };
 
   // All logged occurrences of an exercise, oldest first, for the progression graph
-  const getExerciseProgression = (exName) => {
+  const getExerciseProgression = (exercise) => {
     return history
       .map(log => {
-        const ex = log.exercises?.find(e => e.name?.toLowerCase() === exName?.toLowerCase());
+        const ex = log.exercises?.find(item => exerciseMatchesHistory(exercise, item.name));
         return ex ? { date: log.date, sets: ex.sets || [] } : null;
       })
       .filter(Boolean)
@@ -4680,7 +4686,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const reps = currentInputs[eIdx]?.reps || "";
     if (!weight || !reps) return;
 
-    const priorSets = getExerciseHistory(activeSession.exercises[eIdx].name).flatMap(exposure => exposure.sets || []);
+    const priorSets = getExerciseHistory(activeSession.exercises[eIdx]).flatMap(exposure => exposure.sets || []);
     const personalBest = detectPersonalBest({ weight, reps }, priorSets);
     const progressionDecision = getProgressionRecommendation(activeSession.exercises[eIdx]);
     const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision };
@@ -4897,7 +4903,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const currentSetRepRange = (Array.isArray(currentExercise.reps) ? currentExercise.reps[sIdx] : currentExercise.reps) || "8-12";
     const weightGuidance = getWeightGuidance(currentExercise, sIdx);
     const suggestedWeight = weightGuidance?.weight;
-    const lastSets = getLastSessionData(currentExercise.name);
+    const lastSets = getLastSessionData(currentExercise);
     const weight = currentInputs[exerciseIdx]?.weight || "";
     const reps = currentInputs[exerciseIdx]?.reps || "";
     const valuesLookSwapped = Number(reps) >= 30 && Number(weight) > 0 && Number(weight) <= 30;
@@ -5059,6 +5065,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
           )}
           {discardWorkoutDialog}
+
           {editingSet && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
               <div className="t3d-card" style={{ width: "100%", maxWidth: 330 }}>
@@ -5440,6 +5447,119 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     );
   }
 
+  const openPlanChangeCoach = () => {
+    setPlanChangeMessages([{
+      role: "assistant",
+      content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
+    }]);
+    setPlanChangeInput("");
+    setPlanChangeRecommendation(null);
+    setPlanChangeOpen(true);
+  };
+
+  const askPlanChangeCoach = async (suggestedMessage) => {
+    const message = String(suggestedMessage || planChangeInput).trim();
+    if (!message || planChangeLoading) return;
+    const nextMessages = [...planChangeMessages, { role: "user", content: message }];
+    setPlanChangeMessages(nextMessages);
+    setPlanChangeInput("");
+    setPlanChangeLoading(true);
+    setPlanChangeRecommendation(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Sign in to use Coach.");
+      const response = await fetch("/api/plan-change", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({
+          messages: nextMessages.filter(item => item.role === "user" || item.role === "assistant"),
+          currentPlan: sessions,
+          recentWorkouts: history.slice(0, 30),
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Coach request failed");
+      setPlanChangeMessages([...nextMessages, { role: "assistant", content: result.message }]);
+      setPlanChangeRecommendation(result);
+    } catch (error) {
+      setPlanChangeMessages([...nextMessages, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again." }]);
+    } finally {
+      setPlanChangeLoading(false);
+    }
+  };
+
+  const applyTargetedPlanChanges = async () => {
+    const changes = planChangeRecommendation?.changes || [];
+    if (!changes.length) return;
+    const updated = applyPlanChangeProposal(sessions, changes);
+    await saveSplit(updated);
+    setPlanChangeRecommendation(null);
+    setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Those targeted changes are now saved. Your completed workout and exercise history has not been removed." }]);
+  };
+
+  const startFullPlanRebuild = () => {
+    setPlanChangeOpen(false);
+    setSplit(null);
+    setSessions([]);
+    setSetupStep(0);
+    setAiStep(0);
+    setAiAnswers({});
+    setAiPlan(null);
+    setAiPlanError("");
+    setView("setup");
+  };
+
+  const planChangeDialog = planChangeOpen ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 220, padding: 18 }}>
+      <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="plan-change-title" style={{ width: "100%", maxWidth: 620, maxHeight: "90dvh", overflowY: "auto", borderColor: "rgba(0,200,255,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12 }}>
+          <div id="plan-change-title" className="t3d-ctitle" style={{ color: NEON2, margin: 0 }}>REVIEW PLAN WITH COACH</div>
+          <button className="t3d-btn t3d-btn-sm" onClick={() => setPlanChangeOpen(false)}>CLOSE</button>
+        </div>
+        <div style={{ padding: "9px 11px", marginBottom: 12, background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.2)", borderRadius: 6, color: "#9CB3BD", fontSize: 10, lineHeight: 1.5 }}>
+          Nothing changes until you approve it. Completed workouts and exercise records remain in your history.
+        </div>
+        <div role="log" aria-live="polite" style={{ maxHeight: 290, overflowY: "auto", marginBottom: 12 }}>
+          {planChangeMessages.map((message, index) => (
+            <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.18)" : "rgba(0,255,178,.12)"}` }}>
+              <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
+              <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.content}</span>
+            </div>
+          ))}
+          {planChangeLoading && <div style={{ color: "#6F8792", fontSize: 10, padding: 8 }}>Coach is reviewing your plan and history...</div>}
+        </div>
+
+        {planChangeMessages.length === 1 && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {["A few exercises don't suit me", "I want to change sets or reps", "My available days changed", "My main goal changed", "I think I need a full rebuild"].map(prompt => (
+              <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanChangeCoach(prompt)}>{prompt}</button>
+            ))}
+          </div>
+        )}
+
+        {planChangeRecommendation?.changes?.length > 0 && (
+          <div style={{ marginBottom: 12, padding: 11, background: "rgba(255,181,71,.05)", border: "1px solid rgba(255,181,71,.3)", borderRadius: 6 }}>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#FFB547", letterSpacing: 1, marginBottom: 8 }}>PROPOSED TARGETED CHANGES</div>
+            {planChangeRecommendation.changes.map((change, index) => <div key={index} style={{ fontSize: 10, color: "#D6E1E5", lineHeight: 1.55, marginBottom: 4 }}>• {describePlanChange(change)}</div>)}
+            <button className="t3d-btn" style={{ width: "100%", marginTop: 10 }} onClick={applyTargetedPlanChanges}>APPROVE &amp; SAVE THESE CHANGES</button>
+          </div>
+        )}
+
+        {planChangeRecommendation?.recommendation === "full_rebuild" && (
+          <div style={{ marginBottom: 12, padding: 11, background: "rgba(255,45,120,.05)", border: "1px solid rgba(255,45,120,.3)", borderRadius: 6 }}>
+            <div style={{ fontSize: 10, color: "#C9D7DC", lineHeight: 1.55, marginBottom: 9 }}>The coach recommends rebuilding the programme. Your existing plan stays saved until a replacement is completed, and all workout history remains.</div>
+            <button className="t3d-btn t3d-btn-red" style={{ width: "100%" }} onClick={startFullPlanRebuild}>CONTINUE TO FULL PLAN REBUILD</button>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 7 }}>
+          <input className="t3d-ai-input" placeholder="Tell the coach what you want to change..." value={planChangeInput} onChange={event => setPlanChangeInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanChangeCoach(); } }} />
+          <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanChangeCoach()} disabled={planChangeLoading || !planChangeInput.trim()}>{planChangeLoading ? "REVIEWING..." : "SEND"}</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   const askPlanCoach = async (suggestedQuestion) => {
     const question = (suggestedQuestion || coachQuestion).trim();
     if (!question || coachLoading) return;
@@ -5704,6 +5824,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           </div>}
 
           {discardWorkoutDialog}
+          {planChangeDialog}
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle">THIS WEEK</div>
@@ -5771,7 +5892,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               <div className="t3d-ctitle" style={{ margin: 0 }}>RECOMMENDED WEEKLY SPLIT</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setSplit(null); setSessions([]); setSetupStep(0); setView("setup"); }}>CHANGE PLAN</button>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={openPlanChangeCoach}>CHANGE PLAN</button>
               </div>
             </div>
             <div style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${programmeApproved ? "rgba(0,255,178,.3)" : "rgba(255,181,71,.3)"}`, borderRadius: 6, background: programmeApproved ? "rgba(0,255,178,.04)" : "rgba(255,181,71,.04)" }}>
