@@ -5600,7 +5600,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="plan-change-title" style={{ width: "100%", maxWidth: 620, maxHeight: "90dvh", overflowY: "auto", borderColor: "rgba(0,200,255,.4)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12 }}>
           <div id="plan-change-title" className="t3d-ctitle" style={{ color: NEON2, margin: 0 }}>REVIEW PLAN WITH COACH</div>
-          <button className="t3d-btn t3d-btn-sm" onClick={() => setPlanChangeOpen(false)}>CLOSE</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setPlanChangeOpen(false)}>CLOSE</button>
         </div>
         <div style={{ padding: "9px 11px", marginBottom: 12, background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.2)", borderRadius: 6, color: "#9CB3BD", fontSize: 10, lineHeight: 1.5 }}>
           Nothing changes until you approve it. Completed workouts and exercise records remain in your history.
@@ -5979,7 +5979,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {showOtherWorkouts && <div ref={otherWorkoutsRef} className="t3d-card" style={{ marginBottom: 16, scrollMarginTop: 16 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>OTHER WORKOUTS</div>
-              <button className="t3d-btn t3d-btn-sm" onClick={() => setShowOtherWorkouts(false)}>CLOSE ✕</button>
+              <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setShowOtherWorkouts(false)}>CLOSE ✕</button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 9 }}>
               {sessions.filter(session => session !== recommendedSession).map((session, index) => (
@@ -6104,7 +6104,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="approval-review-title" style={{ width: "100%", maxWidth: 620, maxHeight: "88dvh", overflowY: "auto", borderColor: "rgba(255,181,71,.45)" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12 }}>
                   <div id="approval-review-title" className="t3d-ctitle" style={{ color: "#FFB547", margin: 0 }}>REVIEW BEFORE APPROVAL</div>
-                  <button className="t3d-btn t3d-btn-sm" onClick={() => setApprovalReview(null)}>CLOSE</button>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setApprovalReview(null)}>CLOSE</button>
                 </div>
                 <p style={{ fontSize: 12, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 14 }}>
                   Approval is optional. It means committing to these sessions for eight weeks, completing them within each rolling eight-day cycle, then reviewing progress, stalls or the need for a deload.
@@ -6261,7 +6261,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   <>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2 }}>{viewingSession.session_name}</div>
-                      <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => { setViewingSession(null); setEditingHistorySession(false); setHistoryEditOriginal(null); }}>✕</div>
+                      <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label="Close workout history" onClick={() => { setViewingSession(null); setEditingHistorySession(false); setHistoryEditOriginal(null); }}>✕</button>
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 14 }}>
                       <div style={{ fontSize: 10, color: "#E0EAF0" }}>{viewingSession.date}</div>
@@ -6295,7 +6295,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   <>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2 }}>{viewingExercise}</div>
-                      <div style={{ fontSize: 18, color: "#E0EAF0", cursor: "pointer" }} onClick={() => setViewingSession(null)}>✕</div>
+                      <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label="Close exercise progress" onClick={() => setViewingSession(null)}>✕</button>
                     </div>
                     <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 16 }} onClick={() => setViewingExercise(null)}>← BACK TO SESSION</button>
                     <ExerciseLineChart points={getExerciseProgression(viewingExercise)} />

@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
 const prescriptionFields = {
-  sets: z.number().int().min(1).max(10).optional(),
+  sets: z.coerce.number().int().min(1).max(10).optional(),
   reps: z.union([z.string().min(1), z.array(z.string().min(1)).min(1).max(10)]).optional(),
   tempo: z.string().min(1).optional(),
   reason: z.string().min(1),
@@ -53,12 +53,16 @@ export async function POST(request) {
 
     const currentPlan = Array.isArray(body?.currentPlan) ? body.currentPlan : [];
     const recentWorkouts = Array.isArray(body?.recentWorkouts) ? body.recentWorkouts.slice(0, 30) : [];
-    const { data: structuredHistory } = await supabase.rpc("search_training_history", {
+    const { data: historyData, error: historyError } = await supabase.rpc("search_training_history", {
       exercise_search: null,
-      start_date: null,
-      end_date: null,
+      from_date: null,
+      to_date: null,
       result_limit: 120,
     });
+    // Recent legacy logs still give the coach useful context if an older
+    // deployment does not have the structured-history function yet.
+    const structuredHistory = historyError ? [] : (historyData || []);
+    if (historyError) console.warn("Plan change history fallback:", historyError.message);
 
     const system = `You are TRACK3D's plan-change coach. Your job is to prevent unnecessary programme resets while respecting the user's goals and preferences.
 
@@ -84,7 +88,22 @@ Return only JSON:
     if (!provider.ok) return Response.json({ error: "Coach provider failed" }, { status: 502 });
     const payload = await provider.json();
     const text = payload.content?.map((block) => block.text || "").join("") || "";
-    const result = responseSchema.parse(extractJson(text));
+    let result;
+    try {
+      const raw = extractJson(text);
+      const validated = responseSchema.safeParse(raw);
+      result = validated.success ? validated.data : {
+        message: String(raw?.message || "I need one more detail before I can recommend a safe plan change."),
+        recommendation: ["clarify", "targeted", "full_rebuild"].includes(raw?.recommendation) ? raw.recommendation : "clarify",
+        changes: [],
+      };
+    } catch {
+      result = {
+        message: text.replace(/```json|```/g, "").trim() || "I need one more detail before I can recommend a safe plan change.",
+        recommendation: "clarify",
+        changes: [],
+      };
+    }
     return Response.json(result);
   } catch (error) {
     console.error("Plan change coach error:", error.message);
