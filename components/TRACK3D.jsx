@@ -9,7 +9,7 @@ import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-dat
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
 import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
-import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -6769,6 +6769,12 @@ function Nutrition({ user, userSessions }) {
   const [savingPlan, setSavingPlan] = useState(false);
   const [quickLogStatus, setQuickLogStatus] = useState("");
   const [nutritionSaveError, setNutritionSaveError] = useState("");
+  const [mealLibrary, setMealLibrary] = useState([]);
+  const [weeklyMealPlan, setWeeklyMealPlan] = useState({});
+  const [plannerDate, setPlannerDate] = useState(() => { const date = new Date(); date.setDate(date.getDate() + 1); return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`; });
+  const [showLibraryForm, setShowLibraryForm] = useState(false);
+  const [libraryMealDraft, setLibraryMealDraft] = useState({ name: "", calories: "", protein: "", carbs: "", fats: "" });
+  const [nutritionPlanningStatus, setNutritionPlanningStatus] = useState("");
 
   const getLocalDate = () => {
     const d = new Date();
@@ -6795,6 +6801,8 @@ function Nutrition({ user, userSessions }) {
         setPlan(planData);
         setNutritionStyle(inferNutritionStyle(planData.meals || []));
         setMealsPerDay(Math.max(1, planData.meals?.length || 4));
+        setMealLibrary(mergeMealLibrary(planData.meal_library || [], planData.meals || []));
+        setWeeklyMealPlan(planData.weekly_meal_plan || {});
       }
       const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
       if (logData) {
@@ -6846,10 +6854,49 @@ function Nutrition({ user, userSessions }) {
     }
   };
 
+  const persistNutritionPlanning = async (library = mealLibrary, datedPlan = weeklyMealPlan) => {
+    if (!user) return false;
+    setNutritionPlanningStatus("SAVING...");
+    const { error } = await supabase.from("nutrition_plans").update({ meal_library: library, weekly_meal_plan: datedPlan, updated_at: new Date().toISOString() }).eq("user_id", user.id);
+    if (error) {
+      console.error("Nutrition planning save error:", error.message);
+      setNutritionPlanningStatus("COULD NOT SAVE — DATABASE UPDATE REQUIRED");
+      return false;
+    }
+    setNutritionPlanningStatus("SAVED");
+    return true;
+  };
+
+  const saveLibraryMeal = async () => {
+    if (!libraryMealDraft.name.trim()) return;
+    const meal = {
+      id: globalThis.crypto?.randomUUID?.() || `meal-${Date.now()}`,
+      name: libraryMealDraft.name.trim(),
+      ingredients: [],
+      mealType: "fixed",
+      repeatDaily: true,
+      calories: Number(libraryMealDraft.calories) || 0,
+      protein: Number(libraryMealDraft.protein) || 0,
+      carbs: Number(libraryMealDraft.carbs) || 0,
+      fats: Number(libraryMealDraft.fats) || 0,
+    };
+    const next = mergeMealLibrary(mealLibrary, [meal]);
+    setMealLibrary(next);
+    setLibraryMealDraft({ name: "", calories: "", protein: "", carbs: "", fats: "" });
+    setShowLibraryForm(false);
+    await persistNutritionPlanning(next, weeklyMealPlan);
+  };
+
+  const updateDatedMealPlan = async (dateKey, meals) => {
+    const next = { ...weeklyMealPlan, [dateKey]: meals };
+    setWeeklyMealPlan(next);
+    await persistNutritionPlanning(mealLibrary, next);
+  };
+
   const saveLog = async (resultsOverride = mealResults, reviewComplete = true) => {
     if (!user) return false;
     setNutritionSaveError("");
-    const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
+    const activeMeals = weeklyMealPlan[today]?.length ? weeklyMealPlan[today] : isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
     const totals = calculateLoggedNutrition(activeMeals, resultsOverride, offPlanCals);
     const row = {
       meals_completed: { ...resultsOverride, _review_complete: reviewComplete },
@@ -6876,7 +6923,7 @@ function Nutrition({ user, userSessions }) {
 
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
-    const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
+    const activeMeals = weeklyMealPlan[today]?.length ? weeklyMealPlan[today] : isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
     const totals = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
     const completedCount = totals.completedMeals;
     const totalCals = totals.calories;
@@ -6925,10 +6972,21 @@ function Nutrition({ user, userSessions }) {
     setShowAiQuestions(false);
   };
 
-  const activeMeals = plan ? (isTrainingDay ? (plan.meals || []) : (plan.rest_day_meals || plan.meals || [])) : [];
+  const scheduledMealsToday = weeklyMealPlan[today] || [];
+  const activeMeals = scheduledMealsToday.length ? scheduledMealsToday : plan ? (isTrainingDay ? (plan.meals || []) : (plan.rest_day_meals || plan.meals || [])) : [];
   const activeNutritionStyle = inferNutritionStyle(activeMeals);
   const loggedNutrition = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
   const remainingNutrition = remainingNutritionTargets({ calories: plan?.daily_calories, protein: plan?.protein_target, carbs: plan?.carbs_target, fats: plan?.fats_target }, loggedNutrition);
+  const planningDates = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() + index + 1);
+    const key = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+    return { key, label: index === 0 ? "TOMORROW" : date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).toUpperCase() };
+  });
+  const plannerMeals = weeklyMealPlan[plannerDate] || [];
+  const plannerDayCode = plannerDate ? ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${plannerDate}T12:00:00`).getDay()] : "";
+  const plannerIsTrainingDay = userSessions?.some(session => session.days?.includes(plannerDayCode));
+  const plannerTemplateMeals = plannerIsTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals?.length ? plan.rest_day_meals : plan?.meals || []);
 
   const last7Logs = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() - (6-i));
@@ -7305,20 +7363,25 @@ function Nutrition({ user, userSessions }) {
                   <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>QUESTION {aiNutritionStep+1} OF {AI_NUTRITION_QUESTIONS.length}</div>
                   <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>{AI_NUTRITION_QUESTIONS[aiNutritionStep].q}</div>
                   {AI_NUTRITION_QUESTIONS[aiNutritionStep].type === "choice" && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
-                      {AI_NUTRITION_QUESTIONS[aiNutritionStep].options.map((opt, i) => (
-                        <button key={i} className="t3d-btn" style={{ textAlign: "left", padding: "11px 16px", fontSize: 11,
-                          background: aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id]===opt?"rgba(0,255,178,.12)":"transparent",
-                          borderColor: aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id]===opt?NEON:BORDER,
-                          color: aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id]===opt?NEON:"#4A6070" }}
-                          onClick={() => {
-                            setAiNutritionAnswers(a => ({ ...a, [AI_NUTRITION_QUESTIONS[aiNutritionStep].id]: opt }));
-                            setTimeout(() => {
-                              if (aiNutritionStep < AI_NUTRITION_QUESTIONS.length-1) setAiNutritionStep(s => s+1);
-                              else buildAIMeals();
-                            }, 300);
-                          }}>{opt}</button>
-                      ))}
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+                        {AI_NUTRITION_QUESTIONS[aiNutritionStep].options.map((opt, i) => (
+                          <button key={i} className="t3d-btn" style={{ textAlign: "left", padding: "11px 16px", fontSize: 11,
+                            background: aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id]===opt?"rgba(0,255,178,.12)":"transparent",
+                            borderColor: aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id]===opt?NEON:BORDER,
+                            color: aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id]===opt?NEON:"#4A6070" }}
+                            onClick={() => {
+                              setAiNutritionAnswers(a => ({ ...a, [AI_NUTRITION_QUESTIONS[aiNutritionStep].id]: opt }));
+                              setTimeout(() => {
+                                if (aiNutritionStep < AI_NUTRITION_QUESTIONS.length-1) setAiNutritionStep(s => s+1);
+                                else buildAIMeals();
+                              }, 300);
+                            }}>{opt}</button>
+                        ))}
+                      </div>
+                      <div style={{ color: "#8AABB8", fontSize: 9, marginBottom: 6 }}>OR TYPE YOUR OWN ANSWER</div>
+                      <input className="t3d-input" placeholder="Type what suits you..." value={aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id] || ""} onChange={event => setAiNutritionAnswers(answers => ({ ...answers, [AI_NUTRITION_QUESTIONS[aiNutritionStep].id]: event.target.value }))} />
+                      <button className="t3d-btn" style={{ width: "100%", marginTop: 9 }} disabled={!String(aiNutritionAnswers[AI_NUTRITION_QUESTIONS[aiNutritionStep].id] || "").trim()} onClick={() => { if (aiNutritionStep < AI_NUTRITION_QUESTIONS.length - 1) setAiNutritionStep(step => step + 1); else buildAIMeals(); }}>{aiNutritionStep < AI_NUTRITION_QUESTIONS.length - 1 ? "USE MY ANSWER →" : "BUILD MY PLAN"}</button>
                     </div>
                   )}
                   {AI_NUTRITION_QUESTIONS[aiNutritionStep].type === "text" && (
@@ -7464,7 +7527,10 @@ function Nutrition({ user, userSessions }) {
                   const ok = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
                   if (!ok) { setPlanSaveError(true); return; }
-                  setPlan({ meals: preparedPlanMeals, rest_day_meals: preparedRestDayMeals, daily_calories: realMacros.calories, protein_target: realMacros.protein, carbs_target: realMacros.carbs, fats_target: realMacros.fats, goal });
+                  const nextLibrary = mergeMealLibrary(mealLibrary, preparedPlanMeals);
+                  setMealLibrary(nextLibrary);
+                  await persistNutritionPlanning(nextLibrary, weeklyMealPlan);
+                  setPlan({ meals: preparedPlanMeals, rest_day_meals: preparedRestDayMeals, meal_library: nextLibrary, weekly_meal_plan: weeklyMealPlan, daily_calories: realMacros.calories, protein_target: realMacros.protein, carbs_target: realMacros.carbs, fats_target: realMacros.fats, goal });
                   setView("home");
                 }}>{savingPlan ? "SAVING..." : "SAVE PLAN ✓"}</button>
               </div>
@@ -7581,6 +7647,45 @@ function Nutrition({ user, userSessions }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, textAlign: "center" }}>
               {[["calories","KCAL",NEON],["protein","PROTEIN",NEON2],["carbs","CARBS","#FF8C00"],["fats","FATS","#C5D6DC"]].map(([key,label,color]) => <div key={key} style={{ padding: "8px 3px", background: SURFACE2, borderRadius: 5 }}><div style={{ color, fontSize: 13, fontWeight: 700 }}>{remainingNutrition[key]}{key === "calories" ? "" : "g"}</div><div style={{ color: "#6F8792", fontSize: 7, marginTop: 3 }}>{label}</div></div>)}
             </div>
+          </div>
+
+          {activeNutritionStyle !== "fixed" && <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div className="t3d-ctitle">PLAN TOMORROW &amp; THE WEEK</div>
+            <div style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.55, marginBottom: 12 }}>Decide the night before what you are aiming for. Repeated meals, library meals and flexible slots can all be mixed.</div>
+            <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 7, marginBottom: 10 }}>
+              {planningDates.map(date => <button key={date.key} className="t3d-btn t3d-btn-sm" onClick={() => setPlannerDate(date.key)} style={{ flex: "0 0 auto", background: plannerDate === date.key ? "rgba(0,200,255,.12)" : "transparent", borderColor: plannerDate === date.key ? NEON2 : BORDER, color: plannerDate === date.key ? NEON2 : "#8AABB8" }}>{date.label}{weeklyMealPlan[date.key]?.length ? ` · ${weeklyMealPlan[date.key].length}` : ""}</button>)}
+            </div>
+            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => updateDatedMealPlan(plannerDate, plannerTemplateMeals.map(meal => ({ ...meal, plannedId: globalThis.crypto?.randomUUID?.() || `planned-${Date.now()}-${Math.random()}` })))}>USE {plannerIsTrainingDay ? "TRAINING" : "DAILY"} TEMPLATE</button>
+              <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => {
+                const flexibleTemplate = (plan?.meals || []).find(isFlexibleMeal) || { name: "Flexible meal", mealType: "flexible", calories: Math.round((plan?.daily_calories || 0) / Math.max(1, plan?.meals?.length || 4)), protein: Math.round((plan?.protein_target || 0) / Math.max(1, plan?.meals?.length || 4)), carbs: Math.round((plan?.carbs_target || 0) / Math.max(1, plan?.meals?.length || 4)), fats: Math.round((plan?.fats_target || 0) / Math.max(1, plan?.meals?.length || 4)) };
+                updateDatedMealPlan(plannerDate, [...plannerMeals, { ...flexibleTemplate, plannedId: globalThis.crypto?.randomUUID?.() || `planned-${Date.now()}` }]);
+              }}>+ FLEXIBLE SLOT</button>
+            </div>
+            {mealLibrary.length > 0 && <div style={{ marginBottom: 12 }}>
+              <div style={{ color: "#8AABB8", fontSize: 8, letterSpacing: 1, marginBottom: 6 }}>ADD FROM YOUR LIBRARY</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{mealLibrary.map((meal, index) => <button key={meal.id || `${meal.name}-${index}`} className="t3d-btn t3d-btn-sm" onClick={() => updateDatedMealPlan(plannerDate, [...plannerMeals, { ...meal, plannedId: globalThis.crypto?.randomUUID?.() || `planned-${Date.now()}-${index}` }])}>+ {meal.name}</button>)}</div>
+            </div>}
+            <div style={{ borderTop: `1px solid ${BORDER}`, paddingTop: 9 }}>
+              <div style={{ color: NEON2, fontFamily: "'Orbitron',monospace", fontSize: 9, letterSpacing: 1, marginBottom: 7 }}>{planningDates.find(date => date.key === plannerDate)?.label || plannerDate} PLAN</div>
+              {plannerMeals.length === 0 ? <div style={{ color: "#6F8792", fontSize: 10, padding: "8px 0" }}>Nothing planned yet. Use your template or add meals from the library.</div> : plannerMeals.map((meal, index) => <div key={meal.plannedId || `${meal.name}-${index}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
+                <div style={{ flex: 1 }}><div style={{ color: isFlexibleMeal(meal) ? NEON2 : "#E0EAF0", fontSize: 11 }}>Meal {index + 1} · {meal.name}</div><div style={{ color: "#6F8792", fontSize: 8 }}>{meal.calories || 0} kcal · {meal.protein || 0}g protein</div></div>
+                <button aria-label={`Remove ${meal.name} from ${plannerDate}`} className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => updateDatedMealPlan(plannerDate, plannerMeals.filter((_, mealIndex) => mealIndex !== index))}>×</button>
+              </div>)}
+            </div>
+            {nutritionPlanningStatus && <div role="status" style={{ color: nutritionPlanningStatus === "SAVED" ? NEON : nutritionPlanningStatus.startsWith("COULD") ? NEON3 : "#8AABB8", fontSize: 8, marginTop: 8 }}>{nutritionPlanningStatus}</div>}
+          </div>}
+
+          <div className="t3d-card" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><div className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</div><div style={{ color: "#8AABB8", fontSize: 9 }}>Save meals you enjoy and reuse them when planning the week.</div></div><button className="t3d-btn t3d-btn-sm" onClick={() => setShowLibraryForm(value => !value)}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button></div>
+            {showLibraryForm && <div style={{ padding: 11, background: SURFACE2, borderRadius: 6, marginBottom: 10 }}>
+              <input className="t3d-input" placeholder="Meal name" value={libraryMealDraft.name} onChange={event => setLibraryMealDraft(meal => ({ ...meal, name: event.target.value }))} style={{ marginBottom: 8 }} />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
+                {[["calories","KCAL"],["protein","P (g)"],["carbs","C (g)"],["fats","F (g)"]].map(([key,label]) => <label key={key} style={{ color: "#6F8792", fontSize: 7 }}>{label}<input className="t3d-input" type="number" inputMode="decimal" value={libraryMealDraft[key]} onChange={event => setLibraryMealDraft(meal => ({ ...meal, [key]: event.target.value }))} style={{ padding: "7px 4px", marginTop: 4 }} /></label>)}
+              </div>
+              <button className="t3d-btn" disabled={!libraryMealDraft.name.trim()} onClick={saveLibraryMeal} style={{ width: "100%", marginTop: 9 }}>SAVE TO LIBRARY</button>
+            </div>}
+            {mealLibrary.length === 0 ? <div style={{ color: "#6F8792", fontSize: 10 }}>Your repeated meals will appear here automatically.</div> : mealLibrary.map((meal, index) => <div key={meal.id || `${meal.name}-${index}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}><div style={{ color: "#E0EAF0", fontSize: 11 }}>{meal.name}</div><div style={{ color: "#8AABB8", fontSize: 9 }}>{meal.calories || 0} kcal · {meal.protein || 0}g P</div></div>)}
           </div>
 
           {/* Log meals as the day happens */}

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateLoggedNutrition, inferNutritionStyle, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan.js";
+import { calculateLoggedNutrition, inferNutritionStyle, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan.js";
 
 const targets = { calories: 2200, protein: 160, carbs: 250, fats: 65 };
 
@@ -42,4 +42,16 @@ test("logged totals use planned macros for fixed meals and actual macros for fle
   const totals = calculateLoggedNutrition(meals, { 0: true, 1: { completed: true, calories: 650, protein: 42, carbs: 70, fats: 18 } }, 100);
   assert.deepEqual(totals, { calories: 1150, protein: 72, carbs: 120, fats: 28, completedMeals: 2 });
   assert.deepEqual(remainingNutritionTargets(targets, totals), { calories: 1050, protein: 88, carbs: 130, fats: 37 });
+});
+
+test("meal library merges repeat meals by name without duplicating them", () => {
+  const merged = mergeMealLibrary([{ id: "breakfast", name: "Breakfast", calories: 350 }], [
+    { name: "breakfast", calories: 400, protein: 30 },
+    { name: "Flexible meal 2", mealType: "flexible", calories: 500 },
+    { name: "Final meal", calories: 300, protein: 25 },
+  ]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].id, "breakfast");
+  assert.equal(merged[0].calories, 400);
+  assert.equal(merged[1].name, "Final meal");
 });
