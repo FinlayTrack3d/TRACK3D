@@ -260,11 +260,52 @@ const css = `
 `;
 
 // ─── Score Ring ───────────────────────────────────────────────────────────────
-function ScoreRing({ score, size = 108 }) {
+// Weight is stored in kg; stone and pounds are converted on entry.
+const KG_PER_LB = 0.45359237;
+function WeightEntry({ kgValue, onKgChange, unit, onUnitChange }) {
+  const totalLb = Number(kgValue) > 0 ? Number(kgValue) / KG_PER_LB : 0;
+  const [stone, setStone] = useState(totalLb ? String(Math.floor(totalLb / 14)) : "");
+  const [pounds, setPounds] = useState(totalLb ? String(Math.round((totalLb % 14) * 10) / 10) : "");
+  const updateImperial = (nextStone, nextPounds) => {
+    setStone(nextStone);
+    setPounds(nextPounds);
+    const lb = (Number(nextStone) || 0) * 14 + (Number(nextPounds) || 0);
+    onKgChange(lb > 0 ? String(Math.round(lb * KG_PER_LB * 10) / 10) : "");
+  };
+  const unitButton = (value, label) => (
+    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={unit === value} onClick={() => onUnitChange(value)}
+      style={{ flex: 1, minHeight: 40, borderColor: unit === value ? NEON : BORDER, color: unit === value ? NEON : "#8AABB8" }}>{label}</button>
+  );
+  return (
+    <div style={{ width: "100%" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>{unitButton("kg", "KG")}{unitButton("st", "STONE & LB")}</div>
+      {unit === "st" ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input className="t3d-input" type="number" inputMode="numeric" aria-label="Stone" placeholder="st" value={stone}
+            onChange={e => updateImperial(e.target.value, pounds)} style={{ textAlign: "center", fontSize: 22, padding: 14 }} />
+          <span style={{ color: "#E0EAF0", fontSize: 13 }}>st</span>
+          <input className="t3d-input" type="number" inputMode="decimal" aria-label="Pounds" placeholder="lb" value={pounds}
+            onChange={e => updateImperial(stone, e.target.value)} style={{ textAlign: "center", fontSize: 22, padding: 14 }} />
+          <span style={{ color: "#E0EAF0", fontSize: 13 }}>lb</span>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input className="t3d-input" type="number" inputMode="decimal" aria-label="Weight in kg" placeholder="Enter kg..." value={kgValue}
+            onChange={e => onKgChange(e.target.value)} style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
+          <span style={{ color: "#E0EAF0", fontSize: 14 }}>kg</span>
+        </div>
+      )}
+      {unit === "st" && kgValue && <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 6, textAlign: "center" }}>Saved as {kgValue} kg</div>}
+    </div>
+  );
+}
+
+function ScoreRing({ score, size = 108, max = 100 }) {
   const r = size / 2 - 10;
   const circ = 2 * Math.PI * r;
-  const offset = circ * (1 - score / 100);
-  const color = score >= 70 ? NEON : score >= 40 ? "#FF8C00" : NEON3;
+  const fraction = max ? score / max : 0;
+  const offset = circ * (1 - fraction);
+  const color = fraction >= 0.7 ? NEON : fraction >= 0.4 ? "#FF8C00" : NEON3;
   return (
     <div style={{ position: "relative", width: size, height: size, margin: "0 auto" }}>
       <svg width={size} height={size} style={{ transform: "rotate(-90deg)", display: "block" }}>
@@ -276,7 +317,7 @@ function ScoreRing({ score, size = 108 }) {
       </svg>
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 26, fontWeight: 700, lineHeight: 1, color }}>{score}</div>
-        <div style={{ fontSize: 9, letterSpacing: 1, color: "#8AABB8", marginTop: 5 }}>OUT OF 100</div>
+        <div style={{ fontSize: 9, letterSpacing: 1, color: "#8AABB8", marginTop: 5 }}>OUT OF {max}</div>
       </div>
     </div>
   );
@@ -1435,6 +1476,14 @@ function MorningSection({ user }) {
   // Empty means alternating days are off.
   const [dayGroups, setDayGroups] = useState([]);
   const [confirmChangeRoutine, setConfirmChangeRoutine] = useState(false);
+  const [pendingLiveStart, setPendingLiveStart] = useState(null);
+  const [weightUnit, setWeightUnit] = useState(() => {
+    try { return localStorage.getItem("track3d-weight-unit") === "st" ? "st" : "kg"; } catch { return "kg"; }
+  });
+  const chooseWeightUnit = unit => {
+    setWeightUnit(unit);
+    try { localStorage.setItem("track3d-weight-unit", unit); } catch { /* Unit preference is a convenience only. */ }
+  };
   const [routineSavedNotice, setRoutineSavedNotice] = useState(false);
   const setupSnapshotRef = useRef(null);
   const [checkinStep, setCheckinStep] = useState(0);
@@ -1493,7 +1542,7 @@ function MorningSection({ user }) {
   const fileRef = useRef(null);
 
   const NON_NEGS = [
-    { id: "sleep", name: "Work out sleep duration", type: "sleep", icon: "😴", duration: 1 },
+    { id: "sleep", name: "Log last night's sleep", type: "sleep", icon: "😴", duration: 1 },
     { id: "weight", name: "Check body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
     { id: "photos", name: "Take progress photos", type: "photos3", icon: "📸", duration: 3 },
   ];
@@ -1538,7 +1587,8 @@ function MorningSection({ user }) {
 
       if (routineData) {
         setWakeTime(routineData.wake_time || "06:00");
-        setScheduledTasks(routineData.tasks || []);
+        // Older routines stored the sleep step as "Work out sleep duration".
+        setScheduledTasks((routineData.tasks || []).map(task => task.id === "sleep" && task.name === "Work out sleep duration" ? { ...task, name: "Log last night's sleep" } : task));
         setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : []);
         setIsSetup(true);
       }
@@ -1606,7 +1656,7 @@ function MorningSection({ user }) {
     if (!user || loading || !checkinData || Object.keys(checkinData).length === 0) return;
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(view)) return;
     // The complete screen writes the final row itself; do not race it.
-    if (view === "checkin" && checkinStep >= allSteps.length) return;
+    if (view === "checkin" && checkinStep >= checkinDoneIndex) return;
     const todayRow = history.find(entry => entry.date === today);
     if (todayRow && !todayRow.data?.inProgress) return;
     saveCheckin(checkinData, morningScore(checkinData), { inProgress: true }).catch(() => {});
@@ -1783,6 +1833,10 @@ function MorningSection({ user }) {
   });
 
   const currentStep = allSteps[checkinStep];
+  // The final "TRACK3D Morning Check-in" step is the check-in itself, so it is
+  // never asked: reaching it completes the check-in.
+  const lockedCheckinIndex = allSteps.findIndex(step => step.id === "checkin");
+  const checkinDoneIndex = lockedCheckinIndex >= 0 && lockedCheckinIndex === allSteps.length - 1 ? lockedCheckinIndex : allSteps.length;
 
   // Check-in answers are keyed by step id (custom tasks use "custom-<timestamp>"),
   // so always show and send the task's name instead of its key.
@@ -1813,7 +1867,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   // Finalise the check-in as soon as the complete screen is reached, so
   // leaving by any route (not just "Back to Morning") records it as done.
-  const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= allSteps.length;
+  const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= checkinDoneIndex;
   const finalisedCheckinRef = useRef(null);
   const finaliseCheckin = async () => {
     const score = morningScore(checkinData);
@@ -1821,7 +1875,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     setSavingCheckin(true);
     setSubmissionError("");
-    const finalData = { ...checkinData, routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
+    const finalData = { ...checkinData, ...(lockedCheckinIndex >= 0 ? { checkin: true } : {}), routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
     if (finalData.photos) {
       const uploaded = {};
       for (const angle of PHOTO_ANGLES) {
@@ -1958,13 +2012,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
       setTempInput("");
       setPhotoAngleIdx(0);
-      setPhotoFiles({ front: null, side: null, back: null });
-      setPhotoPreviews({ front: null, side: null, back: null });
       setView("checkin");
       return;
     }
 
     setLiveTaskIndex(nextIndex);
+    setTempInput("");
+    setPhotoAngleIdx(0);
     startLiveTimer(liveRoutineSteps[nextIndex]);
   };
 
@@ -2031,7 +2085,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       if (step.type === "number" && val && val !== "") points++;
       else if (step.type === "sleep" && val && val !== "") points++;
       else if (step.type === "photos3" && val && Object.values(val).some(v => v && v !== "skipped")) points++;
-      else if (step.type === "tick" && val === true) points++;
+      else if (step.type === "tick" && (val === true || step.id === "checkin")) points++;
     });
     return Math.round((points / total) * 10);
   };
@@ -2046,6 +2100,166 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const entry = history.find(h => h.date === dateStr && !h.data?.inProgress);
     return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
   });
+
+  // Inputs for sleep, number and photo steps. Shared by the check-in steps and
+  // the live morning task card so input steps are answered in one place.
+  const renderStepInputs = (step, onDone) => (
+    <>
+            {step.type === "number" && (
+        <form style={{ width: "100%", maxWidth: 280 }} onSubmit={event => {
+          event.preventDefault();
+          if (!tempInput) return;
+          setCheckinData(d => ({ ...d, [step.id]: tempInput }));
+          setTempInput("");
+          onDone();
+        }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+            {step.id === "weight" ? (
+              <WeightEntry kgValue={tempInput} onKgChange={setTempInput} unit={weightUnit} onUnitChange={chooseWeightUnit} />
+            ) : (
+              <>
+                <input className="t3d-input" type="number" inputMode="decimal" placeholder={`Enter ${step.unit}...`}
+                  value={tempInput} onChange={e => setTempInput(e.target.value)}
+                  style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
+                <span style={{ color: "#E0EAF0", fontSize: 14 }}>{step.unit}</span>
+              </>
+            )}
+          </div>
+          <button type="submit" className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}>
+            CONFIRM →
+          </button>
+          {step.id === "weight" && (
+            <button
+              type="button"
+              onClick={() => {
+                setCheckinData(d => ({ ...d, [step.id]: "" }));
+                setTempInput("");
+                onDone();
+              }}
+              style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
+            >
+              I&apos;M NOT SURE — SKIP
+            </button>
+          )}
+        </form>
+      )}
+
+      {step.type === "sleep" && (
+        <form style={{ width: "100%", maxWidth: 280 }} onSubmit={event => {
+          event.preventDefault();
+          if (!tempInput) return;
+          setCheckinData(d => ({ ...d, [step.id]: tempInput }));
+          setTempInput("");
+          onDone();
+        }}>
+          <input className="t3d-input" aria-label="Hours slept" placeholder="e.g. 7h 30m" value={tempInput} enterKeyHint="done"
+            onChange={e => setTempInput(e.target.value)}
+            style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
+          <button type="submit" className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}>
+            CONFIRM →
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCheckinData(d => ({ ...d, [step.id]: "" }));
+              setTempInput("");
+              onDone();
+            }}
+            style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
+          >
+            I&apos;M NOT SURE — SKIP
+          </button>
+        </form>
+      )}
+
+      {step.type === "photos3" && (() => {
+        const angle = PHOTO_ANGLES[photoAngleIdx];
+        const isLast = photoAngleIdx === PHOTO_ANGLES.length - 1;
+
+        const finishPhotos = (filesOverride) => {
+          const files = filesOverride || photoFiles;
+
+          setCheckinData(d => ({
+            ...d,
+            photos: {
+              front: files.front ? "captured" : "skipped",
+              side: files.side ? "captured" : "skipped",
+              back: files.back ? "captured" : "skipped",
+            },
+          }));
+
+          onDone();
+        };
+        return (
+          <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
+            <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 2, marginBottom: 12 }}>
+              PHOTO {photoAngleIdx + 1} OF 3 — {angle.toUpperCase()} ON
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+              onChange={e => {
+                const f = e.target.files[0];
+                if (!f) return;
+                setPhotoFiles(p => ({ ...p, [angle]: f }));
+                setPhotoPreviews(p => ({ ...p, [angle]: URL.createObjectURL(f) }));
+              }} />
+            {photoPreviews[angle] ? (
+              <div>
+                <img src={photoPreviews[angle]} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt={angle} />
+                <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
+                  onClick={() => isLast ? finishPhotos() : setPhotoAngleIdx(i => i + 1)}>
+                  {isLast ? "CONFIRM →" : "NEXT ANGLE →"}
+                </button>
+              </div>
+            ) : (
+              <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
+                📸 UPLOAD {angle.toUpperCase()} PHOTO
+              </button>
+            )}
+            <div style={{ fontSize: 10, color: "#E0EAF0", margin: "16px 0 6px", lineHeight: 1.5 }}>
+              You can skip photos or leave them until the final review.
+            </div>
+            <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 7 }}
+              onClick={() => {
+                setCheckinData(data => ({ ...data, photos: Object.fromEntries(PHOTO_ANGLES.map(item => [item, photoFiles[item] ? "captured" : "deferred"])) }));
+                onDone();
+              }}>
+              ADD PHOTOS AT THE END
+            </button>
+            <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", opacity: 0.6 }}
+              onClick={() => finishPhotos()}>
+              SKIP REMAINING PHOTOS
+            </button>
+          </div>
+        );
+      })()}
+
+    </>
+  );
+
+  // Starting the guided morning records the wake-up time, so check first when
+  // it is far from the planned wake-up (e.g. starting it late in the evening).
+  const confirmLiveStart = start => {
+    const [plannedH, plannedM] = wakeTime.split(":").map(Number);
+    const [nowH, nowM] = getZonedDateInfo(new Date(), homeTimeZone).time.split(":").map(Number);
+    const gap = Math.abs(((nowH * 60 + nowM) - (plannedH * 60 + plannedM) + 2160) % 1440 - 720);
+    if (gap > 180) setPendingLiveStart(() => start);
+    else start();
+  };
+  const liveStartDialog = pendingLiveStart ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+      <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="live-start-title" style={{ width: "100%", maxWidth: 360, borderColor: "#FFB547", textAlign: "center" }}>
+        <div id="live-start-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>START YOUR MORNING ROUTINE NOW?</div>
+        <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>
+          It is {getZonedDateInfo(new Date(), homeTimeZone).time} and your planned wake-up is {wakeTime}. Starting now records {getZonedDateInfo(new Date(), homeTimeZone).time} as today&apos;s wake-up time. If you already did your morning, log it instead.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button className="t3d-btn" style={{ minHeight: 44 }} onClick={() => { const start = pendingLiveStart; setPendingLiveStart(null); start(); }}>YES, START NOW</button>
+          <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => { setPendingLiveStart(null); startNormalMorningCheckin(); }}>LOG A MORNING I&apos;VE DONE</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 44 }} onClick={() => setPendingLiveStart(null)}>CANCEL</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   const changeRoutineDialog = confirmChangeRoutine ? (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
@@ -2402,14 +2616,14 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                         fontSize: 13,
                         letterSpacing: 2
                       }}
-                      onClick={() => {
+                      onClick={() => confirmLiveStart(() => {
                         setLiveTaskIndex(0);
                         startLiveTimer(liveRoutineSteps[0]);
                         setLiveInputActive(false);
                         setLiveStartedAt(Date.now());
                         recordLiveWakeTime();
                         setView("liveMorning");
-                      }}
+                      })}
                     >
                       ▶ START MY MORNING NOW
                       <span style={{ display: "block", fontFamily: "'Inter',sans-serif", fontSize: 10, letterSpacing: 0, fontWeight: 400, marginTop: 6, color: "#C0D4DE" }}>Guides you through each task with a timer</span>
@@ -2472,6 +2686,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             </div>
 
             {changeRoutineDialog}
+            {liveStartDialog}
             {routineSavedNotice && (
               <div role="status" style={{ marginBottom: 16, padding: "12px 14px", border: `1px solid ${NEON}`, background: "rgba(0,255,178,.08)", borderRadius: 7, color: NEON, fontSize: 12 }}>
                 ✓ Routine saved
@@ -3167,24 +3382,6 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       currentLiveTask.type
     );
 
-    const openCurrentInput = () => {
-      const stepIndex = allSteps.findIndex(
-        step =>
-          (step.id || step.name) === currentKey
-      );
-
-      if (stepIndex === -1) return;
-
-      setLiveInputActive(true);
-
-      setCheckinStep(stepIndex);
-      setTempInput("");
-      setPhotoAngleIdx(0);
-      setPhotoFiles({ front: null, side: null, back: null });
-      setPhotoPreviews({ front: null, side: null, back: null });
-      setView("checkin");
-    };
-
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
@@ -3260,6 +3457,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             }}>
               Planned: {currentLiveTask.duration} min
             </div>
+            {needsInput && (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: 16 }}>
+                {renderStepInputs(currentLiveTask, moveToNextLiveTask)}
+              </div>
+            )}
           </div>
 
           {liveRoutineSteps[liveTaskIndex + 1] && (
@@ -3329,20 +3531,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             gap: 8,
             flexWrap: "wrap"
           }}>
-            {needsInput ? (
-              <button
-                className="t3d-btn"
-                style={{
-                  flex: 1,
-                  padding: 13,
-                  background: "rgba(0,255,178,.12)",
-                  borderColor: "rgba(0,255,178,.5)"
-                }}
-                onClick={openCurrentInput}
-              >
-                COMPLETE THIS STEP →
-              </button>
-            ) : (
+            {needsInput ? null : (
               <button
                 className="t3d-btn"
                 style={{
@@ -3373,17 +3562,17 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   }
 
   // CHECK-IN view
-  if (view === "checkin" && currentStep) {
+  if (view === "checkin" && currentStep && checkinStep < checkinDoneIndex) {
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
           <div className="t3d-progress-dots">
-            {allSteps.map((_, i) => (
+            {allSteps.slice(0, checkinDoneIndex).map((_, i) => (
               <div key={i} className={`t3d-dot-step ${i === checkinStep ? "active" : i < checkinStep ? "done" : ""}`} />
             ))}
           </div>
           <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>
-            STEP {checkinStep + 1} OF {allSteps.length}
+            STEP {checkinStep + 1} OF {checkinDoneIndex}
           </div>
           <div className="t3d-checkin-step">
             <div style={{ fontSize: 40, marginBottom: 16 }}>{currentStep.icon || "▸"}</div>
@@ -3391,124 +3580,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               {currentStep.name}
             </div>
 
-            {currentStep.type === "number" && (
-              <div style={{ width: "100%", maxWidth: 280 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
-                  <input className="t3d-input" type="number" placeholder={`Enter ${currentStep.unit}...`}
-                    value={tempInput} onChange={e => setTempInput(e.target.value)}
-                    style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
-                  <span style={{ color: "#E0EAF0", fontSize: 14 }}>{currentStep.unit}</span>
-                </div>
-                <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => {
-  setCheckinData(d => ({
-    ...d,
-    [currentStep.id]: tempInput
-  }));
-  setTempInput("");
-  finishLiveInputStep();
-}}>
-                  CONFIRM →
-                </button>
-                {currentStep.id === "weight" && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCheckinData(d => ({ ...d, [currentStep.id]: "" }));
-                      setTempInput("");
-                      finishLiveInputStep();
-                    }}
-                    style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
-                  >
-                    I&apos;M NOT SURE — SKIP
-                  </button>
-                )}
-              </div>
-            )}
-
-            {currentStep.type === "sleep" && (
-              <div style={{ width: "100%", maxWidth: 280 }}>
-                <input className="t3d-input" placeholder="e.g. 7h 30m" value={tempInput}
-                  onChange={e => setTempInput(e.target.value)}
-                  style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
-                <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); finishLiveInputStep(); }}>
-                  CONFIRM →
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCheckinData(d => ({ ...d, [currentStep.id]: "" }));
-                    setTempInput("");
-                    finishLiveInputStep();
-                  }}
-                  style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
-                >
-                  I&apos;M NOT SURE — SKIP
-                </button>
-              </div>
-            )}
-
-            {currentStep.type === "photos3" && (() => {
-              const angle = PHOTO_ANGLES[photoAngleIdx];
-              const isLast = photoAngleIdx === PHOTO_ANGLES.length - 1;
-
-              const finishPhotos = (filesOverride) => {
-                const files = filesOverride || photoFiles;
-
-                setCheckinData(d => ({
-                  ...d,
-                  photos: {
-                    front: files.front ? "captured" : "skipped",
-                    side: files.side ? "captured" : "skipped",
-                    back: files.back ? "captured" : "skipped",
-                  },
-                }));
-
-                finishLiveInputStep();
-              };
-              return (
-                <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 2, marginBottom: 12 }}>
-                    PHOTO {photoAngleIdx + 1} OF 3 — {angle.toUpperCase()} ON
-                  </div>
-                  <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
-                    onChange={e => {
-                      const f = e.target.files[0];
-                      if (!f) return;
-                      setPhotoFiles(p => ({ ...p, [angle]: f }));
-                      setPhotoPreviews(p => ({ ...p, [angle]: URL.createObjectURL(f) }));
-                    }} />
-                  {photoPreviews[angle] ? (
-                    <div>
-                      <img src={photoPreviews[angle]} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt={angle} />
-                      <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
-                        onClick={() => isLast ? finishPhotos() : setPhotoAngleIdx(i => i + 1)}>
-                        {isLast ? "CONFIRM →" : "NEXT ANGLE →"}
-                      </button>
-                    </div>
-                  ) : (
-                    <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
-                      📸 UPLOAD {angle.toUpperCase()} PHOTO
-                    </button>
-                  )}
-                  <div style={{ fontSize: 10, color: "#E0EAF0", margin: "16px 0 6px", lineHeight: 1.5 }}>
-                    You can skip photos or leave them until the final review.
-                  </div>
-                  <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 7 }}
-                    onClick={() => {
-                      setCheckinData(data => ({ ...data, photos: Object.fromEntries(PHOTO_ANGLES.map(item => [item, photoFiles[item] ? "captured" : "deferred"])) }));
-                      finishLiveInputStep();
-                    }}>
-                    ADD PHOTOS AT THE END
-                  </button>
-                  <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", opacity: 0.6 }}
-                    onClick={() => finishPhotos()}>
-                    SKIP REMAINING PHOTOS
-                  </button>
-                </div>
-              );
-            })()}
+            {renderStepInputs(currentStep, finishLiveInputStep)}
 
             {currentStep.type === "tick" && (
               <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
@@ -3536,10 +3608,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   }
 
   // COMPLETE view
-  if (view === "checkin" && checkinStep >= allSteps.length) {
+  if (view === "checkin" && checkinStep >= checkinDoneIndex) {
     const score = morningScore(checkinData);
     const quote = MORNING_QUOTES[Math.floor(Math.random() * MORNING_QUOTES.length)];
-    const editableSteps = allSteps.map((step, index) => ({ step, index }));
+    const editableSteps = allSteps.map((step, index) => ({ step, index })).filter(({ step }) => step.id !== "checkin");
     const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     const routineTimingText = routineTimingSummary({ plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes });
@@ -3550,10 +3622,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           <div style={{ fontSize: 48, marginBottom: 16 }}>🌟</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, letterSpacing: 3, color: NEON, marginBottom: 8 }}>MORNING COMPLETE</div>
           <div style={{ margin: "24px auto" }}>
-            <ScoreRing score={score * 10} size={120} />
+            <ScoreRing score={score} max={10} size={120} />
           </div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>
-            MORNING SCORE: {score}/10
+            MORNING SCORE
           </div>
           <p style={{ fontSize: 12, color: NEON2, lineHeight: 1.7 }}>
             {wakeTimingSummary(checkinData.wakeTiming)}
