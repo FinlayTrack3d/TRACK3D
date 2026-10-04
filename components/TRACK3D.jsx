@@ -9,6 +9,7 @@ import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-dat
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
 import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
+import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -6731,6 +6732,7 @@ function Nutrition({ user, userSessions }) {
   const [customCarbs, setCustomCarbs] = useState("");
   const [customFats, setCustomFats] = useState("");
   const [mealsPerDay, setMealsPerDay] = useState(4);
+  const [nutritionStyle, setNutritionStyle] = useState("hybrid");
   const [hasRestDayPlan, setHasRestDayPlan] = useState(false);
   const [mealBuildMode, setMealBuildMode] = useState(null);
   const [planMeals, setPlanMeals] = useState([]);
@@ -6781,7 +6783,11 @@ function Nutrition({ user, userSessions }) {
     setLoading(true);
     try {
       const { data: planData } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
-      if (planData) setPlan(planData);
+      if (planData) {
+        setPlan(planData);
+        setNutritionStyle(inferNutritionStyle(planData.meals || []));
+        setMealsPerDay(Math.max(1, planData.meals?.length || 4));
+      }
       const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
       if (logData) {
         setLogs(logData);
@@ -6836,12 +6842,11 @@ function Nutrition({ user, userSessions }) {
     if (!user) return false;
     setNutritionSaveError("");
     const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
-    const totalCals = Math.round(activeMeals.filter((_, i) => mealWasCompleted(resultsOverride[i])).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
-    const totalProtein = Math.round(activeMeals.filter((_, i) => mealWasCompleted(resultsOverride[i])).reduce((a, m) => a + (m.protein||0), 0));
+    const totals = calculateLoggedNutrition(activeMeals, resultsOverride, offPlanCals);
     const row = {
       meals_completed: { ...resultsOverride, _review_complete: reviewComplete },
       off_plan_food: offPlanFood, off_plan_calories: parseInt(offPlanCals)||0,
-      total_calories: totalCals, total_protein: totalProtein,
+      total_calories: totals.calories, total_protein: totals.protein,
       ai_feedback: aiFeedback, is_training_day: isTrainingDay,
       created_at: new Date().toISOString(),
     };
@@ -6864,8 +6869,9 @@ function Nutrition({ user, userSessions }) {
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
     const activeMeals = isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
-    const completedCount = countCompletedMeals(mealResults);
-    const totalCals = Math.round(activeMeals.filter((_, i) => mealWasCompleted(mealResults[i])).reduce((a, m) => a + (m.calories||0), 0) + (parseInt(offPlanCals)||0));
+    const totals = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
+    const completedCount = totals.completedMeals;
+    const totalCals = totals.calories;
     const calorieTarget = plan?.daily_calories || 2000;
     const diff = totalCals - calorieTarget;
     try {
@@ -6873,7 +6879,7 @@ function Nutrition({ user, userSessions }) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           system: `You are TRACK3D's nutrition coach. Give honest, direct, motivating feedback in 2-3 sentences. Be real but encouraging. Never shame. Never give medical advice. If under 18 is mentioned be age-appropriate.`,
-          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals completed. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${Math.round(activeMeals.filter((_,i)=>mealWasCompleted(mealResults[i])).reduce((a,m)=>a+(m.protein||0),0))}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
+          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
         }),
       });
       const data = await res.json();
@@ -6912,6 +6918,9 @@ function Nutrition({ user, userSessions }) {
   };
 
   const activeMeals = plan ? (isTrainingDay ? (plan.meals || []) : (plan.rest_day_meals || plan.meals || [])) : [];
+  const activeNutritionStyle = inferNutritionStyle(activeMeals);
+  const loggedNutrition = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
+  const remainingNutrition = remainingNutritionTargets({ calories: plan?.daily_calories, protein: plan?.protein_target, carbs: plan?.carbs_target, fats: plan?.fats_target }, loggedNutrition);
 
   const last7Logs = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() - (6-i));
@@ -6922,7 +6931,14 @@ function Nutrition({ user, userSessions }) {
   const weekLogs = logs.filter(l => { const d = new Date(l.date); const now = new Date(); const ws = new Date(now); ws.setDate(now.getDate()-now.getDay()); return d >= ws; });
   const avgCals = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_calories||0),0)/weekLogs.length) : 0;
   const avgProtein = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_protein||0),0)/weekLogs.length) : 0;
-  const onPlanDays = weekLogs.filter(l => countCompletedMeals(l.meals_completed)/(plan?.meals?.length||1) >= 0.8).length;
+  const nutritionLogOnTarget = log => {
+    const calorieTarget = Number(plan?.daily_calories) || 0;
+    const proteinTarget = Number(plan?.protein_target) || 0;
+    const caloriesOnTarget = calorieTarget ? Math.abs((Number(log.total_calories) || 0) - calorieTarget) / calorieTarget <= 0.1 : true;
+    const proteinOnTarget = proteinTarget ? (Number(log.total_protein) || 0) >= proteinTarget * 0.9 : true;
+    return caloriesOnTarget && proteinOnTarget;
+  };
+  const onPlanDays = weekLogs.filter(nutritionLogOnTarget).length;
 
   const streak = (() => {
     let s = 0; const d = new Date();
@@ -6930,8 +6946,7 @@ function Nutrition({ user, userSessions }) {
       const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
       const log = logs.find(l => l.date === ds);
       if (!log) break;
-      const completed = countCompletedMeals(log.meals_completed);
-      if (completed/(plan?.meals?.length||1) < 0.8) break;
+      if (!nutritionLogOnTarget(log)) break;
       s++; d.setDate(d.getDate()-1);
     }
     return s;
@@ -6946,11 +6961,12 @@ function Nutrition({ user, userSessions }) {
     const isCompleteStep = reviewStep > meals.length;
 
     if (isCompleteStep) {
-      const totalCals = Math.round(meals.filter((_,i) => mealWasCompleted(mealResults[i])).reduce((a,m) => a+(m.calories||0),0) + (parseInt(offPlanCals)||0));
-      const totalProtein = Math.round(meals.filter((_,i) => mealWasCompleted(mealResults[i])).reduce((a,m) => a+(m.protein||0),0));
+      const totals = calculateLoggedNutrition(meals, mealResults, offPlanCals);
+      const totalCals = totals.calories;
+      const totalProtein = totals.protein;
       const targetCals = plan?.daily_calories || 2000;
       const diff = totalCals - targetCals;
-      const completedMeals = countCompletedMeals(mealResults);
+      const completedMeals = totals.completedMeals;
 
       return (
         <div className="t3d-fade">
@@ -6958,7 +6974,7 @@ function Nutrition({ user, userSessions }) {
             <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 3, marginBottom: 24 }}>DAY COMPLETE</div>
             <div className="t3d-grid3" style={{ marginBottom: 20 }}>
-              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: completedMeals===meals.length?NEON:"#FF8C00" }}>{completedMeals}/{meals.length}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>MEALS ON PLAN</div></div>
+              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: completedMeals===meals.length?NEON:"#FF8C00" }}>{completedMeals}/{meals.length}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>MEALS LOGGED</div></div>
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff)<100?NEON:diff>0?NEON3:"#FF8C00" }}>{totalCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>KCAL TOTAL</div></div>
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=plan?.protein_target?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>PROTEIN</div></div>
             </div>
@@ -7022,6 +7038,35 @@ function Nutrition({ user, userSessions }) {
     }
 
     const meal = meals[reviewStep];
+    if (isFlexibleMeal(meal)) {
+      const flexibleResult = typeof mealResults[reviewStep] === "object" ? mealResults[reviewStep] : {};
+      const updateFlexibleResult = (key, value) => setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: false, [key]: value } }));
+      return (
+        <div className="t3d-fade">
+          <div className="t3d-card">
+            <div className="t3d-progress-dots">
+              {[...meals.map((_,i)=>i), "offplan"].map((_,i) => <div key={i} className={`t3d-dot-step ${i===reviewStep?"active":i<reviewStep?"done":""}`} />)}
+            </div>
+            <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>MEAL {reviewStep+1} OF {meals.length}</div>
+            <div style={{ textAlign: "center", padding: "12px 0 20px" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON2, marginBottom: 6 }}>FLEXIBLE MEAL</div>
+              <div style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.5, marginBottom: 15 }}>Log what this meal contributed. Your daily totals matter more than matching a prescribed food.</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, textAlign: "left", marginBottom: 14 }}>
+                {[["calories","Calories","kcal"],["protein","Protein","g"],["carbs","Carbs","g"],["fats","Fats","g"]].map(([key,label,unit]) => (
+                  <label key={key} style={{ color: "#8AABB8", fontSize: 9 }}>{label} <span style={{ color: "#526873" }}>target {meal[key] || 0}{unit}</span>
+                    <input className="t3d-input" aria-label={`${label} for flexible meal ${reviewStep + 1}`} type="number" inputMode="decimal" value={flexibleResult[key] ?? ""} onChange={event => updateFlexibleResult(key, event.target.value)} style={{ marginTop: 5 }} />
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: "Skipped" } })); setReviewStep(step => step + 1); }}>SKIPPED</button>
+                <button className="t3d-btn" style={{ flex: 2 }} disabled={!flexibleResult.calories} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: true } })); setReviewStep(step => step + 1); }}>LOG MEAL →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
@@ -7068,6 +7113,8 @@ function Nutrition({ user, userSessions }) {
   if (view === "setup") {
     const currentMeals = editingRestDay ? restDayMeals : planMeals;
     const setCurrentMeals = editingRestDay ? setRestDayMeals : setPlanMeals;
+    const preparedPlanMeals = prepareNutritionMeals(planMeals, nutritionStyle, mealsPerDay, getFinalMacros());
+    const preparedRestDayMeals = restDayMeals.length ? prepareNutritionMeals(restDayMeals, nutritionStyle, mealsPerDay, getFinalMacros()) : [];
 
     return (
       <div className="t3d-fade">
@@ -7182,6 +7229,29 @@ function Nutrition({ user, userSessions }) {
                   </div>
                 )}
                 {setupMode === "guided" && <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Based on {bodyWeight}kg · {goal} · {activityLevel} · TDEE: {calculatedMacros.tdee} kcal</div>}
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <div className="t3d-ctitle">HOW MUCH STRUCTURE DO YOU WANT?</div>
+                {[
+                  ["hybrid", "HYBRID · RECOMMENDED", "Repeat the meals that help you stay consistent. Use flexible macro targets for the rest."],
+                  ["flexible", "FLEXIBLE MACROS", "Choose your own food each day and log the macros for each meal."],
+                  ["fixed", "SAME MEALS DAILY", "Follow the same planned meals each day for maximum simplicity."],
+                ].map(([value, label, description]) => (
+                  <button key={value} type="button" className="t3d-btn" onClick={() => {
+                    setNutritionStyle(value);
+                    if (value === "flexible") {
+                      setPlanMeals(prepareNutritionMeals([], "flexible", mealsPerDay, getFinalMacros()));
+                      setMealBuildMode("own");
+                    } else if (nutritionStyle === "flexible") {
+                      setPlanMeals([]);
+                      setMealBuildMode(null);
+                    }
+                  }} style={{ width: "100%", textAlign: "left", whiteSpace: "normal", padding: 13, marginBottom: 7, background: nutritionStyle === value ? "rgba(0,255,178,.09)" : "transparent", borderColor: nutritionStyle === value ? NEON : BORDER, color: nutritionStyle === value ? NEON : "#C5D6DC" }}>
+                    {label}
+                    <span style={{ display: "block", color: "#8AABB8", fontFamily: "'Inter',sans-serif", fontSize: 10, fontWeight: 400, lineHeight: 1.5, marginTop: 4 }}>{description}</span>
+                  </button>
+                ))}
               </div>
 
               {/* Rest day option */}
@@ -7309,13 +7379,15 @@ function Nutrition({ user, userSessions }) {
                       {currentMeals.map((m, i) => (
                         <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                            <div style={{ fontSize: 12 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
+                            <div style={{ fontSize: 12 }}>{isFlexibleMeal(m) || (nutritionStyle === "hybrid" && m.repeatDaily === false) ? `Flexible meal ${i + 1}` : m.name} {m.time && !isFlexibleMeal(m) && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
                             <div style={{ display: "flex", gap: 6 }}>
-                              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => { setNewMeal({ ...m, calories: String(m.calories), protein: String(m.protein), carbs: String(m.carbs), fats: String(m.fats) }); setEditMealIdx(i); setAddMealModal(true); }}>✏️</button>
-                              <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} onClick={() => setCurrentMeals(prev => prev.filter((_,j)=>j!==i))}>✕</button>
+                              {!isFlexibleMeal(m) && <button className="t3d-btn t3d-btn-sm" aria-label={`Edit ${m.name}`} style={{ fontSize: 8 }} onClick={() => { setNewMeal({ ...m, calories: String(m.calories), protein: String(m.protein), carbs: String(m.carbs), fats: String(m.fats) }); setEditMealIdx(i); setAddMealModal(true); }}>EDIT</button>}
+                              {nutritionStyle !== "flexible" && <button className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label={`Remove ${m.name}`} style={{ fontSize: 8 }} onClick={() => setCurrentMeals(prev => prev.filter((_,j)=>j!==i))}>✕</button>}
                             </div>
                           </div>
                           <div style={{ fontSize: 10, color: "#E0EAF0" }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
+                          {nutritionStyle === "hybrid" && !isFlexibleMeal(m) && <button type="button" className="t3d-btn t3d-btn-sm" onClick={() => setCurrentMeals(meals => meals.map((meal, mealIndex) => mealIndex === i ? { ...meal, repeatDaily: meal.repeatDaily === false } : meal))} style={{ marginTop: 8, fontSize: 8, padding: "5px 8px", background: m.repeatDaily === false ? "rgba(0,200,255,.09)" : "rgba(0,255,178,.09)", color: m.repeatDaily === false ? NEON2 : NEON, borderColor: m.repeatDaily === false ? "rgba(0,200,255,.35)" : "rgba(0,255,178,.35)" }}>{m.repeatDaily === false ? "FLEXIBLE · USE MACRO BUDGET" : "REPEAT THIS MEAL DAILY ✓"}</button>}
+                          {(isFlexibleMeal(m) || m.repeatDaily === false) && <div style={{ color: "#6F8792", fontSize: 9, lineHeight: 1.45, marginTop: 6 }}>{m.exampleName || (m.repeatDaily === false ? `Example: ${m.name}. ` : "")}Choose any food and log its actual macros.</div>}
                         </div>
                       ))}
                       {/* Totals vs target */}
@@ -7332,7 +7404,7 @@ function Nutrition({ user, userSessions }) {
                     </div>
                   )}
 
-                  {mealBuildMode === "own" && <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 14 }} onClick={() => { setEditMealIdx(null); setNewMeal({ name:"",time:"",ingredients:[],calories:"",protein:"",carbs:"",fats:"" }); setAddMealModal(true); }}>+ ADD MEAL</button>}
+                  {mealBuildMode === "own" && nutritionStyle !== "flexible" && <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 14 }} onClick={() => { setEditMealIdx(null); setNewMeal({ name:"",time:"",ingredients:[],calories:"",protein:"",carbs:"",fats:"" }); setAddMealModal(true); }}>+ ADD MEAL</button>}
                 </div>
               )}
 
@@ -7349,17 +7421,20 @@ function Nutrition({ user, userSessions }) {
           {setupStep === 2 && (
             <div>
               <div className="t3d-ctitle">REVIEW YOUR PLAN</div>
-              {planMeals.map((m, i) => (
+              <div style={{ padding: 11, borderRadius: 6, border: `1px solid ${nutritionStyle === "hybrid" ? "rgba(0,255,178,.35)" : BORDER}`, background: "rgba(0,255,178,.04)", marginBottom: 12, color: "#C5D6DC", fontSize: 10, lineHeight: 1.55 }}>
+                {nutritionStyle === "hybrid" ? "Hybrid plan: repeated meals give you consistency; flexible meals let you choose foods while aiming for the remaining macros." : nutritionStyle === "flexible" ? "Flexible macro plan: choose your food and log what each meal contributes toward the daily targets." : "Fixed plan: these meals repeat each day."}
+              </div>
+              {preparedPlanMeals.map((m, i) => (
                 <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
-                  <div style={{ fontSize: 12, marginBottom: 4 }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
-                  {m.ingredients?.map((ing,j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0" }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
+                  <div style={{ fontSize: 12, marginBottom: 4, color: isFlexibleMeal(m) ? NEON2 : "#E0EAF0" }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
+                  {isFlexibleMeal(m) ? <div style={{ fontSize: 9, color: "#8AABB8" }}>Choose any food and log the actual macros.</div> : m.ingredients?.map((ing,j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0" }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
                   <div style={{ fontSize: 10, color: "#4A6070", marginTop: 6 }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
                 </div>
               ))}
-              {restDayMeals.length > 0 && (
+              {preparedRestDayMeals.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   <div className="t3d-ctitle">REST DAY MEALS</div>
-                  {restDayMeals.map((m, i) => (
+                  {preparedRestDayMeals.map((m, i) => (
                     <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
                       <div style={{ fontSize: 12 }}>{m.name}</div>
                       <div style={{ fontSize: 10, color: "#4A6070", marginTop: 4 }}>{m.calories} kcal · {m.protein}g P</div>
@@ -7377,18 +7452,11 @@ function Nutrition({ user, userSessions }) {
                 <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan} onClick={async () => {
                   setSavingPlan(true);
                   setPlanSaveError(false);
-                  // Target the plan is judged against is the actual totals of the locked-in meals,
-                  // not the originally calculated recommendation (they can drift apart).
-                  const realMacros = {
-                    calories: planMeals.reduce((a, m) => a + (m.calories || 0), 0),
-                    protein: planMeals.reduce((a, m) => a + (m.protein || 0), 0),
-                    carbs: planMeals.reduce((a, m) => a + (m.carbs || 0), 0),
-                    fats: planMeals.reduce((a, m) => a + (m.fats || 0), 0),
-                  };
-                  const ok = await savePlan(planMeals, restDayMeals, realMacros);
+                  const realMacros = getFinalMacros();
+                  const ok = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
                   if (!ok) { setPlanSaveError(true); return; }
-                  setPlan({ meals: planMeals, rest_day_meals: restDayMeals, daily_calories: realMacros.calories, protein_target: realMacros.protein, carbs_target: realMacros.carbs, fats_target: realMacros.fats, goal });
+                  setPlan({ meals: preparedPlanMeals, rest_day_meals: preparedRestDayMeals, daily_calories: realMacros.calories, protein_target: realMacros.protein, carbs_target: realMacros.carbs, fats_target: realMacros.fats, goal });
                   setView("home");
                 }}>{savingPlan ? "SAVING..." : "SAVE PLAN ✓"}</button>
               </div>
@@ -7496,13 +7564,37 @@ function Nutrition({ user, userSessions }) {
             </div>
           </div>
 
+          <div className="t3d-card" style={{ marginBottom: 16, padding: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <div><div className="t3d-ctitle" style={{ marginBottom: 4 }}>{activeNutritionStyle === "hybrid" ? "HYBRID PLAN" : activeNutritionStyle === "flexible" ? "FLEXIBLE MACROS" : "FIXED MEALS"}</div><div style={{ color: "#8AABB8", fontSize: 9 }}>{activeNutritionStyle === "hybrid" ? "Repeat your anchor meals; choose freely for the flexible slots." : activeNutritionStyle === "flexible" ? "Choose your food and work toward the daily totals." : "The same planned meals repeat each day."}</div></div>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => { setSetupStep(0); setSetupMode(null); setNutritionStyle(inferNutritionStyle(plan.meals || [])); setMealsPerDay(Math.max(1, plan.meals?.length || 4)); setPlanMeals(plan.meals || []); setRestDayMeals(plan.rest_day_meals || []); setView("setup"); }}>CHANGE</button>
+            </div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>REMAINING TODAY</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, textAlign: "center" }}>
+              {[["calories","KCAL",NEON],["protein","PROTEIN",NEON2],["carbs","CARBS","#FF8C00"],["fats","FATS","#C5D6DC"]].map(([key,label,color]) => <div key={key} style={{ padding: "8px 3px", background: SURFACE2, borderRadius: 5 }}><div style={{ color, fontSize: 13, fontWeight: 700 }}>{remainingNutrition[key]}{key === "calories" ? "" : "g"}</div><div style={{ color: "#6F8792", fontSize: 7, marginTop: 3 }}>{label}</div></div>)}
+            </div>
+          </div>
+
           {/* Log meals as the day happens */}
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle">LOG AS YOU GO</div>
-            <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>Tick each planned meal when you have it. If it changes, tap × and briefly say what happened.</div>
+            <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>{activeNutritionStyle === "fixed" ? "Tick each planned meal when you have it. If it changes, tap × and briefly say what happened." : "Tick repeated meals when you have them. For flexible meals, enter what the meal contributed to your macros."}</div>
             {activeMeals.map((meal, index) => {
               const result = mealResults[index];
               const missed = mealWasMissed(result);
+              if (isFlexibleMeal(meal)) {
+                const flexibleResult = typeof result === "object" ? result : {};
+                return <div key={`${meal.name}-${index}`} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 8 }}><div><div style={{ color: NEON2, fontSize: 12 }}>{meal.name}</div><div style={{ color: "#6F8792", fontSize: 8 }}>Budget: {meal.calories || 0} kcal · {meal.protein || 0}g protein</div></div>{mealWasCompleted(result) && <span style={{ color: NEON, fontSize: 9 }}>LOGGED ✓</span>}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
+                    {[["calories","KCAL"],["protein","P (g)"],["carbs","C (g)"],["fats","F (g)"]].map(([key,label]) => <label key={key} style={{ color: "#6F8792", fontSize: 7 }}>{label}<input className="t3d-input" aria-label={`${label} for ${meal.name}`} type="number" inputMode="decimal" value={flexibleResult[key] ?? ""} onChange={event => setMealResults(current => ({ ...current, [index]: { ...(typeof current[index] === "object" ? current[index] : {}), completed: false, [key]: event.target.value } }))} style={{ padding: "7px 4px", marginTop: 4, fontSize: 11 }} /></label>)}
+                  </div>
+                  <div style={{ display: "flex", gap: 7, marginTop: 8 }}>
+                    <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} disabled={!flexibleResult.calories} onClick={async () => { const updated = { ...mealResults, [index]: { ...flexibleResult, completed: true } }; setMealResults(updated); setQuickLogStatus("SAVING..."); setQuickLogStatus(await saveLog(updated, todayLogged) ? "SAVED" : "COULD NOT SAVE"); }}>LOG &amp; SAVE</button>
+                    <button aria-label={`Clear ${meal.name}`} className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={async () => { const updated = { ...mealResults, [index]: { completed: false, note: "Skipped" } }; setMealResults(updated); setQuickLogStatus("SAVING..."); setQuickLogStatus(await saveLog(updated, todayLogged) ? "SAVED" : "COULD NOT SAVE"); }}>SKIP</button>
+                  </div>
+                </div>;
+              }
               return <div key={`${meal.name}-${index}`} style={{ padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
                   <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>
@@ -7552,15 +7644,15 @@ function Nutrition({ user, userSessions }) {
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div className="t3d-ctitle" style={{ margin: 0 }}>{isTrainingDay?"TRAINING DAY MEALS":"REST DAY MEALS"}</div>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.5 }} onClick={() => { setSetupStep(0); setSetupMode(null); setPlanMeals(plan.meals||[]); setRestDayMeals(plan.rest_day_meals||[]); setView("setup"); }}>EDIT PLAN</button>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.7 }} onClick={() => { setSetupStep(0); setSetupMode(null); setNutritionStyle(inferNutritionStyle(plan.meals || [])); setMealsPerDay(Math.max(1, plan.meals?.length || 4)); setPlanMeals(plan.meals||[]); setRestDayMeals(plan.rest_day_meals||[]); setView("setup"); }}>EDIT PLAN</button>
             </div>
             {activeMeals.map((m, i) => (
               <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                  <div style={{ fontSize: 12 }}>{m.name}</div>
+                  <div style={{ fontSize: 12, color: isFlexibleMeal(m) ? NEON2 : "#E0EAF0" }}>{m.name}{!isFlexibleMeal(m) && <span style={{ color: NEON, fontSize: 8, marginLeft: 7 }}>REPEATS</span>}</div>
                   <div style={{ fontSize: 10, color: "#E0EAF0" }}>{m.time}</div>
                 </div>
-                {m.ingredients?.map((ing, j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 2 }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
+                {isFlexibleMeal(m) ? <div style={{ fontSize: 9, color: "#8AABB8", lineHeight: 1.45 }}>Choose any food. This is a guide for how much of today&apos;s macros to use here.</div> : m.ingredients?.map((ing, j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 2 }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
                 <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 10 }}>
                   <span style={{ color: NEON }}>{m.calories} kcal</span>
                   <span style={{ color: NEON2 }}>{m.protein}g P</span>
