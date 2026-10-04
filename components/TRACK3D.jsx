@@ -11,6 +11,12 @@ import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } f
 import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
+// /api/chat requires the signed-in user's Supabase session token.
+async function chatHeaders() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) };
+}
+
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
 const NEON3 = "#FF2D78";
@@ -343,7 +349,7 @@ User data today:
       }
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await chatHeaders(),
         body: JSON.stringify({
           system: system || defaultSystem,
           messages: updated,
@@ -543,7 +549,7 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
       for (let attempt = 0; attempt < 2; attempt++) {
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await chatHeaders(),
         body: JSON.stringify({
           responseTokens: 2500,
           system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical ordering immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible order just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. Explain the main concrete change. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach. If no reordering helps, briefly explain why the current order works.
@@ -888,7 +894,7 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
       for (let attempt = 0; attempt < 2; attempt++) {
         const res = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await chatHeaders(),
           body: JSON.stringify({
             responseTokens: 2500,
             system: `You help refine an existing morning routine through conversation. You can reorder tasks and adjust their durations, but you cannot add or remove tasks (the user does that with the routine controls) and the final check-in step always stays last. Use the conversation, especially reasons given for agreeing or disagreeing. Keep the explanation to at most 60 words, in 2-3 short sentences, no headings or lists, identify yourself as AI Coach, and explain the main concrete change. At most one optional follow-up question, only after making a recommendation.
@@ -1328,6 +1334,8 @@ function wakeTimingSummary(timing) {
   };
   // Compare nearby clock times correctly across midnight.
   const difference = ((minutes(timing.actual) - minutes(timing.planned) + 2160) % 1440) - 720;
+  // A gap this large is not an early or late wake-up, so do not describe it as one.
+  if (Math.abs(difference) > 240) return `Started at ${timing.actual} (planned wake-up ${timing.planned})`;
   const comparison = difference === 0 ? "on time" : difference > 0
     ? `${difference} min later than planned` : `${Math.abs(difference)} min earlier than planned`;
   return `Wake-up: ${timing.actual} · Planned: ${timing.planned} · ${comparison}`;
@@ -1352,6 +1360,7 @@ function MorningSection({ user }) {
   const [customTask, setCustomTask] = useState("");
   const [customTaskDuration, setCustomTaskDuration] = useState(10);
   const [scheduledTasks, setScheduledTasks] = useState([]);
+  const [setupReviewVisited, setSetupReviewVisited] = useState(false);
   const DEFAULT_DAY_GROUPS = [{ id: "A", name: "Day A" }, { id: "B", name: "Day B" }];
   const [dayGroups, setDayGroups] = useState(DEFAULT_DAY_GROUPS);
   const [checkinStep, setCheckinStep] = useState(0);
@@ -1515,11 +1524,19 @@ function MorningSection({ user }) {
   // routine, persist it to Supabase straight away (marked inProgress so it
   // never counts as a finished day). This means leaving or refreshing mid
   // routine only ever loses the single in-flight step, not the whole morning.
+  //
+  // A completed row is never overwritten with an in-progress one: when today
+  // is already finished (for example during "Do again"), answers stay in the
+  // local draft only and are written once, when the new check-in completes.
   useEffect(() => {
-    if (!user || !checkinData || Object.keys(checkinData).length === 0) return;
+    if (!user || loading || !checkinData || Object.keys(checkinData).length === 0) return;
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(view)) return;
+    // The complete screen writes the final row itself; do not race it.
+    if (view === "checkin" && checkinStep >= allSteps.length) return;
+    const todayRow = history.find(entry => entry.date === today);
+    if (todayRow && !todayRow.data?.inProgress) return;
     saveCheckin(checkinData, morningScore(checkinData), { inProgress: true }).catch(() => {});
-  }, [checkinData, view, user]);
+  }, [checkinData, view, user, loading]);
 
   const calcFinishTime = (wake, tasks) => {
     if (!tasks?.length) return wake;
@@ -1627,10 +1644,19 @@ function MorningSection({ user }) {
       const th = Math.floor(cursor / 60) % 24;
       const tm = cursor % 60;
       const time = `${String(th).padStart(2,"0")}:${String(tm).padStart(2,"0")}`;
-      cursor += task.duration || 5;
+      cursor += Number(task.duration) || 5;
       return { ...task, scheduledTime: time };
     });
   };
+
+  // Keep Review times consecutive from the current wake time, and remember
+  // that Review was opened so returning to Tasks keeps its order.
+  useEffect(() => {
+    if (view !== "setup") { setSetupReviewVisited(false); return; }
+    if (setupStep !== 2) return;
+    setSetupReviewVisited(true);
+    setScheduledTasks(tasks => recalcTimes(tasks));
+  }, [view, setupStep, wakeTime]);
 
   const startRoutineSetup = () => {
     const lockedIds = new Set([
@@ -1667,6 +1693,53 @@ function MorningSection({ user }) {
   });
 
   const currentStep = allSteps[checkinStep];
+
+  // Finalise the check-in as soon as the complete screen is reached, so
+  // leaving by any route (not just "Back to Morning") records it as done.
+  const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= allSteps.length;
+  const finalisedCheckinRef = useRef(null);
+  const finaliseCheckin = async () => {
+    const score = morningScore(checkinData);
+    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
+    setSavingCheckin(true);
+    setSubmissionError("");
+    const finalData = { ...checkinData, routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
+    if (finalData.photos) {
+      const uploaded = {};
+      for (const angle of PHOTO_ANGLES) {
+        const file = photoFiles[angle];
+        if (!file) { uploaded[angle] = "skipped"; continue; }
+        const path = `${user.id}/${today}/${angle}.jpg`;
+        const { error } = await supabase.storage.from("checkin-photos").upload(path, file, { upsert: true });
+        uploaded[angle] = error ? "skipped" : path;
+      }
+      finalData.photos = uploaded;
+    }
+    const { error } = await saveCheckin(finalData, score);
+    setSavingCheckin(false);
+    if (error) {
+      setSubmissionError(error?.message ? `Your morning could not be saved: ${error.message}` : "Your morning could not be saved. Please try again.");
+      return;
+    }
+    setCompletedToday(true);
+    setSkippedToday(false);
+    setHistory(entries => [
+      { ...(entries.find(entry => entry.date === today) || {}), user_id: user.id, date: today, score, data: finalData },
+      ...entries.filter(entry => entry.date !== today),
+    ]);
+  };
+  useEffect(() => {
+    if (!checkinComplete) {
+      if (view !== "checkin") finalisedCheckinRef.current = null;
+      return;
+    }
+    if (!user || loading || savingCheckin) return;
+    const key = JSON.stringify(checkinData);
+    if (finalisedCheckinRef.current === key) return;
+    finalisedCheckinRef.current = key;
+    finaliseCheckin();
+  }, [checkinComplete, checkinData, user, loading, savingCheckin, view]);
   const isRoughCheckin = view === "roughCheckin";
 
   const startNormalMorningCheckin = () => {
@@ -2817,9 +2890,19 @@ function MorningSection({ user }) {
                       Number(task.duration) <= 0
                   )}
                   onClick={() => {
-                    setScheduledTasks(
-                      buildSchedule([...NON_NEGS, ...selectedTasks])
-                    );
+                    const chosen = [...NON_NEGS, ...selectedTasks];
+                    let ordered = chosen;
+                    if (setupReviewVisited) {
+                      // Keep the order from Review; only drop removed tasks and append new ones.
+                      const keyOf = task => task.id || task.name;
+                      const chosenByKey = new Map(chosen.map(task => [keyOf(task), task]));
+                      const kept = scheduledTasks
+                        .filter(task => task.id !== "checkin" && chosenByKey.has(keyOf(task)))
+                        .map(task => chosenByKey.get(keyOf(task)));
+                      const keptKeys = new Set(kept.map(keyOf));
+                      ordered = [...kept, ...chosen.filter(task => !keptKeys.has(keyOf(task)))];
+                    }
+                    setScheduledTasks(buildSchedule(ordered));
                     setSetupStep(2);
                   }}
                 >
@@ -2829,7 +2912,8 @@ function MorningSection({ user }) {
             </div>
           )}
 
-          {setupStep === 2 && (
+          {(setupStep === 2 || setupReviewVisited) && (
+            <div hidden={setupStep !== 2}>
             <ScheduleReview
               scheduledTasks={scheduledTasks}
               setScheduledTasks={setScheduledTasks}
@@ -2844,6 +2928,7 @@ function MorningSection({ user }) {
                 setView("home");
               }}
             />
+            </div>
           )}
         </div>
       </div>
@@ -3285,8 +3370,6 @@ function MorningSection({ user }) {
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     const routineTimingText = routineTimingSummary({ plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes });
 
-    // Save handled via button click
-
     return (
       <div className="t3d-fade">
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
@@ -3343,32 +3426,13 @@ function MorningSection({ user }) {
             />
           </div>
           {submissionError && <div style={{ color: NEON3, fontSize: 11, marginBottom: 12, textAlign: "center" }}>{submissionError}</div>}
-          <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={savingCheckin} onClick={async () => {
-            setSavingCheckin(true);
-            setSubmissionError("");
-            const finalData = { ...checkinData, routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
-            if (finalData.photos) {
-              const uploaded = {};
-              for (const angle of PHOTO_ANGLES) {
-                const file = photoFiles[angle];
-                if (!file) { uploaded[angle] = "skipped"; continue; }
-                const path = `${user.id}/${today}/${angle}.jpg`;
-                const { error } = await supabase.storage.from("checkin-photos").upload(path, file, { upsert: true });
-                uploaded[angle] = error ? "skipped" : path;
-              }
-              finalData.photos = uploaded;
-            }
-            const { error } = await saveCheckin(finalData, score);
-            setSavingCheckin(false);
-            if (error) {
-              setSubmissionError(error?.message ? `Your morning could not be saved: ${error.message}` : "Your morning could not be saved. Please try again.");
-              return;
-            }
-            setCompletedToday(true);
-            await loadData();
-            setView("home");
-          }}>
-            {savingCheckin ? "SAVING..." : "BACK TO MORNING"}
+          {submissionError && !savingCheckin && (
+            <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 10 }} onClick={() => finaliseCheckin()}>
+              TRY SAVING AGAIN
+            </button>
+          )}
+          <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={() => setView("home")}>
+            BACK TO MORNING
           </button>
         </div>
       </div>
@@ -3469,7 +3533,7 @@ function EndOfDayCheckin({ user, onComplete }) {
         : "no goals set for today";
 
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, wake-up timing against the planned time when recorded, nutrition, fitness, calendar alignment, mood/energy, and whether the user's top goals for today got done. Treat the live start time as the recorded wake-up time, not independently verified waking. Do not assume missing wake-up data or praise earlier waking at the expense of sleep. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
           messages: [{ role: "user", content: `Today's data:
@@ -3884,7 +3948,7 @@ function WeeklyReport({ user }) {
       const plan = planRes.data;
 
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: "You are TRACK3D's weekly coach. Reply in exactly two labelled sections, each 3-5 sentences: 'PATTERNS:' (trends you notice across the week) and 'DIET SUGGESTIONS:' (only suggest a change if the data clearly supports it, otherwise say nutrition looks on track). Be direct and specific. Never give medical advice.",
           messages: [{ role: "user", content: `Last 7 days for this user:
@@ -4485,12 +4549,13 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       const normalizedSessions = normalizeFitnessSessions(sessionsData);
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
 
-      let result;
-      if (existing) {
-        result = await supabase.from("workout_splits").update({ sessions: normalizedSessions, ...extra }).eq("user_id", user.id);
-      } else {
-        result = await supabase.from("workout_splits").insert({ user_id: user.id, sessions: normalizedSessions, split_name: "My Split", ...extra });
-      }
+      // Upsert so a stale lookup can never turn a save into a duplicate insert.
+      const result = await supabase.from("workout_splits").upsert({
+        user_id: user.id,
+        sessions: normalizedSessions,
+        ...(existing ? {} : { split_name: "My Split" }),
+        ...extra,
+      }, { onConflict: "user_id" });
 
       if (result.error) {
         console.error("saveSplit error:", result.error);
@@ -4798,7 +4863,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setCompletionFeedbackLoading(true);
     try {
       const review = buildWorkoutReview(activeSession, completedSets);
-      const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
         system: "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets with no emojis. WORKOUT REVIEW is authoritative: status completed means the set was performed using the exact reps and weightKg shown; status skipped means it was not recorded. Never say all sets or the session were skipped when completedSets is greater than zero. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.",
         messages: [{ role: "user", content: `WORKOUT REVIEW\n${JSON.stringify({ ...review, durationMinutes: Math.round((Date.now() - workoutStart) / 60000), recentHistory: history.slice(0, 5) })}` }],
       }) });
@@ -4895,7 +4960,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     }).join("\n");
     try {
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           responseTokens: 6000,
           system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
@@ -5365,9 +5430,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               try {
                 const unapprovedSessions = normalizeFitnessSessions(aiPlan.sessions).map(session => ({ ...session, approval: { approved: false } }));
                 const programme = { sessions: unapprovedSessions, split_name: aiPlan.split_name || "My Programme" };
-                const { error } = split
-                  ? await supabase.from("workout_splits").update(programme).eq("user_id", user.id)
-                  : await supabase.from("workout_splits").insert({ user_id: user.id, ...programme });
+                // Upsert: `split` is cleared during a full rebuild even though the user's row still exists.
+                const { error } = await supabase.from("workout_splits").upsert({ user_id: user.id, ...programme }, { onConflict: "user_id" });
                 if (error) throw error;
                 setSessions(unapprovedSessions);
                 setSplit({ sessions: unapprovedSessions, split_name: aiPlan.split_name });
@@ -5896,7 +5960,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
           messages: updatedMessages,
@@ -5922,7 +5986,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     setApprovalQuestion("");
     setApprovalLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
         system: `You are TRACK3D's fitness coach helping a user decide whether to approve a programme. Answer directly in 2-5 short bullets with no emojis. Explain the purpose of the day selection, recovery spacing, duration, exercise order, sets and rep ranges. Listen to feedback and suggest reasonable adjustments, but warn clearly against unsafe or counterproductive requests. Approval is optional and means an 8-week commitment with review afterwards. Sessions may move within a rolling 8-day cycle. Home timezone: ${homeTimeZone}.`,
         messages: [{ role: "user", content: `Programme under review: ${JSON.stringify(reviewedSessions)}` }, ...updated],
       }) });
@@ -6586,7 +6650,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
     setLoading(true);
     try {
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are a nutrition expert. The user wants to tweak their meal plan. Apply their requested changes and return the full updated plan. Respond ONLY with valid JSON with no extra text: {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
           messages: [{ role: "user", content: `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan keeping similar calories (${macros.calories} kcal target) and protein (${macros.protein}g target).` }],
@@ -6608,7 +6672,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
     try {
       const restCals = Math.round(macros.calories * 0.85);
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are a nutrition expert. Build a rest day meal plan — slightly lower calories, fewer carbs. Respond ONLY with valid JSON: {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
           messages: [{ role: "user", content: `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${meals.map(m=>m.name).join(", ")}` }],
@@ -6681,7 +6745,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
     try {
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's nutrition coach. You already gave feedback on the user's day. Continue the conversation naturally. Keep answers concise — 2-4 sentences. Never give medical advice. Be direct and helpful.`,
           messages: updated,
@@ -6931,7 +6995,7 @@ function Nutrition({ user, userSessions }) {
     const diff = totalCals - calorieTarget;
     try {
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's nutrition coach. Give honest, direct, motivating feedback in 2-3 sentences. Be real but encouraging. Never shame. Never give medical advice. If under 18 is mentioned be age-appropriate.`,
           messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
@@ -6952,7 +7016,7 @@ function Nutrition({ user, userSessions }) {
     }).join("\n");
     try {
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are a nutrition expert. Build a daily meal plan. Never give medical advice. Respond ONLY with valid JSON with no extra text:
 {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
@@ -8011,7 +8075,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     const missed = Object.values(results).filter(v => v==="none").length;
     try {
       const res = await fetch("/api/chat", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's daily accountability coach. Give honest, direct feedback in 3-4 sentences. Find one pattern and give one actionable suggestion for tomorrow. Never give medical advice.`,
           messages: [{ role: "user", content: `Day review: ${done} tasks done, ${half} partial, ${missed} missed. Score: ${score}/10. Tasks: ${tasks.map(t=>`${t.title} (${t.start_time}) — ${results[t.id]||"pending"}`).join(", ")}. Give feedback.` }],
