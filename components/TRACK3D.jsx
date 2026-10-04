@@ -250,7 +250,7 @@ const css = `
   .t3d-tick-btn:hover { background: rgba(0,255,178,.2); transform: scale(1.05); }
   .t3d-cross-btn { background: rgba(255,45,120,.1); border: 2px solid #FF2D78; color: #FF2D78; padding: 16px 32px; font-family: 'Orbitron', monospace; font-size: 20px; border-radius: 8px; cursor: pointer; transition: all .2s; margin: 8px; }
   .t3d-cross-btn:hover { background: rgba(255,45,120,.2); transform: scale(1.05); }
-  .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 10px; letter-spacing: 1px; cursor: pointer; border: 1px solid #1A2530; background: #111921; color: #4A6070; margin: 4px; transition: all .18s; }
+  .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 8px 14px; border-radius: 20px; font-family: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer; border: 1px solid #31434F; background: #111921; color: #C5D6DC; margin: 4px; transition: all .18s; }
   .t3d-task-chip.selected { border-color: #00FFB2; background: rgba(0,255,178,.08); color: #00FFB2; }
   .t3d-task-chip:hover { border-color: #E0EAF0; color: #8AABB8; }
   .t3d-progress-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 24px; }
@@ -505,6 +505,9 @@ ${dayContext || "- Nothing logged yet today"}`;
   );
 }
 
+// Task durations are whole minutes between 1 and 180.
+const clampTaskMinutes = value => Math.min(180, Math.max(1, Math.round(Number(value)) || 1));
+
 // ─── Routine coach: describe the applied schedule ─────────────────────────────
 // After a coach change is applied and times are recalculated, ask the coach to
 // describe that exact schedule, so its explanation matches what really changed.
@@ -556,17 +559,33 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
   const draggable = scheduledTasks.filter(t => t.id !== "checkin");
   const locked = scheduledTasks.find(t => t.id === "checkin") || LOCKED_LAST;
 
-  const handleDragStart = (i) => setDragIdx(i);
-  const handleDragOver = (e, i) => {
-    e.preventDefault();
-    if (aiLoading || dragIdx === null || dragIdx === i) return;
+  const moveTask = (from, to) => {
+    if (aiLoading || from === to || to < 0 || to >= draggable.length) return;
     const newList = [...draggable];
-    const [moved] = newList.splice(dragIdx, 1);
-    newList.splice(i, 0, moved);
+    const [moved] = newList.splice(from, 1);
+    newList.splice(to, 0, moved);
     setScheduledTasks(recalcTimes([...newList, locked]));
-    setDragIdx(i);
   };
-  const handleDragEnd = () => setDragIdx(null);
+  // Pointer Events (same approach as the routine editor) so dragging works
+  // with touch as well as a mouse.
+  const handlePointerDown = (e, i) => {
+    if (aiLoading) return;
+    e.preventDefault();
+    setDragIdx(i);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const handlePointerMove = (e) => {
+    if (dragIdx === null) return;
+    e.preventDefault();
+    const rowEl = document.elementFromPoint(e.clientX, e.clientY)?.closest?.("[data-review-index]");
+    if (!rowEl) return;
+    const target = Number(rowEl.dataset.reviewIndex);
+    if (!Number.isNaN(target) && target !== dragIdx) {
+      moveTask(dragIdx, target);
+      setDragIdx(target);
+    }
+  };
+  const handlePointerUp = () => setDragIdx(null);
 
   const optimiseWithAI = async (feedback = "") => {
     if (aiRequestActive.current) return;
@@ -652,21 +671,27 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
   };
   return (
     <div>
-      <div className="t3d-ctitle">DRAG TO REORDER YOUR ROUTINE</div>
+      <div className="t3d-ctitle">REVIEW AND REORDER YOUR ROUTINE</div>
       <div style={{ marginBottom: 12, fontSize: 10, color: "#E0EAF0", letterSpacing: 1 }}>
-        Hold and drag using the lines to reorder. Check-in is locked last.
+        Drag the ≡ handle or use the arrows to reorder. Check-in is locked last.
       </div>
       <div style={{ marginBottom: 8 }}>
         {draggable.map((t, i) => (
-          <div key={t.id || i} draggable={!aiLoading}
-            onDragStart={() => handleDragStart(i)}
-            onDragOver={(e) => handleDragOver(e, i)}
-            onDragEnd={handleDragEnd}
-            style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 10px", borderBottom: "1px solid #1A2530", cursor: "grab", borderRadius: 4, background: dragIdx === i ? "rgba(0,255,178,.04)" : "transparent" }}>
-            <div style={{ color: "#2A3A48", fontSize: 18, userSelect: "none" }}>≡</div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 45 }}>{t.scheduledTime}</div>
-            <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
-            <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
+          <div key={t.id || i} data-review-index={i}
+            style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", borderBottom: "1px solid #1A2530", borderRadius: 4, background: dragIdx === i ? "rgba(0,255,178,.06)" : "transparent" }}>
+            <div aria-label={`Drag to move ${t.name}`}
+              onPointerDown={e => handlePointerDown(e, i)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              style={{ width: 40, minHeight: 44, display: "flex", alignItems: "center", justifyContent: "center", color: "#8AABB8", fontSize: 22, cursor: aiLoading ? "default" : "grab", touchAction: "none", userSelect: "none" }}>≡</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 42 }}>{t.scheduledTime}</div>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12, overflowWrap: "anywhere" }}>{t.name}</div>
+            <div style={{ fontSize: 10, color: "#E0EAF0", whiteSpace: "nowrap" }}>{t.duration} min</div>
+            <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Move ${t.name} up`} disabled={aiLoading || i === 0}
+              onClick={() => moveTask(i, i - 1)} style={{ minWidth: 40, minHeight: 40, padding: 4 }}>↑</button>
+            <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Move ${t.name} down`} disabled={aiLoading || i === draggable.length - 1}
+              onClick={() => moveTask(i, i + 1)} style={{ minWidth: 40, minHeight: 40, padding: 4 }}>↓</button>
           </div>
         ))}
       </div>
@@ -684,7 +709,7 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
       <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
         <div className="t3d-ai-tag" style={{ color: NEON }}>AI COACH</div>
         <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
-          Optimise now. Add feedback to make it fit your life.
+          The coach can reorder, retime or suggest removing tasks. Tell it what you need, or leave the box empty to let it optimise.
         </p>
         <div role="log" aria-label="Routine planning conversation" aria-live="polite"
           style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
@@ -716,20 +741,18 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
           Anything to adjust?
           <textarea className="t3d-input" rows={2} value={aiFeedback} disabled={aiLoading}
             style={{ marginTop: 8, resize: "vertical" }}
-            placeholder="e.g. I need breakfast before the school run."
+            placeholder="e.g. Fit it into 75 minutes, or I need breakfast before the school run."
             onChange={event => setAiFeedback(event.target.value)} />
         </label>
         {aiError && <p role="alert" style={{ fontSize: 11, color: NEON3 }}>{aiError}</p>}
-        <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} disabled={aiLoading || !aiFeedback.trim()}
-          onClick={() => optimiseWithAI(aiFeedback)}>SEND TO COACH</button>
-      </div>      <div style={{ display: "flex", gap: 8 }}>
-        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack} disabled={aiLoading}>← TASKS</button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={() => optimiseWithAI(aiFeedback)} disabled={aiLoading}>
-          {aiLoading ? "THINKING..." : "✨ OPTIMISE WITH AI"}
-        </button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave} disabled={aiLoading}>
+        <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10, minHeight: 40 }} disabled={aiLoading}
+          onClick={() => optimiseWithAI(aiFeedback)}>{aiLoading ? "THINKING..." : "ASK COACH"}</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <button className="t3d-btn" style={{ width: "100%", padding: 14, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave} disabled={aiLoading}>
           LOCK IT IN →
         </button>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ width: "100%", minHeight: 40 }} onClick={onBack} disabled={aiLoading}>← BACK TO TASKS</button>
       </div>
     </div>
   );
@@ -790,7 +813,7 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
               ...task,
               [field]:
                 field === "duration"
-                  ? value === "" ? "" : Number(value)
+                  ? value === "" ? "" : clampTaskMinutes(value)
                   : value
             }
           : task
@@ -855,7 +878,7 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
     const newTask = {
       id: `custom-${Date.now()}`,
       name: newTaskName.trim(),
-      duration: Number(newTaskDuration) || 10,
+      duration: clampTaskMinutes(newTaskDuration || 10),
       type: "tick",
       icon: "▸"
     };
@@ -1095,23 +1118,6 @@ Current tasks: ${JSON.stringify(tasks)}.`,
           YOUR ROUTINE
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "24px 1fr 100px 80px 40px",
-            gap: 8,
-            alignItems: "center",
-            marginBottom: 6,
-            padding: "0 0 6px"
-          }}
-        >
-          <div />
-          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TASK</div>
-          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TIME</div>
-          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>MINUTES</div>
-          <div />
-        </div>
-
         <div style={{ marginBottom: 24 }}>
           {scheduledTasks.map((task, i) => {
             const locked = task.id === "checkin";
@@ -1122,7 +1128,7 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                 data-row-index={i}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "24px 1fr 100px 80px 40px",
+                  gridTemplateColumns: "32px 1fr 1fr 44px",
                   gap: 8,
                   alignItems: "center",
                   padding: "10px 0",
@@ -1136,10 +1142,16 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                   onPointerCancel={handlePointerUp}
+                  aria-label={locked ? undefined : `Drag to move ${task.name}`}
                   style={{
+                    gridRow: "1 / span 2",
                     cursor: locked ? "default" : "grab",
-                    color: "#4A6070",
-                    fontSize: 18,
+                    color: "#8AABB8",
+                    fontSize: 20,
+                    minHeight: 44,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                     touchAction: "none",
                     userSelect: "none"
                   }}
@@ -1147,70 +1159,60 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   {locked ? "🔒" : "≡"}
                 </div>
 
-                <div style={{ minWidth: 0 }}>
+                {/* Name gets its own full-width line so it is readable on a phone. */}
+                <div style={{ gridColumn: "2 / 4", minWidth: 0 }}>
                   <input
                     className="t3d-input"
+                    aria-label="Task name"
                     value={task.name}
                     disabled={locked}
                     onChange={e => updateTask(i, "name", e.target.value)}
-                    style={{ padding: "9px 10px" }}
+                    style={{ padding: "9px 10px", width: "100%" }}
                   />
-                  {!locked && task.routineDay && task.routineDay !== "daily" && (
+                  {!locked && dayGroups.length > 1 && task.routineDay && task.routineDay !== "daily" && (
                     <div style={{ fontSize: 8, color: "#8AABB8", marginTop: 4, letterSpacing: 1 }}>
                       {(dayGroups.find(g => g.id === task.routineDay)?.name || task.routineDay).toUpperCase()} ONLY
                     </div>
                   )}
                 </div>
 
-                <input
-                  type="time"
-                  className="t3d-input"
-                  value={task.scheduledTime || ""}
-                  onChange={e => updateTask(i, "scheduledTime", e.target.value)}
-                  style={{
-                    padding: "9px 6px",
-                    colorScheme: "dark"
-                  }}
-                />
-
-                <div style={{ position: "relative" }}>
-                  <input
-                    type="number"
-                    min="1"
-                    className="t3d-input"
-                    value={task.duration ?? ""}
-                    onChange={e => updateTask(i, "duration", e.target.value)}
-                    style={{
-                      padding: "9px 30px 9px 6px",
-                      textAlign: "center"
-                    }}
-                  />
-                  <span
-                    style={{
-                      position: "absolute",
-                      right: 8,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      fontSize: 8,
-                      color: "#4A6070",
-                      pointerEvents: "none"
-                    }}
-                  >
-                    min
-                  </span>
-                </div>
-
                 {!locked ? (
                   <button
                     className="t3d-btn t3d-btn-sm t3d-btn-red"
+                    aria-label={`Remove ${task.name}`}
                     onClick={() => deleteTask(i)}
-                    style={{ padding: 8 }}
+                    style={{ minWidth: 44, minHeight: 44, padding: 8, gridRow: "1 / span 2", gridColumn: 4 }}
                   >
                     ×
                   </button>
                 ) : (
-                  <div />
+                  <div style={{ gridRow: "1 / span 2", gridColumn: 4 }} />
                 )}
+
+                <label style={{ gridColumn: 2, fontSize: 8, color: "#6F8792", letterSpacing: 1 }}>
+                  TIME
+                  <input
+                    type="time"
+                    className="t3d-input"
+                    value={task.scheduledTime || ""}
+                    onChange={e => updateTask(i, "scheduledTime", e.target.value)}
+                    style={{ padding: "9px 6px", colorScheme: "dark", marginTop: 3 }}
+                  />
+                </label>
+
+                <label style={{ gridColumn: 3, fontSize: 8, color: "#6F8792", letterSpacing: 1 }}>
+                  MINUTES
+                  <input
+                    type="number"
+                    min="1"
+                    max="180"
+                    inputMode="numeric"
+                    className="t3d-input"
+                    value={task.duration ?? ""}
+                    onChange={e => updateTask(i, "duration", e.target.value)}
+                    style={{ padding: "9px 6px", textAlign: "center", marginTop: 3 }}
+                  />
+                </label>
               </div>
             );
           })}
@@ -1241,6 +1243,8 @@ Current tasks: ${JSON.stringify(tasks)}.`,
               <input
                 type="number"
                 min="1"
+                max="180"
+                aria-label="Minutes"
                 className="t3d-input"
                 value={newTaskDuration}
                 onChange={e => setNewTaskDuration(e.target.value)}
@@ -1428,7 +1432,11 @@ function MorningSection({ user }) {
   const [scheduledTasks, setScheduledTasks] = useState([]);
   const [setupReviewVisited, setSetupReviewVisited] = useState(false);
   const DEFAULT_DAY_GROUPS = [{ id: "A", name: "Day A" }, { id: "B", name: "Day B" }];
-  const [dayGroups, setDayGroups] = useState(DEFAULT_DAY_GROUPS);
+  // Empty means alternating days are off.
+  const [dayGroups, setDayGroups] = useState([]);
+  const [confirmChangeRoutine, setConfirmChangeRoutine] = useState(false);
+  const [routineSavedNotice, setRoutineSavedNotice] = useState(false);
+  const setupSnapshotRef = useRef(null);
   const [checkinStep, setCheckinStep] = useState(0);
   const [checkinData, setCheckinData] = useState({});
   const [tempInput, setTempInput] = useState("");
@@ -1531,7 +1539,7 @@ function MorningSection({ user }) {
       if (routineData) {
         setWakeTime(routineData.wake_time || "06:00");
         setScheduledTasks(routineData.tasks || []);
-        setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : DEFAULT_DAY_GROUPS);
+        setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : []);
         setIsSetup(true);
       }
 
@@ -1642,7 +1650,7 @@ function MorningSection({ user }) {
               ...task,
               [field]:
                 field === "duration"
-                  ? value === "" ? "" : Number(value)
+                  ? value === "" ? "" : clampTaskMinutes(value)
                   : value
             }
           : task
@@ -1658,7 +1666,7 @@ function MorningSection({ user }) {
       {
         id: `custom-${Date.now()}`,
         name: customTask.trim(),
-        duration: Number(customTaskDuration) || 10,
+        duration: clampTaskMinutes(customTaskDuration || 10),
         type: "tick",
         icon: "▸"
       }
@@ -1738,8 +1746,21 @@ function MorningSection({ user }) {
       }));
 
     setSelectedTasks(existingHabits);
+    setupSnapshotRef.current = { scheduledTasks, wakeTime, returnView: view };
+    setConfirmChangeRoutine(false);
     setSetupStep(0);
     setView("setup");
+  };
+
+  // Leave the setup wizard without changing the saved routine.
+  const cancelRoutineSetup = () => {
+    const snapshot = setupSnapshotRef.current;
+    if (snapshot) {
+      setScheduledTasks(snapshot.scheduledTasks);
+      setWakeTime(snapshot.wakeTime);
+    }
+    setupSnapshotRef.current = null;
+    setView(snapshot?.returnView === "editRoutine" ? "editRoutine" : "home");
   };
 
   const rotationGroups = dayGroups.length >= 2 ? dayGroups : DEFAULT_DAY_GROUPS;
@@ -1747,7 +1768,10 @@ function MorningSection({ user }) {
   const rotationGroup = rotationGroups[((epochDay % rotationGroups.length) + rotationGroups.length) % rotationGroups.length];
   const rotationDay = rotationGroup.id;
   const dayGroupName = id => rotationGroups.find(g => g.id === id)?.name || `Day ${id}`;
-  const activeScheduledTasks = scheduledTasks.filter(task => !task.routineDay || task.routineDay === "daily" || task.routineDay === rotationDay || task.id === "checkin");
+  const alternatingOn = dayGroups.length >= 2;
+  const activeScheduledTasks = alternatingOn
+    ? scheduledTasks.filter(task => !task.routineDay || task.routineDay === "daily" || task.routineDay === rotationDay || task.id === "checkin")
+    : scheduledTasks;
   const allSteps = scheduledTasks.length > 0 ? activeScheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
 
   const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
@@ -2022,6 +2046,21 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const entry = history.find(h => h.date === dateStr && !h.data?.inProgress);
     return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
   });
+
+  const changeRoutineDialog = confirmChangeRoutine ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+      <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="change-routine-title" style={{ width: "100%", maxWidth: 360, borderColor: NEON3, textAlign: "center" }}>
+        <div id="change-routine-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>START YOUR ROUTINE AGAIN?</div>
+        <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>
+          This rebuilds your routine from the wake-up step. Your current routine stays saved until you lock in the new one, and you can cancel at any step. To change a few tasks, use Edit Routine instead.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setConfirmChangeRoutine(false)}>KEEP CURRENT</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1, minHeight: 44 }} onClick={startRoutineSetup}>START AGAIN</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   if (loading) return (
     <div className="t3d-fade">
@@ -2432,10 +2471,16 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               )}
             </div>
 
+            {changeRoutineDialog}
+            {routineSavedNotice && (
+              <div role="status" style={{ marginBottom: 16, padding: "12px 14px", border: `1px solid ${NEON}`, background: "rgba(0,255,178,.08)", borderRadius: 7, color: NEON, fontSize: 12 }}>
+                ✓ Routine saved
+              </div>
+            )}
             {/* Today's schedule */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE · {dayGroupName(rotationDay).toUpperCase()}</div>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE{alternatingOn ? ` · ${dayGroupName(rotationDay).toUpperCase()}` : ""}</div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
   <button
     className="t3d-btn t3d-btn-sm"
@@ -2453,7 +2498,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   <button
     className="t3d-btn t3d-btn-sm t3d-btn-red"
-    onClick={startRoutineSetup}
+    onClick={() => setConfirmChangeRoutine(true)}
   >
     CHANGE ROUTINE
   </button>
@@ -2462,7 +2507,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               {activeScheduledTasks.map((t, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, width: 45 }}>{t.scheduledTime}</div>
-                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}{t.routineDay && t.routineDay !== "daily" ? ` · ${dayGroupName(t.routineDay).toUpperCase()}` : ""}</div>
+                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}{alternatingOn && t.routineDay && t.routineDay !== "daily" ? ` · ${dayGroupName(t.routineDay).toUpperCase()}` : ""}</div>
                   <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
                 </div>
               ))}
@@ -2545,20 +2590,23 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   // EDIT ROUTINE view
   if (view === "editRoutine") {
     return (
+      <>
       <MorningRoutineEditor
         wakeTime={wakeTime}
         setWakeTime={setWakeTime}
         scheduledTasks={scheduledTasks}
         setScheduledTasks={setScheduledTasks}
-        dayGroups={rotationGroups}
+        dayGroups={dayGroups}
         onOpenRotationSetup={() => setView("rotationSetup")}
         onCancel={() => setView("home")}
-        onRebuild={startRoutineSetup}
+        onRebuild={() => setConfirmChangeRoutine(true)}
         onSave={async () => {
           await saveRoutine(scheduledTasks);
           setView("home");
         }}
       />
+      {changeRoutineDialog}
+      </>
     );
   }
 
@@ -2593,6 +2641,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             ))}
           </div>
 
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -12, marginBottom: 12 }}>
+            <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 40 }} onClick={cancelRoutineSetup}>CANCEL</button>
+          </div>
           {setupStep === 0 && (
             <div>
               <div className="t3d-ctitle">WHAT TIME DO YOU WANT TO WAKE UP?</div>
@@ -2789,8 +2840,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
                 <div>
                   {SUGGESTED_TASKS.map((t, i) => (
-                    <span
+                    <button
+                      type="button"
                       key={i}
+                      aria-pressed={Boolean(selectedTasks.find(s => s.name === t.name))}
                       className={`t3d-task-chip ${
                         selectedTasks.find(s => s.name === t.name)
                           ? "selected"
@@ -2800,9 +2853,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     >
                       {selectedTasks.find(s => s.name === t.name)
                         ? "✓ "
-                        : ""}
+                        : "+ "}
                       {t.name} ({t.duration}m)
-                    </span>
+                    </button>
                   ))}
                 </div>
               </div>
@@ -2853,6 +2906,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     <input
                       type="number"
                       min="1"
+                      max="180"
+                      aria-label="Minutes"
                       className="t3d-input"
                       value={customTaskDuration}
                       onChange={e =>
@@ -2936,12 +2991,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
                     <button
                       className="t3d-btn t3d-btn-sm t3d-btn-red"
+                      aria-label={`Remove ${task.name}`}
                       onClick={() =>
                         setSelectedTasks(prev =>
                           prev.filter((_, index) => index !== i)
                         )
                       }
-                      style={{ padding: "4px 8px" }}
+                      style={{ minWidth: 40, minHeight: 40, padding: "4px 8px", fontSize: 14 }}
                     >
                       ×
                     </button>
@@ -2980,6 +3036,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     </div>
                   </div>
                 ))}
+                <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.6, marginTop: 8 }}>
+                  🔒 Sleep, weight, photos and the check-in are in every routine: they are what TRACK3D uses to track your progress and score your morning.
+                </div>
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
@@ -3035,8 +3094,12 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               onBack={() => setSetupStep(1)}
               onSave={async () => {
                 await saveRoutine(scheduledTasks);
+                setupSnapshotRef.current = null;
                 setIsSetup(true);
                 setView("home");
+                window.scrollTo({ top: 0, behavior: "smooth" });
+                setRoutineSavedNotice(true);
+                setTimeout(() => setRoutineSavedNotice(false), 4000);
               }}
             />
             </div>
