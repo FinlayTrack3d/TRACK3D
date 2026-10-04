@@ -251,6 +251,7 @@ const css = `
   .t3d-cross-btn { background: rgba(255,45,120,.1); border: 2px solid #FF2D78; color: #FF2D78; padding: 16px 32px; font-family: 'Orbitron', monospace; font-size: 20px; border-radius: 8px; cursor: pointer; transition: all .2s; margin: 8px; }
   .t3d-cross-btn:hover { background: rgba(255,45,120,.2); transform: scale(1.05); }
   .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 8px 14px; border-radius: 20px; font-family: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer; border: 1px solid #31434F; background: #111921; color: #C5D6DC; margin: 4px; transition: all .18s; }
+  .t3d-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .t3d-task-chip.selected { border-color: #00FFB2; background: rgba(0,255,178,.08); color: #00FFB2; }
   .t3d-task-chip:hover { border-color: #E0EAF0; color: #8AABB8; }
   .t3d-progress-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 24px; }
@@ -4333,7 +4334,11 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_logs").select("session_name,date,in_progress").eq("user_id", user.id).eq("date", today),
-    ]).then(([morning, nutrition, nutritionPlan, split, workouts]) => setTodayData({
+      supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
+    ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
+      loaded: true,
+      hasRoutine: Boolean(routine.data),
+      hasPlan: Boolean(split.data?.sessions?.length),
       morning: morning.data || null,
       nutrition: nutrition.data || null,
       nutritionPlan: nutritionPlan.data || null,
@@ -4367,8 +4372,29 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
 
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
+  const firstRunSteps = [
+    { label: "Set up your morning", done: todayData.hasRoutine, section: "morning" },
+    { label: "Build your training plan", done: todayData.hasPlan, section: "fitness" },
+    { label: "Set your calorie target", done: Boolean(calorieGoal), section: "nutrition" },
+  ];
   return (
     <div className="t3d-fade">
+      {todayData.loaded && firstRunSteps.some(step => !step.done) && (
+        <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
+          <div className="t3d-ctitle">GET STARTED</div>
+          <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {firstRunSteps.map((step, index) => (
+              <li key={step.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: index < firstRunSteps.length - 1 ? `1px solid ${BORDER}` : "none" }}>
+                <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, border: `1px solid ${step.done ? NEON : "#31434F"}`, color: step.done ? "#06100D" : "#8AABB8", background: step.done ? NEON : "transparent" }}>{step.done ? "✓" : index + 1}</span>
+                <span style={{ flex: 1, fontSize: 12, color: step.done ? "#6F8792" : "#E0EAF0", textDecoration: step.done ? "line-through" : "none" }}>
+                  {step.label}{step.done ? <span className="t3d-sr-only"> (done)</span> : null}
+                </span>
+                {!step.done && <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={() => onNavigate(step.section)}>START →</button>}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14, marginBottom: 16 }}>
         <div className="t3d-card">
           <div className="t3d-ctitle">DAILY SCORE</div>
@@ -4380,7 +4406,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
           <div className="t3d-ctitle">MORNING ROUTINE</div>
           <div style={{ fontSize: 46, color: morningDone && !morningSkipped ? NEON : morningInProgress ? "#FFB547" : BORDER, lineHeight: 1 }}>{morningDone && !morningSkipped ? "✓" : morningInProgress ? "…" : "○"}</div>
           <div className="t3d-slabel" style={{ marginTop: 10 }}>{morningSkipped ? "SKIPPED TODAY" : morningDone ? `DONE · SCORE ${todayData.morning?.score || 0}/10` : morningInProgress ? "STARTED · NOT FINISHED" : "NOT DONE YET"}</div>
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : morningInProgress ? "GO TO MORNING →" : "START MORNING →"}</button>
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : morningInProgress ? "GO TO MORNING →" : todayData.loaded && !todayData.hasRoutine ? "SET UP MY MORNING →" : "START MORNING →"}</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">FITNESS TODAY</div>
@@ -4393,8 +4419,9 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
           </> : completedWorkoutNames.length ? <>
             <div style={{ fontSize: 22, color: NEON, fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>✓ {completedWorkoutNames.join(" + ")}</div>
             <div className="t3d-slabel" style={{ marginTop: 10 }}>COMPLETED TODAY</div>
-          </> : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? "START WORKOUT →" : "OPEN FITNESS"}</button>
+          </> : todayData.loaded && !todayData.hasPlan ? <div style={{ color: "#8AABB8", fontSize: 12 }}>No training plan yet.</div>
+            : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? "START WORKOUT →" : todayData.loaded && !todayData.hasPlan ? "BUILD MY PLAN →" : "OPEN FITNESS"}</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">CALORIES</div>
@@ -4617,6 +4644,7 @@ function Fitness({ user, isActive = true }) {
   const [planChangeRecommendation, setPlanChangeRecommendation] = useState(null);
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
+  const [endWorkoutConfirm, setEndWorkoutConfirm] = useState(null);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
   const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" });
   const [editingExerciseIdx, setEditingExerciseIdx] = useState(null);
@@ -5031,10 +5059,10 @@ function withPlanApproval(sessions, now = new Date()) {
     return adjusted;
   };
 
-  const startWorkout = async session => {
-    const minuteLimit = parseInt(availableMinutes, 10);
+  const startWorkout = async (session, options = { minutes: availableMinutes, context: gymContext, name: gymName }) => {
+    const minuteLimit = parseInt(options.minutes, 10);
     const sessionToStart = fitSessionToMinutes(normalizeFitnessSessions([session])[0], minuteLimit);
-    sessionToStart.gymContext = { type: gymContext, name: gymName.trim() };
+    sessionToStart.gymContext = { type: options.context, name: String(options.name || "").trim() };
     const startedAt = Date.now();
     if (workoutLogIdRef.current && workoutInProgress) {
       await supabase.from("workout_logs").update({ in_progress: false }).eq("id", workoutLogIdRef.current).eq("user_id", user.id);
@@ -5084,7 +5112,15 @@ function withPlanApproval(sessions, now = new Date()) {
     setView("workout");
   };
 
+  // Start straight away with the full session at the usual gym; the
+  // time/gym options are behind a small link (openWorkoutOptions).
   const requestStartWorkout = session => {
+    setAvailableMinutes("");
+    setGymContext("usual");
+    setGymName("");
+    startWorkout(session, { minutes: "", context: "usual", name: "" });
+  };
+  const openWorkoutOptions = session => {
     setPendingSession(session);
     setAvailableMinutes("");
     setGymContext("usual");
@@ -5255,7 +5291,8 @@ function withPlanApproval(sessions, now = new Date()) {
     const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision };
     const newCompleted = { ...completedSets, [eIdx]: [...(completedSets[eIdx] || []), newSet] };
     setCompletedSets(newCompleted);
-    setCurrentInputs(prev => ({ ...prev, [eIdx]: { weight: "", reps: "" } }));
+    // Keep the last weight for the next set; only reps are re-entered.
+    setCurrentInputs(prev => ({ ...prev, [eIdx]: { weight, reps: "" } }));
 
     const totalSets = activeSession.exercises[eIdx]?.sets || 0;
 
@@ -5510,10 +5547,24 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             <div style={{ color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
               {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN
             </div>
-            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }} onClick={() => finishWorkout()} disabled={workoutFinishing}>
+            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }} onClick={() => remainingSetCount > 0 ? setEndWorkoutConfirm(remainingSetCount) : finishWorkout()} disabled={workoutFinishing}>
               {workoutFinishing ? "SAVING..." : "END WORKOUT"}
             </button>
           </div>
+          {endWorkoutConfirm !== null && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
+              <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="end-workout-title" style={{ width: "100%", maxWidth: 340, borderColor: "#FFB547", textAlign: "center" }}>
+                <div id="end-workout-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>
+                  {endWorkoutConfirm} SET{endWorkoutConfirm === 1 ? "" : "S"} NOT LOGGED
+                </div>
+                <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>End anyway? Sets you have not logged will be recorded as skipped.</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setEndWorkoutConfirm(null)}>KEEP GOING</button>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1, minHeight: 44 }} onClick={() => { setEndWorkoutConfirm(null); finishWorkout(); }}>END ANYWAY</button>
+                </div>
+              </div>
+            </div>
+          )}
           {/* Delete session - kept nearby but deliberately unobtrusive */}
           <div style={{ textAlign: "right", marginBottom: 10 }}>
             <button type="button" onClick={() => setDiscardWorkoutWarning(true)}
@@ -6529,6 +6580,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   }
   const recommendedSession = missedRecommendation?.session || todaySession;
   const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase()));
+  const trainedToday = history.some(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2));
+  let nextScheduled = null;
+  for (let daysAhead = 1; daysAhead <= 7 && !nextScheduled; daysAhead += 1) {
+    const date = new Date(homeTodayAnchor);
+    date.setUTCDate(date.getUTCDate() + daysAhead);
+    const session = getSessionForDayCode(dayCodes[date.getUTCDay()]);
+    if (session) nextScheduled = { session, dayLabel: daysAhead === 1 ? "tomorrow" : date.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long" }) };
+  }
   const activeCompletedSets = Object.values(completedSets).reduce((total, sets) => total + sets.length, 0);
   const activeTotalSets = activeSession?.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0) || 0;
   const programmeApproved = sessions.length > 0 && sessions.every(session => session.approval?.approved);
@@ -6618,9 +6677,21 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 </div>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 12, fontSize: 10, color: "#6F8792" }}>
                   <span>Not this one?</span>
-                  <button type="button" onClick={() => requestStartWorkout(activeSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Restart it</button>
+                  <button type="button" onClick={() => openWorkoutOptions(activeSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Restart it</button>
                   <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Switch workout</button>
                   <button type="button" onClick={() => setDiscardWorkoutWarning(true)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Delete it</button>
+                </div>
+              </div>
+            ) : (recommendedDoneToday || (!recommendedSession && trainedToday)) ? (
+              <div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON, letterSpacing: 2, marginBottom: 8 }}>DONE FOR TODAY ✓</div>
+                <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+                  {nextScheduled ? `Next scheduled: ${nextScheduled.session.name}, ${nextScheduled.dayLabel}.` : "No more sessions scheduled this week."}
+                </div>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 10, color: "#6F8792" }}>
+                  <span>Want to train again?</span>
+                  {recommendedSession && <button type="button" onClick={() => requestStartWorkout(recommendedSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Repeat {recommendedSession.name}</button>}
+                  <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Choose a workout</button>
                 </div>
               </div>
             ) : recommendedSession ? (
@@ -6638,11 +6709,16 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   )}
                 </div>
                 <button className="t3d-big-btn" style={{ flex: "0 1 300px", margin: 0, background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 13, fontWeight: 900, letterSpacing: 2, boxShadow: "0 0 22px rgba(0,255,178,.24)" }} onClick={() => requestStartWorkout(recommendedSession)}>
-                  ▶ {recommendedDoneToday ? "START WORKOUT AGAIN" : "START WORKOUT"}
+                  ▶ START WORKOUT
+                </button>
+                <button type="button" onClick={() => openWorkoutOptions(recommendedSession)} style={{ flexBasis: "100%", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "4px 0", textAlign: "right", textDecoration: "underline" }}>
+                  Short on time or at a different gym?
                 </button>
               </div>
             ) : (
-              <div style={{ fontSize: 11, color: "#4A6070" }}>No missed or scheduled session. Choose any workout below.</div>
+              <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+                No session scheduled today.{nextScheduled ? ` Next: ${nextScheduled.session.name}, ${nextScheduled.dayLabel}.` : ""} Choose any workout below.
+              </div>
             )}
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 16, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
@@ -6673,7 +6749,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {pendingSession && (
             <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 }}>
               <div className="t3d-card" style={{ width: "100%", maxWidth: 380, maxHeight: "calc(100dvh - 40px)", overflowY: "auto" }}>
-                <div className="t3d-ctitle" style={{ color: NEON }}>BEFORE YOU START · OPTIONAL</div>
+                <div className="t3d-ctitle" style={{ color: NEON }}>WORKOUT OPTIONS</div>
                 <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 14 }}>{pendingSession.name}</div>
                 <label style={{ display: "block", fontSize: 9, color: "#8AABB8", marginBottom: 14 }}>
                   HOW MANY MINUTES DO YOU HAVE?
