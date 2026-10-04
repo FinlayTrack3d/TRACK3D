@@ -4483,7 +4483,9 @@ function Fitness({ user, isActive = true }) {
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
-  const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], tempo: "" });
+  const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" });
+  const [editingExerciseIdx, setEditingExerciseIdx] = useState(null);
+  const [emptySessionsWarning, setEmptySessionsWarning] = useState(false);
   const [viewingSession, setViewingSession] = useState(null); // log entry shown in the history popup
   const [viewingExercise, setViewingExercise] = useState(null); // exercise name shown as a graph within the popup
   const [editingHistorySession, setEditingHistorySession] = useState(false);
@@ -5785,6 +5787,26 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     );
   }
 
+  const openExerciseEditor = (sessionIdx, exerciseIdx) => {
+    const exercise = sessions[sessionIdx]?.exercises?.[exerciseIdx];
+    if (!exercise) return;
+    const reps = Array.isArray(exercise.reps) ? exercise.reps : String(exercise.reps || "").split("/");
+    const uniform = reps.every(rep => rep === reps[0]);
+    setNewEx({ name: exercise.name, sets: Number(exercise.sets) || reps.length || 3, reps, repsAll: uniform ? reps[0] || "" : "", perSet: !uniform, tempo: exercise.tempo || "" });
+    setEditingExerciseIdx(exerciseIdx);
+    setAddExerciseModal(sessionIdx);
+  };
+
+  // A plan the user built by hand is theirs: save it approved, starting now.
+  const saveManualPlan = async (planSessions = sessions) => {
+    const now = new Date();
+    const approved = withPlanApproval(planSessions, now);
+    const extra = { programme_started_at: now.toISOString(), week_reviewed_at: null };
+    await saveSplit(approved, extra);
+    setSplit({ sessions: approved, ...extra });
+    setView("home");
+  };
+
   // ── MANUAL SETUP ──────────────────────────────────────────────────────────
   if (view === "setup") {
     return (
@@ -5792,6 +5814,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         <div className="t3d-card">
           {setupStep === 0 && (
             <div>
+              <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")}>← BACK</button>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
               <button className="t3d-btn t3d-btn-sm" onClick={openAiBuilder}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
@@ -5848,11 +5871,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>EXERCISES</div>
                 {sessions[currentSessionIdx].exercises?.map((ex, eIdx) => (
-                  <div key={eIdx} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
+                  <div key={eIdx} role="button" tabIndex={0} aria-label={`Edit ${ex.name}`}
+                    onClick={() => openExerciseEditor(currentSessionIdx, eIdx)}
+                    onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openExerciseEditor(currentSessionIdx, eIdx); } }}
+                    style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: "pointer" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                      <div style={{ fontSize: 12 }}>{ex.name}</div>
-                      <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }}
-                        onClick={() => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s))}>✕</button>
+                      <div style={{ fontSize: 12 }}>{ex.name} <span style={{ fontSize: 9, color: "#6F8792" }}>· TAP TO EDIT</span></div>
+                      <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} aria-label={`Remove ${ex.name}`}
+                        onClick={event => { event.stopPropagation(); setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s)); }}>✕</button>
                     </div>
                     <div style={{ fontSize: 10, color: "#E0EAF0" }}>
                       {ex.sets} sets · {Array.isArray(ex.reps) ? ex.reps.join(" / ") : ex.reps} reps
@@ -5861,7 +5887,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   </div>
                 ))}
                 <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginTop: 4 }}
-                  onClick={() => setAddExerciseModal(currentSessionIdx)}>+ ADD EXERCISE</button>
+                  onClick={() => { setEditingExerciseIdx(null); setNewEx({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" }); setAddExerciseModal(currentSessionIdx); }}>+ ADD EXERCISE</button>
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
@@ -5869,12 +5895,11 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 {currentSessionIdx < sessions.length-1 ? (
                   <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => setCurrentSessionIdx(i => i+1)}>NEXT SESSION →</button>
                 ) : (
-                  <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
+                  <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => {
+                    if (sessions.some(s => !s.exercises?.length)) { setEmptySessionsWarning(true); return; }
                     const hasNoDays = sessions.some(s => !s.days || s.days.length === 0);
                     if (hasNoDays) { setNoDaysWarning(true); return; }
-                    await saveSplit(sessions);
-                    setSplit({ sessions });
-                    setView("home");
+                    saveManualPlan();
                   }}>SAVE SPLIT ✓</button>
                 )}
               </div>
@@ -5893,22 +5918,49 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setNoDaysWarning(false)}>GO BACK & ADD DAYS</button>
-                <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={async () => {
+                <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={() => {
                   setNoDaysWarning(false);
-                  await saveSplit(sessions);
-                  setSplit({ sessions });
-                  setView("home");
+                  saveManualPlan();
                 }}>SAVE ANYWAY</button>
               </div>
             </div>
           </div>
         )}
 
+        {/* Sessions without exercises would not be saved */}
+        {emptySessionsWarning && (() => {
+          const emptySessions = sessions.map((session, index) => ({ session, index })).filter(({ session }) => !session.exercises?.length);
+          return (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+              <div role="alertdialog" aria-modal="true" aria-labelledby="empty-sessions-title" style={{ background: SURFACE, border: "1px solid #FFB547", borderRadius: 8, padding: 24, maxWidth: 360, textAlign: "center" }}>
+                <div id="empty-sessions-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>
+                  {emptySessions.length === 1 ? "1 SESSION HAS NO EXERCISES" : `${emptySessions.length} SESSIONS HAVE NO EXERCISES`}
+                </div>
+                <div style={{ fontSize: 12, color: "#C5D6DC", marginBottom: 18, lineHeight: 1.7 }}>
+                  {emptySessions.map(({ session }) => session.name || "Unnamed session").join(", ")} will not be saved unless you add exercises.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => { setEmptySessionsWarning(false); setCurrentSessionIdx(emptySessions[0].index); }}>ADD EXERCISES</button>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={() => {
+                    setEmptySessionsWarning(false);
+                    const remaining = sessions.filter(session => session.exercises?.length);
+                    if (!remaining.length) return;
+                    setSessions(remaining);
+                    setCurrentSessionIdx(0);
+                    if (remaining.some(session => !session.days?.length)) { setNoDaysWarning(true); return; }
+                    saveManualPlan(remaining);
+                  }}>SAVE WITHOUT THEM</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Add exercise modal */}
         {addExerciseModal !== null && (
           <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380 }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>ADD EXERCISE</div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>{editingExerciseIdx === null ? "ADD EXERCISE" : "EDIT EXERCISE"}</div>
 
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>EXERCISE NAME</div>
@@ -5930,13 +5982,20 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 </div>
               </div>
 
-              {/* Per-set rep ranges */}
+              {/* Reps: one box for all sets, per-set optional */}
               <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS PER SET</div>
-                {Array.from({ length: newEx.sets || 3 }, (_, i) => (
-                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>REPS FOR ALL SETS</div>
+                <input className="t3d-input" placeholder="e.g. 8-10 or 8" value={newEx.repsAll} disabled={newEx.perSet}
+                  onChange={e => setNewEx(prev => ({ ...prev, repsAll: e.target.value }))} />
+                <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 6 }}>Leave blank for 8–12 reps.</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10, color: "#C5D6DC", marginTop: 10, minHeight: 32 }}>
+                  <input type="checkbox" checked={newEx.perSet} onChange={e => setNewEx(prev => ({ ...prev, perSet: e.target.checked, reps: Array.from({ length: prev.sets || 3 }, (_, i) => prev.reps[i] || prev.repsAll || "") }))} />
+                  Set different reps for each set
+                </label>
+                {newEx.perSet && Array.from({ length: newEx.sets || 3 }, (_, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
                     <div style={{ fontSize: 10, color: "#E0EAF0", width: 40, fontFamily: "'Orbitron',monospace" }}>SET {i+1}</div>
-                    <input className="t3d-input" placeholder="e.g. 8-10 or 8"
+                    <input className="t3d-input" placeholder="8-12"
                       value={newEx.reps[i] || ""}
                       onChange={e => setNewEx(prev => {
                         const reps = [...(prev.reps || [])];
@@ -5948,15 +6007,23 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setAddExerciseModal(null); setNewEx({ name: "", sets: 3, reps: [], tempo: "" }); }}>CANCEL</button>
-                <button className="t3d-btn" style={{ flex: 1 }} disabled={!newEx.name}
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setAddExerciseModal(null); setEditingExerciseIdx(null); setNewEx({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" }); }}>CANCEL</button>
+                <button className="t3d-btn" style={{ flex: 1 }} disabled={!newEx.name.trim()}
                   onClick={() => {
+                    const setCount = newEx.sets || 3;
+                    const exercise = {
+                      name: newEx.name.trim(), sets: setCount, tempo: newEx.tempo,
+                      reps: Array.from({ length: setCount }, (_, index) => (newEx.perSet ? newEx.reps[index] : newEx.repsAll)?.trim() || "8-12"),
+                    };
                     setSessions(prev => prev.map((s, i) => i === addExerciseModal ? {
-                      ...s, exercises: [...(s.exercises||[]), { name: newEx.name, sets: newEx.sets || 3, reps: Array.from({ length: newEx.sets || 3 }, (_, index) => newEx.reps[index]?.trim() || "8-12"), tempo: newEx.tempo }]
+                      ...s, exercises: editingExerciseIdx === null
+                        ? [...(s.exercises || []), exercise]
+                        : s.exercises.map((existing, index) => index === editingExerciseIdx ? { ...existing, ...exercise } : existing),
                     } : s));
                     setAddExerciseModal(null);
-                    setNewEx({ name: "", sets: 3, reps: [], tempo: "" });
-                  }}>ADD ✓</button>
+                    setEditingExerciseIdx(null);
+                    setNewEx({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" });
+                  }}>{editingExerciseIdx === null ? "ADD ✓" : "SAVE ✓"}</button>
               </div>
             </div>
           </div>
@@ -6307,10 +6374,13 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const todaySession = getSessionForDayCode(homeDate.dayCode);
   const homeTodayAnchor = new Date(`${today}T12:00:00Z`);
   let missedRecommendation = null;
+  // Only days after the plan was created can have a missed session.
+  const planStartKey = split?.programme_started_at ? getZonedDateInfo(new Date(split.programme_started_at), homeTimeZone).dateKey : null;
   for (let daysAgo = 1; daysAgo <= 7; daysAgo += 1) {
     const scheduledDate = new Date(homeTodayAnchor);
     scheduledDate.setUTCDate(scheduledDate.getUTCDate() - daysAgo);
     const dateKey = scheduledDate.toISOString().slice(0, 10);
+    if (planStartKey && dateKey <= planStartKey) break;
     const scheduledSession = getSessionForDayCode(dayCodes[scheduledDate.getUTCDay()]);
     if (!scheduledSession) continue;
     const trainedSince = history.some(log => log.session_name?.toLowerCase() === scheduledSession.name?.toLowerCase() && log.date >= dateKey && log.date <= today);
@@ -6373,10 +6443,16 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           <div style={{ fontSize: 40, marginBottom: 16 }}>⚡</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>FITNESS</div>
           <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>Set up your training programme.<br />Track every session. Beat every record.</div>
-          <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-            <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10 }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
-            <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
-              onClick={openAiBuilder}>🤖 AI BUILD MY PROGRAMME</button>
+          <div style={{ display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 200px", maxWidth: 260 }}>
+              <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, width: "100%" }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
+              <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 7, lineHeight: 1.5 }}>For people who already know the exercises, sets and reps they want.</div>
+            </div>
+            <div style={{ flex: "1 1 200px", maxWidth: 260 }}>
+              <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, width: "100%", borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
+                onClick={openAiBuilder}>🤖 AI BUILD MY PROGRAMME</button>
+              <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 7, lineHeight: 1.5 }}>For beginners or anyone who wants a plan built from a few questions.</div>
+            </div>
           </div>
           <div style={{ marginTop: 20, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>TRACK3D provides general fitness guidance. Consult a qualified professional before starting any new exercise programme. Not medical advice.</div>
         </div>
@@ -6571,7 +6647,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>RECOMMENDED WEEKLY SPLIT</div>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>YOUR WEEKLY PLAN</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={openPlanChangeCoach}>CHANGE PLAN</button>
