@@ -8,7 +8,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
+import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
 
 const NEON = "#00FFB2";
 const NEON2 = "#00C8FF";
@@ -276,7 +276,7 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction }) {
+function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -348,6 +348,7 @@ User data today:
         }),
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Coach is unavailable right now.");
       const reply = data.content?.map(b => b.text || "").join("") || "Unable to connect.";
       setMessages([...updated, { role: "assistant", content: reply }]);
       // A coach that carries a running memory ends every reply with a hidden
@@ -355,14 +356,19 @@ User data today:
       // different device) picks up where this one left off.
       const memoryMatch = reply.match(/\[MEMORY\]([\s\S]*?)\[\/MEMORY\]/i);
       if (memoryMatch && onMemoryUpdate) onMemoryUpdate(memoryMatch[1].trim());
-    } catch {
-      setMessages([...updated, { role: "assistant", content: "Connection error." }]);
+    } catch (error) {
+      const isConnectionFailure = !navigator.onLine || error instanceof TypeError;
+      setMessages([...updated, { role: "assistant", content: isConnectionFailure ? "Connection error. Check your internet connection and try again." : (error.message || "Coach is unavailable right now. Your workout is still saved.") }]);
     }
     setLoading(false);
     setTimeout(scroll, 50);
   };
 
-  const activate = () => { setStarted(true); send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on.")); };
+  const activate = () => {
+    setStarted(true);
+    if (compact) setExpanded(true);
+    if (!openWithoutPrompt) send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."));
+  };
 
   const choosePersonality = async nextPersonality => {
     setPersonality(nextPersonality);
@@ -4263,6 +4269,7 @@ function Fitness({ user, isActive = true }) {
   const [editingHistorySession, setEditingHistorySession] = useState(false);
   const [historyEditOriginal, setHistoryEditOriginal] = useState(null);
   const [historySaving, setHistorySaving] = useState(false);
+  const [deleteHistoryWorkout, setDeleteHistoryWorkout] = useState(null);
   const [draggedWorkoutDay, setDraggedWorkoutDay] = useState(null);
   const [showOtherWorkouts, setShowOtherWorkouts] = useState(false);
   const [discardWorkoutWarning, setDiscardWorkoutWarning] = useState(false);
@@ -4273,6 +4280,8 @@ function Fitness({ user, isActive = true }) {
   const [editingSet, setEditingSet] = useState(null);
   const [completionFeedback, setCompletionFeedback] = useState("");
   const [completionFeedbackLoading, setCompletionFeedbackLoading] = useState(false);
+  const [workoutSaveError, setWorkoutSaveError] = useState("");
+  const [workoutFinishing, setWorkoutFinishing] = useState(false);
   const [approvalReview, setApprovalReview] = useState(null);
   const [approvalQuestion, setApprovalQuestion] = useState("");
   const [approvalMessages, setApprovalMessages] = useState([]);
@@ -4303,11 +4312,10 @@ function Fitness({ user, isActive = true }) {
   const [activeWorkoutLogId, setActiveWorkoutLogId] = useState(null); // row in workout_logs we're autosaving into
   const otherWorkoutsRef = useRef(null);
 
-  // Mini-save plumbing for the active workout. Refs (not just state) so a
-  // save that's already in flight is visible synchronously to the next one.
+  // Mini-save plumbing for the active workout. Every write is chained in
+  // order so an autosave can never replace or overtake the final save.
   const workoutLogIdRef = useRef(null);
-  const workoutLogSavingRef = useRef(false);
-  const workoutLogPendingRef = useRef(null);
+  const workoutSaveChainRef = useRef(Promise.resolve());
   const workoutFinalizedRef = useRef(false);
   useEffect(() => { workoutLogIdRef.current = activeWorkoutLogId; }, [activeWorkoutLogId]);
 
@@ -4432,7 +4440,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       // A generous window so an exercise's history still surfaces ("last time")
       // even after a session gets restructured or an exercise sits unused for a while.
       const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).eq("in_progress", false).order("created_at", { ascending: false }).limit(250);
-      if (logs) setHistory(logs);
+      if (logs) setHistory(logs.map(log => ({ ...log, ai_feedback: log.ai_feedback || log.exercises?.find(exercise => exercise.ai_feedback)?.ai_feedback || "" })));
       const { data: memoryRow } = await supabase.from("coach_memory").select("summary").eq("user_id", user.id).single();
       if (memoryRow?.summary) setCoachMemory(memoryRow.summary);
     } catch (e) { console.log("Load error:", e); }
@@ -4475,22 +4483,15 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     };
   };
 
-  // Writes the workout's current sets to Supabase right away, creating the
-  // row on the first set and updating it in place after that (so a closed
-  // tab or dead battery never loses more than the set in flight). Any call
-  // made while one is already saving is queued and re-run with the latest
-  // data once it finishes. finalize=true is only for the real end of a
-  // session, and locks the row so a stray autosave can't reopen it.
-  const persistWorkoutLog = async (setsToSave, { finalize = false } = {}) => {
-    if (!user || !activeSession) return;
-    if (workoutFinalizedRef.current && !finalize) return;
-    if (workoutLogSavingRef.current) {
-      workoutLogPendingRef.current = { setsToSave, finalize };
-      return;
-    }
-    workoutLogSavingRef.current = true;
-    try {
-      const payload = buildWorkoutLogPayload(setsToSave);
+  // Writes the workout's current sets to Supabase right away. Calls are
+  // strictly serialized: the final write always runs after every autosave
+  // and callers can await the actual database result.
+  const persistWorkoutLog = (setsToSave, { finalize = false } = {}) => {
+    if (!user || !activeSession) return Promise.resolve(null);
+    const setsSnapshot = structuredClone(setsToSave || {});
+    const perform = async () => {
+      if (workoutFinalizedRef.current && !finalize) return null;
+      const payload = buildWorkoutLogPayload(setsSnapshot);
       if (workoutLogIdRef.current) {
         const { error } = await supabase.from("workout_logs")
           .update({ ...payload, in_progress: !finalize })
@@ -4505,20 +4506,20 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
         setActiveWorkoutLogId(data.id);
       }
       if (finalize) workoutFinalizedRef.current = true;
-    } catch (e) {
-      console.log("Workout autosave error:", e);
-    } finally {
-      workoutLogSavingRef.current = false;
-      if (workoutLogPendingRef.current) {
-        const next = workoutLogPendingRef.current;
-        workoutLogPendingRef.current = null;
-        persistWorkoutLog(next.setsToSave, { finalize: next.finalize });
-      }
-    }
+      setWorkoutSaveError("");
+      return { id: workoutLogIdRef.current, payload };
+    };
+    const queued = workoutSaveChainRef.current.then(perform);
+    workoutSaveChainRef.current = queued.catch(() => null);
+    return queued.catch(error => {
+      console.error("Workout save error:", error.message);
+      setWorkoutSaveError("Your workout could not be saved to the server. Keep this page open and try again.");
+      throw error;
+    });
   };
 
   const saveWorkoutLog = async (setsToSave = completedSets) => {
-    await persistWorkoutLog(setsToSave, { finalize: true });
+    const saved = await persistWorkoutLog(setsToSave, { finalize: true });
     try {
       await saveStructuredWorkout({
         userId: user.id,
@@ -4531,13 +4532,14 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
       // The V1.2 migration can be deployed independently; legacy workout saving remains authoritative until then.
       console.warn("Structured workout history was not saved:", error.message);
     }
+    return saved;
   };
 
   // Autosave every time a set is confirmed or an already-logged set is edited.
   useEffect(() => {
     if (!workoutInProgress || !activeSession) return;
     if (!Object.values(completedSets).some(sets => sets?.length)) return;
-    persistWorkoutLog(completedSets);
+    persistWorkoutLog(completedSets).catch(() => {});
   }, [completedSets, workoutInProgress, activeSession]);
 
   // Get last session's data for a specific exercise
@@ -4679,7 +4681,11 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setWorkoutStart(startedAt);
     setActiveWorkoutLogId(createdWorkoutLogId);
     workoutLogIdRef.current = createdWorkoutLogId;
+    workoutSaveChainRef.current = Promise.resolve();
     workoutFinalizedRef.current = false;
+    setWorkoutSaveError("");
+    setWorkoutFinishing(false);
+    setCompletionFeedback("");
     setPendingSession(null);
     setView("workout");
   };
@@ -4740,22 +4746,79 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     await saveSplit(updated, extra);
   };
 
+  const persistCompletionFeedback = async feedback => {
+    const logId = workoutLogIdRef.current;
+    if (!logId || !feedback) return;
+    const { error } = await supabase.from("workout_logs").update({ ai_feedback: feedback }).eq("id", logId).eq("user_id", user.id);
+    if (error) {
+      // Compatibility while the additive ai_feedback migration is rolling out:
+      // keep the feedback inside the JSON workout record instead of losing it.
+      const payload = buildWorkoutLogPayload(completedSets);
+      const exercises = payload.exercises.map((exercise, index) => index === 0 ? { ...exercise, ai_feedback: feedback } : exercise);
+      const { error: fallbackError } = await supabase.from("workout_logs").update({ exercises }).eq("id", logId).eq("user_id", user.id);
+      if (fallbackError) throw fallbackError;
+    }
+    setHistory(current => current.map(log => log.id === logId ? { ...log, ai_feedback: feedback } : log));
+  };
+
   const getCompletionFeedback = async () => {
     if (completionFeedbackLoading || completionFeedback) return;
     setCompletionFeedbackLoading(true);
     try {
+      const review = buildWorkoutReview(activeSession, completedSets);
       const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        system: "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets. No emojis. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.",
-        messages: [{ role: "user", content: JSON.stringify({ session: activeSession?.name, exercises: activeSession?.exercises, completedSets, durationMinutes: Math.round((Date.now() - workoutStart) / 60000), recentHistory: history.slice(0, 5) }) }],
+        system: "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets with no emojis. WORKOUT REVIEW is authoritative: status completed means the set was performed using the exact reps and weightKg shown; status skipped means it was not recorded. Never say all sets or the session were skipped when completedSets is greater than zero. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.",
+        messages: [{ role: "user", content: `WORKOUT REVIEW\n${JSON.stringify({ ...review, durationMinutes: Math.round((Date.now() - workoutStart) / 60000), recentHistory: history.slice(0, 5) })}` }],
       }) });
       const data = await response.json();
-      setCompletionFeedback(data.content?.map(block => block.text || "").join("") || "Feedback is unavailable right now.");
-    } catch { setCompletionFeedback("Feedback is unavailable right now."); }
+      if (!response.ok) throw new Error(data.error || "Feedback request failed");
+      const feedback = data.content?.map(block => block.text || "").join("").trim();
+      if (!feedback) throw new Error("Feedback response was empty");
+      setCompletionFeedback(feedback);
+      await persistCompletionFeedback(feedback);
+    } catch (error) {
+      console.error("Workout feedback error:", error.message);
+      setWorkoutSaveError("Your workout is saved, but Coach feedback is temporarily unavailable. You can retry below.");
+    }
     setCompletionFeedbackLoading(false);
+  };
+
+  useEffect(() => {
+    if (view !== "complete" || !activeSession || completionFeedback || completionFeedbackLoading) return;
+    getCompletionFeedback();
+    // Completion view is the single trigger; state guards prevent duplicates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
+  const finishWorkout = async (setsToSave = completedSets) => {
+    if (workoutFinishing) return;
+    setWorkoutFinishing(true);
+    setWorkoutSaveError("");
+    try {
+      await saveWorkoutLog(setsToSave);
+      setWorkoutInProgress(false);
+      setRestActive(false);
+      setRestDeadline(null);
+      setView("complete");
+    } catch {
+      // persistWorkoutLog supplies the actionable message and leaves the
+      // active workout open so the user can retry without losing anything.
+    } finally {
+      setWorkoutFinishing(false);
+    }
   };
 
   const getCurrentSetIdx = (eIdx) => setProgress[eIdx] || 0;
   const getCompletedForExercise = (eIdx) => completedSets[eIdx] || [];
+
+  const deleteActiveSet = (exerciseIndex, setIndex) => {
+    const remaining = (completedSets[exerciseIndex] || []).filter((_, index) => index !== setIndex).map((set, index) => ({ ...set, setNum: index + 1 }));
+    const updated = { ...completedSets, [exerciseIndex]: remaining };
+    setCompletedSets(updated);
+    setSetProgress(progress => ({ ...progress, [exerciseIndex]: remaining.length }));
+    persistWorkoutLog(updated).catch(() => {});
+    setEditingSet(null);
+  };
 
   const confirmSet = () => {
     const eIdx = exerciseIdx;
@@ -4785,7 +4848,7 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
         setExerciseIdx(nextIdx);
       } else {
         // Workout complete
-        saveWorkoutLog(newCompleted).then(() => { setWorkoutInProgress(false); loadData(); setView("complete"); });
+        finishWorkout(newCompleted);
       }
     }
   };
@@ -4935,6 +4998,7 @@ Respond ONLY with valid JSON:
         introduction="Talk through your programme, exercise technique, progress, or changes that fit your goals and schedule."
         activationLabel="CHAT WITH FITNESS COACH"
         openingMessage="Give me a brief, practical snapshot of today's training and the single most useful thing to focus on. Do not ask a generic opening question. Finish by inviting me to type if I need help with something specific."
+        openWithoutPrompt={Boolean(workoutInProgress && activeSession)}
         storageKey={`fitness-${user.id}`}
         onAction={applyWorkoutCoachAction}
         onMemoryUpdate={saveCoachMemory}
@@ -5023,8 +5087,9 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             <div style={{ color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
               {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN
             </div>
-            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }}
-              onClick={async () => { await saveWorkoutLog(); setWorkoutInProgress(false); setActiveSession(null); await loadData(); setView("home"); }}>END WORKOUT</button>
+            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }} onClick={() => finishWorkout()} disabled={workoutFinishing}>
+              {workoutFinishing ? "SAVING..." : "END WORKOUT"}
+            </button>
           </div>
           {/* Delete session - kept nearby but deliberately unobtrusive */}
           <div style={{ textAlign: "right", marginBottom: 10 }}>
@@ -5033,6 +5098,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           </div>
 
           {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-4px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
+          {workoutSaveError && <div role="alert" style={{ marginBottom: 10, padding: 9, borderRadius: 5, background: "rgba(255,45,120,.07)", border: "1px solid rgba(255,45,120,.3)", color: "#FF8AAD", fontSize: 9, lineHeight: 1.5 }}>{workoutSaveError}</div>}
 
           {/* Rest timer */}
           {restActive && (
@@ -5046,25 +5112,25 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {/* Current set - the reps/weight inputs and the confirm button are the one decision that matters here */}
           {!restActive && (
             <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
-              <div style={{ display: "flex", gap: 16, justifyContent: "center", alignItems: "center" }}>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS</div>
-                  <input type="number" inputMode="numeric" value={reps}
+              <div className="workout-set-fields">
+                <label style={{ display: "block", textAlign: "center" }}>
+                  <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Current set reps:</span>
+                  <input className="workout-number" aria-label="Current set reps" type="number" inputMode="numeric" value={reps}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                     placeholder="0"
-                    style={{ width: 80, height: 80, background: "#E0EAF0", border: "none", borderRadius: 8, fontSize: 28, fontWeight: 700, textAlign: "center", color: "#080C10", outline: "none" }} />
+                    style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
                   {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST: {lastSets[sIdx].reps}</div>}
-                </div>
-                <button onClick={confirmSet} disabled={!weight || !reps}
-                  style={{ width: 68, height: 68, background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 10, fontSize: 26, cursor: "pointer", color: "#080C10", fontWeight: 700, boxShadow: weight && reps ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>▶</button>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>WEIGHT (kg)</div>
-                  <input type="number" inputMode="decimal" value={weight}
+                </label>
+                <button className="workout-log-set" aria-label="Log set" onClick={confirmSet} disabled={!weight || !reps}
+                  style={{ background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 10, cursor: weight && reps ? "pointer" : "not-allowed", color: "#080C10", fontWeight: 800, boxShadow: weight && reps ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>LOG SET</button>
+                <label style={{ display: "block", textAlign: "center" }}>
+                  <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
+                  <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                     placeholder={suggestedWeight || "0"}
-                    style={{ width: 80, height: 80, background: "#E0EAF0", border: "none", borderRadius: 8, fontSize: suggestedWeight && !weight ? 16 : 28, fontWeight: 700, textAlign: "center", color: "#080C10", outline: "none" }} />
+                    style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontSize: suggestedWeight && !weight ? 22 : undefined, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
                   {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST: {lastSets[sIdx].weight}kg</div>}
-                </div>
+                </label>
               </div>
 
               {/* Rep range and tempo for this set, directly below the inputs */}
@@ -5111,11 +5177,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 }}>
                 {exerciseCompletedSets.map((set, index) => (
-                  <button key={index} type="button" onClick={() => setEditingSet({ exerciseIdx, setIdx: index, reps: set.reps, weight: set.weight })} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 6, minWidth: 0, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.12)", borderRadius: 5, color: "#D8E5EA", cursor: "pointer", fontFamily: "'Inter',sans-serif", fontSize: 9, padding: "7px 8px", textAlign: "left" }}>
-                    <span style={{ color: "#8AABB8" }}>SET {index + 1}</span>
-                    <span style={{ color: NEON2, whiteSpace: "nowrap" }}>{set.reps} reps · {set.weight}kg{set.personalBest ? ` · ${set.personalBest.label}` : ""}</span>
-                    <span style={{ color: "#FFB547", fontWeight: 700, fontSize: 8 }}>EDIT</span>
-                  </button>
+                  <div key={index} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", alignItems: "stretch", minWidth: 0, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.12)", borderRadius: 5, overflow: "hidden" }}>
+                    <button type="button" aria-label={`Edit set ${index + 1}`} onClick={() => setEditingSet({ exerciseIdx, setIdx: index, reps: set.reps, weight: set.weight })} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 6, minWidth: 0, background: "transparent", border: 0, color: "#D8E5EA", cursor: "pointer", fontFamily: "'Inter',sans-serif", fontSize: 9, padding: "7px 8px", textAlign: "left" }}>
+                      <span style={{ color: "#8AABB8" }}>SET {index + 1}</span>
+                      <span style={{ color: NEON2, whiteSpace: "nowrap" }}>{set.reps} reps · {set.weight}kg{set.personalBest ? ` · ${set.personalBest.label}` : ""}</span>
+                      <span style={{ color: "#FFB547", fontWeight: 700, fontSize: 8 }}>EDIT</span>
+                    </button>
+                    <button type="button" aria-label={`Delete set ${index + 1}`} title="Delete set" onClick={() => deleteActiveSet(exerciseIdx, index)} style={{ minWidth: 34, border: 0, borderLeft: "1px solid rgba(255,45,120,.24)", background: "rgba(255,45,120,.08)", color: "#FF6B9E", cursor: "pointer", fontSize: 17 }}>×</button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -5154,12 +5223,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 </div>
                 <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => {
-                    const remaining = (completedSets[editingSet.exerciseIdx] || []).filter((_, index) => index !== editingSet.setIdx).map((set, index) => ({ ...set, setNum: index + 1 }));
-                    const updated = { ...completedSets, [editingSet.exerciseIdx]: remaining };
-                    setCompletedSets(updated);
-                    setSetProgress(progress => ({ ...progress, [editingSet.exerciseIdx]: remaining.length }));
-                    persistWorkoutLog(updated);
-                    setEditingSet(null);
+                    deleteActiveSet(editingSet.exerciseIdx, editingSet.setIdx);
                   }}>DELETE SET</button>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => setEditingSet(null)}>CANCEL</button>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => {
@@ -5178,8 +5242,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
   // ── WORKOUT COMPLETE ──────────────────────────────────────────────────────
   if (view === "complete") {
-    const allSets = Object.values(completedSets).flat();
-    const totalVol = allSets.reduce((a, s) => a + (parseFloat(s.weight)||0) * (parseInt(s.reps)||0), 0);
+    const completionReview = buildWorkoutReview(activeSession, completedSets);
     const duration = Math.round((Date.now() - workoutStart) / 60000);
     return (
       <div className="t3d-fade">
@@ -5187,29 +5250,30 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: NEON, letterSpacing: 3, marginBottom: 16 }}>WORKOUT COMPLETE</div>
           <div className="t3d-grid3" style={{ marginBottom: 14 }}>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>MINUTES</div></div>
-            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{allSets.length}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>SETS</div></div>
-            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: "#FF8C00" }}>{Math.round(totalVol).toLocaleString()}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>KG VOLUME</div></div>
+            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{completionReview.completedSets}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>SETS COMPLETED</div></div>
+            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: "#FF8C00" }}>{Math.round(completionReview.totalVolumeKg).toLocaleString()}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>KG VOLUME</div></div>
           </div>
-          <details style={{ textAlign: "left", marginBottom: 12 }}>
-            <summary style={{ cursor: "pointer", color: "#8AABB8", fontSize: 9 }}>VIEW SESSION SETS</summary>
-          {activeSession?.exercises?.map((ex, eIdx) => {
-            const sets = completedSets[eIdx] || [];
-            if (!sets.length) return null;
-            return (
-              <div key={eIdx} style={{ marginBottom: 12, textAlign: "left" }}>
-                <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 6 }}>{ex.name}</div>
-                {sets.map((s, i) => (
-                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#E0EAF0", padding: "3px 0" }}>
-                    <span>Set {s.setNum}</span><span style={{ color: NEON }}>{s.reps} reps @ {s.weight}kg</span>
+          <div style={{ textAlign: "left", marginBottom: 14 }}>
+            <div style={{ fontFamily: "'Orbitron',monospace", color: "#8AABB8", fontSize: 9, letterSpacing: 1, marginBottom: 9 }}>RECORDED SETS</div>
+            {completionReview.exercises.map((exercise, exerciseIndex) => (
+              <div key={`${exercise.name}-${exerciseIndex}`} style={{ marginBottom: 12, padding: 11, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "#E0EAF0", marginBottom: 7 }}>
+                  <strong>{exercise.name}</strong><span style={{ color: exercise.skippedSets ? "#FFB547" : NEON }}>{exercise.completedSets}/{exercise.prescribedSets} prescribed sets</span>
+                </div>
+                {exercise.sets.map(set => (
+                  <div key={set.setNumber} style={{ display: "grid", gridTemplateColumns: "54px 1fr auto", gap: 8, alignItems: "center", fontSize: 10, padding: "5px 0", borderTop: `1px solid ${BORDER}` }}>
+                    <span style={{ color: "#8AABB8" }}>SET {set.setNumber}</span>
+                    <span style={{ color: set.status === "completed" ? NEON : "#6F8792" }}>{set.status === "completed" ? `${set.reps} reps @ ${set.weightKg}kg` : `Target ${set.targetReps || "—"} reps`}</span>
+                    <span style={{ color: set.status === "completed" ? NEON : "#FFB547", fontSize: 8 }}>{set.extra ? "EXTRA · COMPLETED" : set.status === "completed" ? "COMPLETED" : "SKIPPED / NOT LOGGED"}</span>
                   </div>
                 ))}
               </div>
-            );
-          })}
-          </details>
+            ))}
+          </div>
+          {workoutSaveError && <div role="alert" style={{ textAlign: "left", color: "#FF8AAD", background: "rgba(255,45,120,.07)", border: "1px solid rgba(255,45,120,.3)", borderRadius: 6, padding: 10, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{workoutSaveError}</div>}
           {completionFeedback && <div style={{ textAlign: "left", whiteSpace: "pre-wrap", color: "#C5D6DC", background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 12, fontSize: 10, lineHeight: 1.55, marginBottom: 10 }}>{cleanAiText(completionFeedback)}</div>}
-          <button className="t3d-btn" style={{ width: "100%", padding: 11, marginBottom: 8, borderColor: NEON2, color: NEON2 }} onClick={getCompletionFeedback} disabled={completionFeedbackLoading}>{completionFeedbackLoading ? "GETTING FEEDBACK..." : completionFeedback ? "COACH FEEDBACK SHOWN" : "VIEW YOUR COACH'S FEEDBACK"}</button>
-          <button className="t3d-btn" style={{ width: "100%", padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={() => { setActiveSession(null); setCompletionFeedback(""); setView("home"); }}>BACK TO FITNESS</button>
+          <button className="t3d-btn" style={{ width: "100%", padding: 11, marginBottom: 8, borderColor: NEON2, color: NEON2 }} onClick={() => { setWorkoutSaveError(""); getCompletionFeedback(); }} disabled={completionFeedbackLoading || Boolean(completionFeedback)}>{completionFeedbackLoading ? "COACH IS REVIEWING..." : completionFeedback ? "COACH FEEDBACK SAVED" : "RETRY COACH FEEDBACK"}</button>
+          <button className="t3d-btn" style={{ width: "100%", padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={async () => { await loadData(); setActiveSession(null); setCompletionFeedback(""); setWorkoutSaveError(""); setView("home"); }}>BACK TO FITNESS</button>
         </div>
       </div>
     );
@@ -5718,6 +5782,34 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     }
   };
 
+  const confirmDeleteHistoryWorkout = async () => {
+    if (!deleteHistoryWorkout?.id || historySaving) return;
+    setHistorySaving(true);
+    try {
+      const legacyId = String(deleteHistoryWorkout.id);
+      const { data: structuredSessions, error: lookupError } = await supabase.from("training_sessions").select("id").eq("user_id", user.id).eq("legacy_workout_log_id", legacyId);
+      if (lookupError) throw lookupError;
+      const structuredIds = (structuredSessions || []).map(session => session.id);
+      if (structuredIds.length) {
+        const { error: structuredDeleteError } = await supabase.from("training_sessions").delete().eq("user_id", user.id).in("id", structuredIds);
+        if (structuredDeleteError) throw structuredDeleteError;
+      }
+      const { error } = await supabase.from("workout_logs").delete().eq("id", deleteHistoryWorkout.id).eq("user_id", user.id);
+      if (error) throw error;
+      setHistory(current => current.filter(log => log.id !== deleteHistoryWorkout.id));
+      setViewingSession(null);
+      setViewingExercise(null);
+      setEditingHistorySession(false);
+      setHistoryEditOriginal(null);
+      setDeleteHistoryWorkout(null);
+    } catch (error) {
+      console.error("Workout delete error:", error.message);
+      setWorkoutSaveError("This workout could not be deleted. Please try again.");
+    } finally {
+      setHistorySaving(false);
+    }
+  };
+
   const moveScheduledWorkout = async (sessionName, sourceDay, targetDay) => {
     const updated = moveWorkoutDay(sessions, sessionName, sourceDay, targetDay);
     if (updated === sessions) return;
@@ -5922,8 +6014,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     </div>
                   )}
                 </div>
-                <button className="t3d-big-btn" style={{ flex: "0 1 280px", margin: 0, background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 12, letterSpacing: 2 }} onClick={() => requestStartWorkout(recommendedSession)}>
-                  ⚡ {recommendedDoneToday ? "TRAIN AGAIN" : "START RECOMMENDED"}
+                <button className="t3d-big-btn" style={{ flex: "0 1 300px", margin: 0, background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 13, fontWeight: 900, letterSpacing: 2, boxShadow: "0 0 22px rgba(0,255,178,.24)" }} onClick={() => requestStartWorkout(recommendedSession)}>
+                  ▶ {recommendedDoneToday ? "START WORKOUT AGAIN" : "START WORKOUT"}
                 </button>
               </div>
             ) : (
@@ -5975,7 +6067,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 {gymContext === "different" && <input className="t3d-input" placeholder="Gym name (saved with its own weight history)" value={gymName} onChange={event => setGymName(event.target.value)} style={{ marginBottom: 12 }} />}
                 <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => setPendingSession(null)}>CANCEL</button>
-                  <button className="t3d-btn" style={{ flex: 1 }} onClick={() => startWorkout(pendingSession)} disabled={gymContext === "different" && !gymName.trim()}>START SESSION</button>
+                  <button className="t3d-btn" style={{ flex: 1, minHeight: 48, background: "linear-gradient(90deg, #00FFB2, #00D99A)", color: "#06100D", borderColor: NEON, fontWeight: 900 }} onClick={() => startWorkout(pendingSession)} disabled={gymContext === "different" && !gymName.trim()}>START WORKOUT</button>
                 </div>
               </div>
             </div>
@@ -6252,7 +6344,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   !workoutInProgress && <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No workouts logged yet!</div>
                 ) : history.map((log, i) => (
                   <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}`, cursor: "pointer" }}
-                    onClick={() => { setViewingSession(log); setViewingExercise(null); }}>
+                    onClick={() => { setViewingSession(log); setViewingExercise(null); setWorkoutSaveError(""); }}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON }}>{log.session_name}</div>
                       <div style={{ fontSize: 10, color: "#E0EAF0" }}>{log.date}</div>
@@ -6281,17 +6373,20 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 14 }}>
                       <div style={{ fontSize: 10, color: "#E0EAF0" }}>{viewingSession.date}</div>
-                      {!editingHistorySession ? <button className="t3d-btn t3d-btn-sm" onClick={beginHistoryEdit}>EDIT WORKOUT</button> : <div style={{ display: "flex", gap: 5 }}>
+                      {!editingHistorySession ? <div style={{ display: "flex", gap: 5 }}><button className="t3d-btn t3d-btn-sm" onClick={beginHistoryEdit}>EDIT WORKOUT</button><button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setWorkoutSaveError(""); setDeleteHistoryWorkout(viewingSession); }}>DELETE WORKOUT</button></div> : <div style={{ display: "flex", gap: 5 }}>
                         <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={cancelHistoryEdit}>CANCEL</button>
                         <button className="t3d-btn t3d-btn-sm" onClick={saveHistoryEdit} disabled={historySaving}>{historySaving ? "SAVING..." : "SAVE CHANGES"}</button>
                       </div>}
                     </div>
-                    {(viewingSession.exercises || []).map((ex, i) => (
-                      <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: editingHistorySession ? "default" : "pointer" }}
+                    {workoutSaveError && <div role="alert" style={{ color: "#FF8AAD", fontSize: 9, lineHeight: 1.5, marginBottom: 10 }}>{workoutSaveError}</div>}
+                    {(viewingSession.exercises || []).map((ex, i) => {
+                      const loggedSets = ex.sets || [];
+                      const prescribedSetCount = Math.max(loggedSets.length, Number(ex.prescribed_sets) || 0);
+                      return <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: editingHistorySession ? "default" : "pointer" }}
                         onClick={() => { if (!editingHistorySession) setViewingExercise(ex.name); }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                           <div style={{ fontSize: 12 }}>{ex.name}</div>
-                          {!editingHistorySession && <div style={{ fontSize: 10, color: NEON2 }}>VIEW PROGRESS →</div>}
+                          {!editingHistorySession && <div style={{ textAlign: "right" }}><div style={{ fontSize: 9, color: loggedSets.length < prescribedSetCount ? "#FFB547" : NEON }}>{loggedSets.length}/{prescribedSetCount || loggedSets.length} SETS COMPLETED</div><div style={{ fontSize: 8, color: NEON2, marginTop: 3 }}>VIEW PROGRESS →</div></div>}
                         </div>
                         {editingHistorySession ? <div style={{ display: "grid", gap: 6 }}>
                           {(ex.sets || []).map((set, setIndex) => <div key={setIndex} style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr auto", alignItems: "end", gap: 6 }}>
@@ -6301,11 +6396,22 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                             <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "7px 9px" }} onClick={() => deleteHistorySet(i, setIndex)}>×</button>
                           </div>)}
                           {(ex.sets || []).length === 0 && <div style={{ color: "#6F8792", fontSize: 9 }}>No sets remain for this exercise.</div>}
-                        </div> : <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {(ex.sets || []).map((s, j) => <span key={j} style={{ fontSize: 10, color: "#E0EAF0", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 10, padding: "3px 8px" }}>{s.weight || 0}kg × {s.reps || 0}</span>)}
+                        </div> : <div style={{ display: "grid", gap: 5 }}>
+                          {Array.from({ length: prescribedSetCount || loggedSets.length }, (_, setIndex) => {
+                            const set = loggedSets[setIndex];
+                            return <div key={setIndex} style={{ display: "grid", gridTemplateColumns: "46px 1fr auto", gap: 7, fontSize: 9, alignItems: "center", padding: "4px 0", borderTop: `1px solid ${BORDER}` }}>
+                              <span style={{ color: "#8AABB8" }}>SET {setIndex + 1}</span>
+                              <span style={{ color: set ? "#E0EAF0" : "#6F8792" }}>{set ? `${set.reps || 0} reps @ ${set.weight || 0}kg` : `Target ${Array.isArray(ex.prescribed_reps) ? ex.prescribed_reps[setIndex] : ex.prescribed_reps || "—"} reps`}</span>
+                              <span style={{ color: set ? NEON : "#FFB547", fontSize: 8 }}>{set ? "COMPLETED" : "SKIPPED / NOT LOGGED"}</span>
+                            </div>;
+                          })}
                         </div>}
                       </div>
-                    ))}
+                    })}
+                    <div style={{ marginTop: 12, padding: 12, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6, textAlign: "left" }}>
+                      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: NEON2, letterSpacing: 1, marginBottom: 6 }}>AI COACH FEEDBACK</div>
+                      <div style={{ color: viewingSession.ai_feedback ? "#C5D6DC" : "#6F8792", fontSize: 10, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{viewingSession.ai_feedback ? cleanAiText(viewingSession.ai_feedback) : "No AI Coach feedback was saved for this older workout."}</div>
+                    </div>
                   </>
                 ) : (
                   <>
@@ -6317,6 +6423,26 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     <ExerciseLineChart points={getExerciseProgression(viewingExercise)} />
                   </>
                 )}
+              </div>
+            </div>
+          )}
+
+          {deleteHistoryWorkout && (
+            <div role="alertdialog" aria-modal="true" aria-labelledby="delete-workout-title"
+              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.94)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 130, padding: 20 }}
+              onClick={() => { if (!historySaving) setDeleteHistoryWorkout(null); }}>
+              <div style={{ width: "100%", maxWidth: 380, padding: 24, background: SURFACE, border: "1px solid rgba(255,70,105,.55)", borderRadius: 8 }} onClick={event => event.stopPropagation()}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                  <div id="delete-workout-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#FF6B88", letterSpacing: 2 }}>DELETE WORKOUT?</div>
+                  <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label="Close delete workout confirmation" disabled={historySaving} onClick={() => setDeleteHistoryWorkout(null)}>✕</button>
+                </div>
+                <div style={{ color: "#E0EAF0", fontSize: 11, lineHeight: 1.6, marginBottom: 8 }}>{deleteHistoryWorkout.session_name}</div>
+                <div style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.6, marginBottom: 16 }}>This permanently removes the workout, its recorded sets and its AI Coach feedback. This cannot be undone.</div>
+                {workoutSaveError && <div role="alert" style={{ color: "#FF8AAD", fontSize: 9, lineHeight: 1.5, marginBottom: 12 }}>{workoutSaveError}</div>}
+                <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
+                  <button type="button" className="t3d-btn t3d-btn-sm" disabled={historySaving} onClick={() => setDeleteHistoryWorkout(null)}>KEEP WORKOUT</button>
+                  <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={historySaving} onClick={confirmDeleteHistoryWorkout}>{historySaving ? "DELETING..." : "DELETE PERMANENTLY"}</button>
+                </div>
               </div>
             </div>
           )}
