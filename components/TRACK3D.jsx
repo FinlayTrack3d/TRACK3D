@@ -4464,6 +4464,11 @@ function Fitness({ user, isActive = true }) {
   const [aiAnswers, setAiAnswers] = useState({});
   const [aiStep, setAiStep] = useState(0);
   const [aiBuilding, setAiBuilding] = useState(false);
+  const [aiBuildStage, setAiBuildStage] = useState(0);
+  // Question ids still to ask (null = all); set when answers are pre-filled from a coach chat.
+  const [aiQuestionIds, setAiQuestionIds] = useState(null);
+  const [aiChatContext, setAiChatContext] = useState("");
+  const [planRebuildPreparing, setPlanRebuildPreparing] = useState(false);
   const [aiPlan, setAiPlan] = useState(null);
   const [aiPlanError, setAiPlanError] = useState("");
   const [aiPlanSaving, setAiPlanSaving] = useState(false);
@@ -4582,18 +4587,49 @@ function Fitness({ user, isActive = true }) {
 
 const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
+// A plan the user saves (AI-built after review, or built by hand) is approved
+// on save, with the same 8-week commitment as approving it later.
+function withPlanApproval(sessions, now = new Date()) {
+  const reviewDate = new Date(now);
+  reviewDate.setDate(reviewDate.getDate() + 56);
+  return sessions.map(session => ({
+    ...session,
+    approval: { approved: true, approvedAt: now.toISOString(), reviewAfter: reviewDate.toISOString().slice(0, 10), commitmentWeeks: 8, cycleDays: 8 },
+  }));
+}
+
   const AI_QUESTIONS = [
-    { id: "goal", q: "What are we working towards?", type: "choice", options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
+    { id: "goal", q: "What are we working towards? Pick up to two.", type: "choice", multi: 2, options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
     { id: "experience", q: "Where are you starting from?", type: "choice", options: ["New to training", "Training for a few months", "1–3 years of training", "3+ years of training"], custom: true },
     { id: "days_per_week", q: "How many days can you realistically train?", type: "choice", options: ["1 day", "2 days", "3 days", "4 days", "5 days", "6 days", "7 days"] },
-    { id: "preferred_days", q: "Which days work best for you?", type: "text", placeholder: "e.g. Monday, Wednesday and Saturday — or flexible" },
+    { id: "preferred_days", q: "Which days work best for you?", type: "days" },
     { id: "session_length", q: "How much time do you have for training?", type: "availability" },
     { id: "equipment", q: "What equipment can you use?", type: "choice", options: ["Full gym", "Home gym with weights", "Dumbbells only", "Bodyweight only"], custom: true },
     { id: "split", q: "Do you have a preferred training split?", type: "choice", options: ["Let the coach choose", "Full body", "Upper / lower", "Push / pull / legs"], custom: true },
-    { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference" },
+    { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference", skipLabel: "Not sure – let the coach choose" },
     { id: "priorities", q: "What would you like to focus on?", type: "text", placeholder: "Muscle groups, skills or performance goals — or balanced progress" },
     { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments — or none" },
   ];
+
+  // Answers are strings, except goal (up to two options plus goal_custom) and preferred_days (day codes or FLEXIBLE).
+  const aiAnswerText = (question, answers = aiAnswers) => {
+    const value = answers[question.id];
+    if (question.id === "goal") return [...(Array.isArray(value) ? value : value ? [value] : []), answers.goal_custom].filter(item => String(item || "").trim()).join(" and ");
+    if (question.type === "days") return Array.isArray(value) ? (value.includes("FLEXIBLE") ? "Flexible" : value.join(", ")) : String(value || "");
+    return String(value || "");
+  };
+  const aiAskedQuestions = aiQuestionIds ? AI_QUESTIONS.filter(question => aiQuestionIds.includes(question.id)) : AI_QUESTIONS;
+  const AI_BUILD_STAGES = ["Reading your answers", "Choosing your training days", "Selecting exercises for your equipment", "Setting sets, reps and tempo", "Checking each session fits your time"];
+
+  useEffect(() => {
+    if (!aiBuilding) return;
+    const timer = setInterval(() => setAiBuildStage(stage => Math.min(stage + 1, AI_BUILD_STAGES.length - 1)), 6000);
+    return () => clearInterval(timer);
+  }, [aiBuilding]);
+
+  const openAiBuilder = () => {
+    setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setView("ai_builder");
+  };
 
   useEffect(() => { if (!user) return; loadData(); }, [user, today]);
 
@@ -5102,14 +5138,13 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     }
   };
 
-  const buildAIPlan = async () => {
+  const buildAIPlan = async (answers = aiAnswers, chatContext = aiChatContext) => {
     if (aiBuilding) return;
     setAiPlanError("");
+    setAiBuildStage(0);
     setAiBuilding(true);
-    const context = Object.entries(aiAnswers).map(([k, v]) => {
-      const q = AI_QUESTIONS.find(q => q.id === k);
-      return `${q?.q}: ${v}`;
-    }).join("\n");
+    const context = AI_QUESTIONS.map(question => `${question.q}: ${aiAnswerText(question, answers) || "not answered"}`).join("\n")
+      + (chatContext ? `\n\nEarlier conversation with the coach (respect anything relevant, such as injuries or preferences):\n${chatContext}` : "");
     try {
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
@@ -5127,7 +5162,7 @@ Respond ONLY with valid JSON:
       const text = data.content?.map(b => b.text || "").join("") || "";
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       if (!Array.isArray(parsed.sessions) || !parsed.sessions.length ||
-          parsed.sessions.length !== parseInt(aiAnswers.days_per_week, 10) ||
+          parsed.sessions.length !== parseInt(answers.days_per_week, 10) ||
           parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
             session.days.some(day => !DAYS.includes(day)) ||
             !Array.isArray(session.exercises) || !session.exercises.length ||
@@ -5561,8 +5596,15 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     if (aiBuilding) return (
       <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
         <div style={{ fontSize: 30, marginBottom: 16 }}>🤖</div>
-        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 8 }}>BUILDING YOUR PROGRAMME</div>
-        <div style={{ fontSize: 11, color: "#E0EAF0" }}>Analysing your answers...</div>
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 14 }}>BUILDING YOUR PROGRAMME</div>
+        <ol role="status" aria-live="polite" style={{ listStyle: "none", padding: 0, margin: "0 auto", maxWidth: 320, textAlign: "left" }}>
+          {AI_BUILD_STAGES.map((stage, index) => (
+            <li key={stage} style={{ fontSize: 11, padding: "5px 0", color: index < aiBuildStage ? NEON : index === aiBuildStage ? "#E0EAF0" : "#4A6070" }}>
+              {index < aiBuildStage ? "✓" : index === aiBuildStage ? "▸" : "·"} {stage}{index === aiBuildStage ? "..." : ""}
+            </li>
+          ))}
+        </ol>
+        <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 12 }}>This usually takes 20–40 seconds.</div>
       </div></div>
     );
 
@@ -5597,56 +5639,110 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               setAiPlanSaving(true);
               setAiPlanError("");
               try {
-                const unapprovedSessions = normalizeFitnessSessions(aiPlan.sessions).map(session => ({ ...session, approval: { approved: false } }));
-                const programme = { sessions: unapprovedSessions, split_name: aiPlan.split_name || "My Programme" };
-                // Upsert: `split` is cleared during a full rebuild even though the user's row still exists.
+                // Saving is the approval: no second "review & approve" step.
+                const now = new Date();
+                const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions), now);
+                const programme = { sessions: approvedSessions, split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null };
+                // Upsert so an existing plan row is replaced rather than duplicated.
                 const { error } = await supabase.from("workout_splits").upsert({ user_id: user.id, ...programme }, { onConflict: "user_id" });
                 if (error) throw error;
-                setSessions(unapprovedSessions);
-                setSplit({ sessions: unapprovedSessions, split_name: aiPlan.split_name });
+                setSessions(approvedSessions);
+                setSplit({ ...programme });
                 setView("home");
               } catch {
                 setAiPlanError("Your programme could not be saved. Please try again.");
               } finally { setAiPlanSaving(false); }
-            }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE FOR MY APPROVAL"}</button>
+            }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE PLAN"}</button>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiPlanSaving} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </div>
       </div>
     );
 
-    const currentQ = AI_QUESTIONS[aiStep];
+    const currentQ = aiAskedQuestions[aiStep] || aiAskedQuestions[0];
+    if (!currentQ) return (
+      <div className="t3d-fade"><div className="t3d-card">
+        <div className="t3d-ctitle">YOUR ANSWERS ARE READY</div>
+        <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>Everything the coach needs came from your chat.</p>
+        {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="t3d-btn" onClick={() => buildAIPlan()}>BUILD MY PROGRAMME</button>
+          <button className="t3d-btn t3d-btn-sm" onClick={() => { setAiQuestionIds(null); setAiStep(0); }}>REVIEW ALL ANSWERS</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setView("home")}>CANCEL</button>
+        </div>
+      </div></div>
+    );
+    const isLastQuestion = aiStep >= aiAskedQuestions.length - 1;
+    const answered = Boolean(aiAnswerText(currentQ).trim());
+    const goNext = (answers = aiAnswers) => isLastQuestion ? buildAIPlan(answers) : setAiStep(step => step + 1);
+    const selectedValues = Array.isArray(aiAnswers[currentQ.id]) ? aiAnswers[currentQ.id] : aiAnswers[currentQ.id] ? [aiAnswers[currentQ.id]] : [];
+    const optionStyle = selected => ({
+      textAlign: "left", padding: "12px 16px", fontSize: 11, letterSpacing: 1, whiteSpace: "normal",
+      background: selected ? "rgba(0,255,178,.18)" : "transparent",
+      border: `${selected ? 2 : 1}px solid ${selected ? NEON : "#31434F"}`,
+      color: selected ? NEON : "#C5D6DC",
+      boxShadow: selected ? `0 0 10px ${NEON}40` : "none",
+    });
+    const chooseOption = option => setAiAnswers(answers => {
+      if (!currentQ.multi) return { ...answers, [currentQ.id]: option };
+      const current = Array.isArray(answers[currentQ.id]) ? answers[currentQ.id] : [];
+      if (current.includes(option)) return { ...answers, [currentQ.id]: current.filter(item => item !== option) };
+      return { ...answers, [currentQ.id]: [...current, option].slice(-currentQ.multi) };
+    });
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
           <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
-            {AI_QUESTIONS.map((_, i) => (
+            {aiAskedQuestions.map((_, i) => (
               <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= aiStep ? NEON : BORDER, transition: "background .3s" }} />
             ))}
           </div>
-          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {AI_QUESTIONS.length}</div>
+          {aiQuestionIds && aiQuestionIds.length < AI_QUESTIONS.length && (
+            <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>
+              Your other answers were taken from your chat with the coach. Only the missing ones are asked here.
+            </p>
+          )}
+          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {aiAskedQuestions.length}</div>
           <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 24, lineHeight: 1.6 }}>{currentQ.q}</div>
           {currentQ.type === "choice" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
-              {currentQ.options.map((opt, i) => (
-                <button key={i} className="t3d-btn" style={{ textAlign: "left", padding: "12px 16px", fontSize: 11, letterSpacing: 1,
-                  background: aiAnswers[currentQ.id] === opt ? "rgba(0,255,178,.15)" : "transparent",
-                  borderColor: aiAnswers[currentQ.id] === opt ? NEON : BORDER,
-                  color: aiAnswers[currentQ.id] === opt ? NEON : "#4A6070" }}
-                  onClick={() => {
-                    setAiAnswers(a => ({ ...a, [currentQ.id]: opt }));
-
-                  }}>{opt}</button>
-              ))}
+              {currentQ.options.map((opt, i) => {
+                const selected = selectedValues.includes(opt);
+                return (
+                  <button key={i} type="button" aria-pressed={selected} className="t3d-btn" style={optionStyle(selected)} onClick={() => chooseOption(opt)}>
+                    {selected ? "✓ " : ""}{opt}
+                  </button>
+                );
+              })}
             </div>
           )}
           {currentQ.type === "choice" && currentQ.custom && (
             <label style={{ display: "block", fontSize: 12, marginBottom: 16 }}>
               Or describe your own answer
               <input className="t3d-input" style={{ marginTop: 8 }}
-                value={currentQ.options.includes(aiAnswers[currentQ.id]) ? "" : aiAnswers[currentQ.id] || ""}
-                onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
+                value={currentQ.multi ? aiAnswers[`${currentQ.id}_custom`] || "" : currentQ.options.includes(aiAnswers[currentQ.id]) ? "" : aiAnswers[currentQ.id] || ""}
+                onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.multi ? `${currentQ.id}_custom` : currentQ.id]: event.target.value }))} />
             </label>
+          )}
+          {currentQ.type === "days" && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                {DAYS.map(day => {
+                  const selected = selectedValues.includes(day);
+                  return (
+                    <button key={day} type="button" aria-pressed={selected} className="t3d-btn" style={{ ...optionStyle(selected), minWidth: 52, minHeight: 44, textAlign: "center", padding: "10px 8px" }}
+                      onClick={() => setAiAnswers(answers => {
+                        const current = (Array.isArray(answers.preferred_days) ? answers.preferred_days : []).filter(item => item !== "FLEXIBLE");
+                        return { ...answers, preferred_days: current.includes(day) ? current.filter(item => item !== day) : DAYS.filter(item => item === day || current.includes(item)) };
+                      })}>{day}</button>
+                  );
+                })}
+              </div>
+              <button type="button" aria-pressed={selectedValues.includes("FLEXIBLE")} className="t3d-btn" style={{ ...optionStyle(selectedValues.includes("FLEXIBLE")), width: "100%" }}
+                onClick={() => setAiAnswers(answers => ({ ...answers, preferred_days: ["FLEXIBLE"] }))}>
+                {selectedValues.includes("FLEXIBLE") ? "✓ " : ""}I&apos;m flexible – let the coach choose
+              </button>
+            </div>
           )}
           {currentQ.type === "availability" && (
             <div style={{ marginBottom: 20 }}>
@@ -5660,27 +5756,25 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   value={aiAnswers[currentQ.id] || ""}
                   onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
               </label>
-              <button className="t3d-btn" style={{ width: "100%", marginTop: 12 }}
-                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
-                onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
             </div>
-          )}          {currentQ.type === "text" && (
+          )}
+          {currentQ.type === "text" && (
             <div style={{ marginBottom: 20 }}>
               <input className="t3d-input" placeholder={currentQ.placeholder}
                 value={aiAnswers[currentQ.id] || ""}
                 onChange={e => setAiAnswers(a => ({ ...a, [currentQ.id]: e.target.value }))}
-                onKeyDown={e => e.key === "Enter" && aiAnswers[currentQ.id] && (aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan())} />
-              <button className="t3d-btn" style={{ width: "100%", padding: 12, marginTop: 12 }}
-                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
-                onClick={() => aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan()}>
-                {aiStep < AI_QUESTIONS.length-1 ? "NEXT →" : "BUILD MY PROGRAMME"}
-              </button>
+                onKeyDown={e => e.key === "Enter" && answered && goNext()} />
+              {currentQ.skipLabel && (
+                <button type="button" className="t3d-btn" style={{ ...optionStyle(aiAnswers[currentQ.id] === currentQ.skipLabel), width: "100%", marginTop: 10 }}
+                  onClick={() => { const answers = { ...aiAnswers, [currentQ.id]: currentQ.skipLabel }; setAiAnswers(answers); goNext(answers); }}>
+                  {currentQ.skipLabel}
+                </button>
+              )}
             </div>
           )}
-          {currentQ.type === "choice" && (
-            <button className="t3d-btn" style={{ width: "100%", marginBottom: 12 }}
-              disabled={!String(aiAnswers[currentQ.id] || "").trim()} onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
-          )}
+          <button className="t3d-btn" style={{ width: "100%", padding: 12, marginBottom: 12 }} disabled={!answered} onClick={() => goNext()}>
+            {isLastQuestion ? "BUILD MY PROGRAMME" : "NEXT →"}
+          </button>
           {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
           <div style={{ display: "flex", gap: 10 }}>
             {aiStep > 0 && <button className="t3d-btn t3d-btn-sm" onClick={() => setAiStep(step => step - 1)}>← BACK</button>}
@@ -5699,9 +5793,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {setupStep === 0 && (
             <div>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
-              <button className="t3d-btn t3d-btn-sm" onClick={() => {
-                setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder");
-              }}>LET AI COACH CHOOSE MY PROGRAMME</button>
+              <button className="t3d-btn t3d-btn-sm" onClick={openAiBuilder}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
                 {[2,3,4,5,6].map(n => (
                   <button key={n} className="t3d-btn" style={{ width: 50, height: 50, fontSize: 18, padding: 0,
@@ -5923,16 +6015,53 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Those targeted changes are now saved. Your completed workout and exercise history has not been removed." }]);
   };
 
-  const startFullPlanRebuild = () => {
+  // Go straight to the AI builder, pre-filling answers from the coach chat and
+  // asking only what the chat did not cover. The current plan stays in place
+  // until the new one is saved.
+  const startFullPlanRebuild = async () => {
+    if (planRebuildPreparing) return;
+    setPlanRebuildPreparing(true);
+    const transcript = planChangeMessages.map(message => `${message.role === "user" ? "User" : "Coach"}: ${message.content}`).join("\n");
+    let answers = {};
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: await chatHeaders(),
+        body: JSON.stringify({
+          responseTokens: 1500,
+          system: `Extract a user's answers to a training questionnaire from their conversation with a coach. Use null for anything the user has not clearly stated; never guess. Respond only with valid JSON:
+{"goal":["up to two of: ${AI_QUESTIONS[0].options.join(", ")}"],"goal_custom":"other goal in their words or null","experience":"one of: ${AI_QUESTIONS[1].options.join(", ")} or null","days_per_week":"N days or null","preferred_days":["MON".."SUN" codes, or ["FLEXIBLE"], or null],"session_length":"text or null","equipment":"text or null","split":"text or null","favourites":"text or null","priorities":"text or null","limitations":"injuries or things to avoid, or null"}`,
+          messages: [{ role: "user", content: `CONVERSATION\n${transcript}` }],
+        }),
+      });
+      if (!response.ok) throw new Error("Request failed");
+      const data = await response.json();
+      const parsed = JSON.parse((data.content?.map(block => block.text || "").join("") || "").replace(/```json|```/g, "").trim());
+      const text = value => typeof value === "string" && value.trim() && value.trim().toLowerCase() !== "null" ? value.trim() : null;
+      const goals = (Array.isArray(parsed.goal) ? parsed.goal : []).filter(goal => AI_QUESTIONS[0].options.includes(goal)).slice(0, 2);
+      if (goals.length) answers.goal = goals;
+      if (text(parsed.goal_custom)) answers.goal_custom = text(parsed.goal_custom);
+      const dayCount = parseInt(parsed.days_per_week, 10);
+      if (dayCount >= 1 && dayCount <= 7) answers.days_per_week = `${dayCount} ${dayCount === 1 ? "day" : "days"}`;
+      const preferredDays = Array.isArray(parsed.preferred_days) ? parsed.preferred_days.map(day => String(day).toUpperCase()).filter(day => DAYS.includes(day) || day === "FLEXIBLE") : [];
+      if (preferredDays.length) answers.preferred_days = preferredDays.includes("FLEXIBLE") ? ["FLEXIBLE"] : preferredDays;
+      for (const id of ["experience", "session_length", "equipment", "split", "favourites", "priorities", "limitations"]) {
+        if (text(parsed[id])) answers[id] = text(parsed[id]);
+      }
+    } catch {
+      answers = {};
+    }
+    const missing = AI_QUESTIONS.filter(question => !aiAnswerText(question, answers).trim()).map(question => question.id);
+    setPlanRebuildPreparing(false);
     setPlanChangeOpen(false);
-    setSplit(null);
-    setSessions([]);
-    setSetupStep(0);
     setAiStep(0);
-    setAiAnswers({});
+    setAiAnswers(answers);
     setAiPlan(null);
     setAiPlanError("");
-    setView("setup");
+    setAiChatContext(transcript);
+    setAiQuestionIds(missing);
+    setView("ai_builder");
+    if (!missing.length) buildAIPlan(answers, transcript);
   };
 
   const planChangeDialog = planChangeOpen ? (
@@ -5974,7 +6103,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         {planChangeRecommendation?.recommendation === "full_rebuild" && (
           <div style={{ marginBottom: 12, padding: 11, background: "rgba(255,45,120,.05)", border: "1px solid rgba(255,45,120,.3)", borderRadius: 6 }}>
             <div style={{ fontSize: 10, color: "#C9D7DC", lineHeight: 1.55, marginBottom: 9 }}>The coach recommends rebuilding the programme. Your existing plan stays saved until a replacement is completed, and all workout history remains.</div>
-            <button className="t3d-btn t3d-btn-red" style={{ width: "100%" }} onClick={startFullPlanRebuild}>CONTINUE TO FULL PLAN REBUILD</button>
+            <button className="t3d-btn t3d-btn-red" style={{ width: "100%" }} disabled={planRebuildPreparing} onClick={startFullPlanRebuild}>{planRebuildPreparing ? "PREPARING YOUR QUESTIONS..." : "CONTINUE TO FULL PLAN REBUILD"}</button>
           </div>
         )}
 
@@ -6247,7 +6376,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
             <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10 }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
             <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
-              onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder"); }}>🤖 AI BUILD MY PROGRAMME</button>
+              onClick={openAiBuilder}>🤖 AI BUILD MY PROGRAMME</button>
           </div>
           <div style={{ marginTop: 20, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>TRACK3D provides general fitness guidance. Consult a qualified professional before starting any new exercise programme. Not medical advice.</div>
         </div>
