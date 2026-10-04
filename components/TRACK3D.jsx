@@ -74,8 +74,9 @@ const mealWasCompleted = value => value === true || value?.completed === true;
 const mealWasMissed = value => value === false || value?.completed === false;
 const completedMealCount = results => Object.entries(results || {}).filter(([key, value]) => key !== "_review_complete" && mealWasCompleted(value)).length;
 const cleanAiText = value => String(value || "")
-  .replace(/^\s*(?:\*{3,}|-{3,}|_{3,})\s*$/gm, "")
+  .replace(/^\s*(?:\*+|-{3,}|_{3,})\s*$/gm, "")
   .replace(/\*\*(.*?)\*\*/g, "$1")
+  .replace(/\*\*/g, "")
   .replace(/__(.*?)__/g, "$1")
   .replace(/^\s*#{1,6}\s*/gm, "")
   .replace(/^\s*\*\s+/gm, "• ")
@@ -259,17 +260,17 @@ function ScoreRing({ score, size = 108 }) {
   const offset = circ * (1 - score / 100);
   const color = score >= 70 ? NEON : score >= 40 ? "#FF8C00" : NEON3;
   return (
-    <div style={{ textAlign: "center" }}>
-      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+    <div style={{ position: "relative", width: size, height: size, margin: "0 auto" }}>
+      <svg width={size} height={size} style={{ transform: "rotate(-90deg)", display: "block" }}>
         <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={BORDER} strokeWidth="6" />
         <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color}
           strokeWidth="6" strokeDasharray={circ} strokeDashoffset={offset}
           strokeLinecap="round"
           style={{ transition: "stroke-dashoffset 1s cubic-bezier(.16,1,.3,1)", filter: `drop-shadow(0 0 5px ${color})` }} />
       </svg>
-      <div style={{ marginTop: -(size / 2) - 8, paddingBottom: 6 }}>
-        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 28, fontWeight: 700, color }}>{score}</div>
-        <div style={{ fontSize: 9, letterSpacing: 2, color: "#E0EAF0" }}>SCORE</div>
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 26, fontWeight: 700, lineHeight: 1, color }}>{score}</div>
+        <div style={{ fontSize: 9, letterSpacing: 1, color: "#8AABB8", marginTop: 5 }}>OUT OF 100</div>
       </div>
     </div>
   );
@@ -414,9 +415,9 @@ User data today:
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
           <div style={{ flex: 1, fontSize: compact ? 9 : 11, color: "#E0EAF0", marginBottom: compact ? 0 : 18, textAlign: compact ? "left" : "center", lineHeight: 1.5, letterSpacing: compact ? 0 : 1 }}>
-            {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Your AI coach analyzes your habits,\nworkouts and nutrition in real-time.")}
+            {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Ask your AI coach about your habits,\nworkouts and nutrition.")}
           </div>
-          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : "ACTIVATE COACH")}</button>
+          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : openingMessage || openWithoutPrompt ? "OPEN COACH CHAT" : "REVIEW MY DAY SO FAR")}</button>
         </div>
       ) : (
         <>
@@ -1851,7 +1852,7 @@ function MorningSection({ user }) {
     const d = new Date();
     d.setDate(d.getDate() - (6 - i));
     const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-    const entry = history.find(h => h.date === dateStr);
+    const entry = history.find(h => h.date === dateStr && !h.data?.inProgress);
     return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
   });
 
@@ -1881,9 +1882,16 @@ function MorningSection({ user }) {
                 actual: event.target.value, planned: wakeTime, source: "manual",
               } }))} />
           </label>
-          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button className="t3d-btn" type="submit">CONTINUE</button>
-            <button className="t3d-btn" type="button" onClick={() => setView("home")}>CANCEL</button>
+          {!checkinData.wakeTiming?.actual && (
+            <button className="t3d-btn t3d-btn-sm" type="button" style={{ marginTop: 12 }}
+              onClick={() => setCheckinData(data => ({ ...data, wakeTiming: { actual: wakeTime, planned: wakeTime, source: "manual" } }))}>
+              I WOKE UP AT {wakeTime} AS PLANNED
+            </button>
+          )}
+          <div style={{ display: "flex", gap: 14, marginTop: 20, alignItems: "center" }}>
+            <button className="t3d-btn" type="submit" disabled={!checkinData.wakeTiming?.actual}
+              style={{ flex: 1, padding: 14, background: checkinData.wakeTiming?.actual ? NEON : undefined, color: checkinData.wakeTiming?.actual ? "#06100D" : undefined, fontWeight: 800 }}>CONTINUE →</button>
+            <button type="button" onClick={() => setView("home")} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 11, padding: 8, textDecoration: "underline" }}>Cancel</button>
           </div>
         </form>
       </div>
@@ -2115,7 +2123,7 @@ function MorningSection({ user }) {
                         recordLiveWakeTime();
                             setView("liveMorning");
                           }
-                        }}>{completedAction === "edit" ? "CONTINUE TO EDIT" : "START LIVE MORNING"}</button>
+                        }}>{completedAction === "edit" ? "CONTINUE TO EDIT" : "REDO WITH GUIDED TIMER"}</button>
                         {completedAction === "redo" && (
                           <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
                             setCompletedAction(null);
@@ -2130,7 +2138,7 @@ function MorningSection({ user }) {
                             setLiveDeadline(null);
                             setLiveStartedAt(null);
                             setView("wakeCheckin");
-                          }}>NORMAL CHECK-IN</button>
+                          }}>REDO WITHOUT TIMER</button>
                         )}                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => setCompletedAction(null)}>CANCEL</button>
                       </div>
                     </div>
@@ -2151,11 +2159,11 @@ function MorningSection({ user }) {
 
                   <div style={{
                     fontSize: 10,
-                    color: "#4A6070",
+                    color: "#8AABB8",
                     marginBottom: 20,
                     lineHeight: 1.6
                   }}>
-                    Follow your routine live or check in normally when you're finished.
+                    Just woken up? Start the guided routine. Already finished? Log it afterwards.
                   </div>
 
                   <div style={{
@@ -2181,7 +2189,8 @@ function MorningSection({ user }) {
                         setView("liveMorning");
                       }}
                     >
-                      ▶ START LIVE MORNING
+                      ▶ START MY MORNING NOW
+                      <span style={{ display: "block", fontFamily: "'Inter',sans-serif", fontSize: 10, letterSpacing: 0, fontWeight: 400, marginTop: 6, color: "#C0D4DE" }}>Guides you through each task with a timer</span>
                     </button>
 
                     <button
@@ -2192,7 +2201,7 @@ function MorningSection({ user }) {
                       }}
                       onClick={startNormalMorningCheckin}
                     >
-                      ✓ NORMAL MORNING CHECK-IN
+                      ✓ I&apos;VE ALREADY DONE IT — LOG IT
                     </button>
                     <button
                       type="button"
@@ -2278,7 +2287,7 @@ function MorningSection({ user }) {
 
             {/* 7-day chart */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
-              <div className="t3d-ctitle">7-DAY MORNING SCORES</div>
+              <div className="t3d-ctitle">7-DAY MORNING SCORES <span style={{ color: "#6F8792" }}>· OUT OF 10</span></div>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80, padding: "0 4px" }}>
                 {last7.map((d, i) => (
                   <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
@@ -2295,7 +2304,7 @@ function MorningSection({ user }) {
                         minHeight: 4,
                       }} />
                     </div>
-                    <div style={{ fontSize: 9, color: d.date === today ? NEON : "#2A3A48", letterSpacing: 0.5 }}>{d.label}</div>
+                    <div style={{ fontSize: 9, color: d.date === today ? NEON : "#6F8792", letterSpacing: 0.5 }}>{d.label}</div>
                     {d.score !== null && <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#E0EAF0" }}>{d.score}</div>}
                   </div>
                 ))}
@@ -3720,16 +3729,18 @@ function ProgressPhotos({ user }) {
     setLoading(false);
   };
 
-  const filtered = entries.filter(e => e.data.photos[angle] && e.data.photos[angle] !== "skipped");
-  const current = filtered[idx];
+  // Placeholder values such as "captured", "deferred" or "skipped" are not stored files.
+  const isPhotoPath = value => typeof value === "string" && value.includes("/");
+  const filtered = entries.filter(e => isPhotoPath(e.data.photos[angle]));
+  const current = filtered[Math.min(idx, Math.max(filtered.length - 1, 0))];
 
   useEffect(() => {
     if (!current) return;
     const path = current.data.photos[angle];
     if (urlCache[path]) return;
     supabase.storage.from("checkin-photos").createSignedUrl(path, 3600).then(({ data }) => {
-      if (data?.signedUrl) setUrlCache(c => ({ ...c, [path]: data.signedUrl }));
-    });
+      setUrlCache(c => ({ ...c, [path]: data?.signedUrl || "unavailable" }));
+    }).catch(() => setUrlCache(c => ({ ...c, [path]: "unavailable" })));
   }, [current, angle]);
 
   if (loading) return (
@@ -3748,7 +3759,7 @@ function ProgressPhotos({ user }) {
             background: angle === a ? "rgba(0,255,178,.12)" : "transparent",
             borderColor: angle === a ? NEON : BORDER,
             color: angle === a ? NEON : "#E0EAF0",
-          }} onClick={() => setAngle(a)}>{a.toUpperCase()}</button>
+          }} onClick={() => { setAngle(a); setIdx(0); }}>{a.toUpperCase()}</button>
         ))}
       </div>
       {filtered.length === 0 ? (
@@ -3761,7 +3772,9 @@ function ProgressPhotos({ user }) {
             {new Date(current.date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
           </div>
           <div style={{ width: "100%", maxWidth: 280, height: 340, margin: "0 auto 14px", borderRadius: 8, overflow: "hidden", border: `1px solid ${BORDER}`, display: "flex", alignItems: "center", justifyContent: "center", background: SURFACE2 }}>
-            {urlCache[current.data.photos[angle]] ? (
+            {urlCache[current.data.photos[angle]] === "unavailable" ? (
+              <div style={{ fontSize: 10, color: "#8AABB8", padding: 16, lineHeight: 1.6 }}>This photo could not be loaded.</div>
+            ) : urlCache[current.data.photos[angle]] ? (
               <img src={urlCache[current.data.photos[angle]]} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             ) : (
               <div style={{ fontSize: 10, color: "#E0EAF0" }}>LOADING...</div>
@@ -3920,7 +3933,7 @@ Give me my weekly patterns and diet suggestions.` }],
         <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>Generating this week's report...</div>
       ) : report ? (
         <div>
-          <div style={{ fontSize: 9, color: "#2A3A48", letterSpacing: 1, marginBottom: 12 }}>
+          <div style={{ fontSize: 9, color: "#6F8792", letterSpacing: 1, marginBottom: 12 }}>
             {new Date(report.week_start).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – {new Date(report.week_end).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
           </div>
           <div style={{ marginBottom: 16 }}>
@@ -3930,7 +3943,7 @@ Give me my weekly patterns and diet suggestions.` }],
           <div>
             <div style={{ fontSize: 10, color: "#FF8C00", letterSpacing: 1, marginBottom: 6 }}>DIET SUGGESTIONS</div>
             <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{cleanAiText(report.diet_suggestions) || "Nothing to flag this week."}</div>
-            <div style={{ fontSize: 9, color: "#2A3A48", marginTop: 8 }}>Suggestions only — update your plan in Nutrition if you agree.</div>
+            <div style={{ fontSize: 9, color: "#6F8792", marginTop: 8 }}>Suggestions only — update your plan in Nutrition if you agree.</div>
           </div>
         </div>
       ) : (
@@ -4008,19 +4021,24 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
-      supabase.from("workout_logs").select("session_name,date").eq("user_id", user.id).eq("date", today).eq("in_progress", false),
+      supabase.from("workout_logs").select("session_name,date,in_progress").eq("user_id", user.id).eq("date", today),
     ]).then(([morning, nutrition, nutritionPlan, split, workouts]) => setTodayData({
       morning: morning.data || null,
       nutrition: nutrition.data || null,
       nutritionPlan: nutritionPlan.data || null,
       sessions: split.data?.sessions || [],
-      workouts: workouts.data || [],
+      workouts: (workouts.data || []).filter(log => !log.in_progress),
+      activeWorkout: (workouts.data || []).find(log => log.in_progress) || null,
     }));
   }, [user, today]);
 
   const todaySession = todayData.sessions.find(session => (session.days || []).some(day => String(day).toUpperCase().startsWith(homeDate.dayCode)));
   const fitnessDone = Boolean(todaySession && todayData.workouts.some(log => log.session_name?.toLowerCase() === todaySession.name?.toLowerCase()));
-  const morningDone = Boolean(todayData.morning);
+  const activeWorkout = todayData.activeWorkout;
+  const completedWorkoutNames = [...new Set(todayData.workouts.map(log => log.session_name).filter(Boolean))];
+  const morningInProgress = Boolean(todayData.morning?.data?.inProgress);
+  const morningSkipped = Boolean(todayData.morning?.data?.routineSkipped);
+  const morningDone = Boolean(todayData.morning) && !morningInProgress;
   const caloriesEaten = todayData.nutrition?.total_calories || 0;
   const calorieGoal = todayData.nutritionPlan?.daily_calories || 0;
   const scoreParts = [habits.length ? done / habits.length : 0, morningDone ? Math.min((todayData.morning?.score || 10) / 10, 1) : 0];
@@ -4041,23 +4059,29 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">MORNING ROUTINE</div>
-          <div style={{ fontSize: 46, color: morningDone ? NEON : BORDER, lineHeight: 1 }}>{morningDone ? "✓" : "○"}</div>
-          <div className="t3d-slabel" style={{ marginTop: 10 }}>{morningDone ? `DONE · ${todayData.morning?.score || 0}/10` : "NOT COMPLETED YET"}</div>
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : "GO TO MORNING"}</button>
+          <div style={{ fontSize: 46, color: morningDone && !morningSkipped ? NEON : morningInProgress ? "#FFB547" : BORDER, lineHeight: 1 }}>{morningDone && !morningSkipped ? "✓" : morningInProgress ? "…" : "○"}</div>
+          <div className="t3d-slabel" style={{ marginTop: 10 }}>{morningSkipped ? "SKIPPED TODAY" : morningDone ? `DONE · SCORE ${todayData.morning?.score || 0}/10` : morningInProgress ? "STARTED · NOT FINISHED" : "NOT DONE YET"}</div>
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : morningInProgress ? "GO TO MORNING →" : "START MORNING →"}</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">FITNESS TODAY</div>
-          {todaySession ? <>
-            <div style={{ fontSize: 22, color: fitnessDone ? NEON : NEON2, fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>{fitnessDone ? "✓ " : ""}{todaySession.name}</div>
-            <div className="t3d-slabel" style={{ marginTop: 10 }}>{fitnessDone ? "SESSION COMPLETED" : "RECOMMENDED TODAY"}</div>
-          </> : <div style={{ color: "#8AABB8", fontSize: 12 }}>No session scheduled today.</div>}
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>OPEN FITNESS</button>
+          {activeWorkout ? <>
+            <div style={{ fontSize: 22, color: "#FFB547", fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>{activeWorkout.session_name}</div>
+            <div className="t3d-slabel" style={{ marginTop: 10 }}>WORKOUT IN PROGRESS</div>
+          </> : todaySession && !fitnessDone ? <>
+            <div style={{ fontSize: 22, color: NEON2, fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>{todaySession.name}</div>
+            <div className="t3d-slabel" style={{ marginTop: 10 }}>SCHEDULED TODAY</div>
+          </> : completedWorkoutNames.length ? <>
+            <div style={{ fontSize: 22, color: NEON, fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>✓ {completedWorkoutNames.join(" + ")}</div>
+            <div className="t3d-slabel" style={{ marginTop: 10 }}>COMPLETED TODAY</div>
+          </> : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? "START WORKOUT →" : "OPEN FITNESS"}</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">CALORIES</div>
           {calorieGoal ? <>
-            <div className="t3d-sval" style={{ color: NEON2 }}>{caloriesEaten}</div>
-            <div className="t3d-slabel">OF {calorieGoal} KCAL</div>
+            <div className="t3d-sval" style={{ color: NEON2 }}>{caloriesEaten.toLocaleString()} <span style={{ fontSize: 12, letterSpacing: 1 }}>KCAL</span></div>
+            <div className="t3d-slabel">EATEN OF {calorieGoal.toLocaleString()} TARGET</div>
             <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${Math.min((caloriesEaten/calorieGoal)*100,100)}%`, background: "linear-gradient(90deg,#00C8FF,#0080FF)" }} /></div>
           </> : <>
             <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6 }}>Set your daily calorie target first.</div>
@@ -4115,9 +4139,15 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
         </div>
         <div className="t3d-hmap">
           {activity7.map((d, i) => (
-            <div key={i} className="t3d-hcell" title={d.date} style={{ background: heatColor(d.activity) }} />
+            <div key={i} style={{ textAlign: "center" }}>
+              <div className="t3d-hcell" title={d.date} style={{ background: heatColor(d.activity) }} />
+              <div style={{ fontSize: 8, marginTop: 4, letterSpacing: .5, color: d.date === today ? NEON : "#6F8792" }}>
+                {new Date(`${d.date}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" }).toUpperCase()}
+              </div>
+            </div>
           ))}
         </div>
+        <div style={{ fontSize: 9, color: "#6F8792", marginTop: 10, lineHeight: 1.5 }}>Brighter = more logged that day (morning, nutrition, workout, end of day).</div>
       </div>
 
       {/* End of Day Check-in */}
@@ -4136,7 +4166,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
               onClick={() => setShowEod(true)}>
               🌙 END OF DAY CHECK-IN
             </button>
-            <div style={{ fontSize: 10, color: "#2A3A48", marginTop: 12 }}>Complete your other check-ins first</div>
+            <div style={{ fontSize: 10, color: "#6F8792", marginTop: 12 }}>Do this last, once your morning, workout and meals are logged.</div>
           </>
         )}
       </div>
@@ -4240,6 +4270,7 @@ function Fitness({ user, isActive = true }) {
   const [sessions, setSessions] = useState([]);
   const [currentSessionIdx, setCurrentSessionIdx] = useState(0);
   const [history, setHistory] = useState([]);
+  const [showEmptyWorkouts, setShowEmptyWorkouts] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [restTimerEnabled, setRestTimerEnabled] = useState(false);
   const [restSeconds, setRestSeconds] = useState(90);
@@ -5064,14 +5095,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {/* Exercise navigation - name only, with a tiny replace-exercise icon */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === 0 ? 0.3 : 1 }}
-              onClick={() => { if (exerciseIdx > 0) setExerciseIdx(e => e-1); }}>◀</button>
+              aria-label="Previous exercise" title="Previous exercise" onClick={() => { if (exerciseIdx > 0) setExerciseIdx(e => e-1); }}>◀ PREV</button>
             <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, letterSpacing: 2, color: "#E0EAF0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{currentExercise.name}</div>
               <button type="button" title="Replace exercise" aria-label="Replace exercise" onClick={() => setReplaceWarning(exerciseIdx)}
-                style={{ flex: "0 0 auto", background: "none", border: 0, color: "#3A4A54", cursor: "pointer", fontSize: 13, padding: 2, lineHeight: 1 }}>⇄</button>
+                style={{ flex: "0 0 auto", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 9, padding: 2, lineHeight: 1, textDecoration: "underline" }}>swap</button>
             </div>
             <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
-              onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>▶</button>
+              aria-label="Next exercise" title="Next exercise" onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>NEXT ▶</button>
           </div>
 
           {/* Mini progress box */}
@@ -5094,7 +5125,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {/* Delete session - kept nearby but deliberately unobtrusive */}
           <div style={{ textAlign: "right", marginBottom: 10 }}>
             <button type="button" onClick={() => setDiscardWorkoutWarning(true)}
-              style={{ background: "none", border: 0, color: "#3A4A54", cursor: "pointer", fontSize: 7, padding: "3px 2px", textDecoration: "underline" }}>delete session</button>
+              style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 9, padding: "3px 2px", textDecoration: "underline" }}>delete this workout</button>
           </div>
 
           {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-4px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
@@ -5119,7 +5150,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                     placeholder="0"
                     style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
-                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST: {lastSets[sIdx].reps}</div>}
+                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST TIME: {Number(lastSets[sIdx].reps) > 0 ? lastSets[sIdx].reps : "—"}</div>}
                 </label>
                 <button className="workout-log-set" aria-label="Log set" onClick={confirmSet} disabled={!weight || !reps}
                   style={{ background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 10, cursor: weight && reps ? "pointer" : "not-allowed", color: "#080C10", fontWeight: 800, boxShadow: weight && reps ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>LOG SET</button>
@@ -5129,15 +5160,18 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                     placeholder={suggestedWeight || "0"}
                     style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontSize: suggestedWeight && !weight ? 22 : undefined, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
-                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST: {lastSets[sIdx].weight}kg</div>}
+                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST TIME: {lastSets[sIdx].weight}kg</div>}
                 </label>
               </div>
 
               {/* Rep range and tempo for this set, directly below the inputs */}
               {(currentSetRepRange || currentExercise.tempo) && (
-                <div style={{ marginTop: 14, display: "flex", justifyContent: "center", gap: 16, fontSize: 10, color: "#8AABB8", letterSpacing: 1 }}>
-                  {currentSetRepRange && <div>REPS {currentSetRepRange}</div>}
-                  {currentExercise.tempo && <div>TEMPO {currentExercise.tempo}</div>}
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "center", gap: 16, fontSize: 12, color: "#E0EAF0", letterSpacing: 1, fontWeight: 700 }}>
+                    {currentSetRepRange && <div>TARGET: {currentSetRepRange} REPS</div>}
+                    {currentExercise.tempo && <div>TEMPO {currentExercise.tempo}</div>}
+                  </div>
+                  {currentExercise.tempo && <div style={{ marginTop: 5, fontSize: 9, color: "#6F8792" }}>Tempo = seconds to lower · pause · lift · pause</div>}
                 </div>
               )}
 
@@ -5162,7 +5196,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 2, marginBottom: 6, fontFamily: "'Orbitron',monospace" }}>LAST SESSION</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {lastSets.slice(0, 4).map((s, i) => (
-                  <div key={i} style={{ fontSize: 10, color: NEON2 }}>Set {i+1}: {s.reps} reps @ {s.weight}kg</div>
+                  <div key={i} style={{ fontSize: 10, color: NEON2 }}>Set {i+1}: {Number(s.reps) > 0 ? `${s.reps} reps @ ${s.weight}kg` : "skipped"}</div>
                 ))}
                 {lastSets.length > 4 && <div style={{ fontSize: 10, color: "#4A6070" }}>+{lastSets.length - 4} more</div>}
               </div>
@@ -5925,20 +5959,28 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const activeTotalSets = activeSession?.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0) || 0;
   const programmeApproved = sessions.length > 0 && sessions.every(session => session.approval?.approved);
   const weekStartAnchor = new Date(homeTodayAnchor);
-  weekStartAnchor.setUTCDate(weekStartAnchor.getUTCDate() - homeTodayAnchor.getUTCDay());
+  weekStartAnchor.setUTCDate(weekStartAnchor.getUTCDate() - ((homeTodayAnchor.getUTCDay() + 6) % 7));
   const weekStartKey = weekStartAnchor.toISOString().slice(0, 10);
-  const thisWeekLogs = history.filter(h => {
+  // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not real workouts.
+  const isEmptyWorkout = log => !(Number(log.total_volume) > 0) && (Number(log.duration_mins) || 0) < 2;
+  const realHistory = history.filter(log => !isEmptyWorkout(log));
+  const emptyHistoryCount = history.length - realHistory.length;
+  const formatLogDate = dateKey => {
+    const parsed = new Date(`${dateKey}T12:00:00Z`);
+    return Number.isNaN(parsed.getTime()) ? dateKey : parsed.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  };
+  const thisWeekLogs = realHistory.filter(h => {
     return h.date >= weekStartKey && h.date <= today;
   });
-  const last6Days = Array.from({ length: 6 }, (_, index) => {
+  const last6Days = Array.from({ length: 7 }, (_, index) => {
     const date = new Date(homeTodayAnchor);
-    date.setUTCDate(date.getUTCDate() - (5 - index));
+    date.setUTCDate(date.getUTCDate() - (6 - index));
     const dateKey = date.toISOString().slice(0, 10);
     return {
       date: dateKey,
       day: date.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" }).toUpperCase(),
       dateLabel: date.toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" }),
-      workouts: history.filter(log => log.date === dateKey),
+      workouts: realHistory.filter(log => log.date === dateKey),
       isToday: dateKey === today,
     };
   });
@@ -5994,10 +6036,11 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     ▶ CONTINUE ACTIVE WORKOUT
                   </button>
                 </div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => requestStartWorkout(activeSession)}>START AGAIN</button>
-                  <button className="t3d-btn t3d-btn-sm" onClick={openOtherWorkouts}>CHOOSE A DIFFERENT DAY</button>
-                  <button type="button" onClick={() => setDiscardWorkoutWarning(true)} style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 8, padding: "5px 7px", textDecoration: "underline" }}>DELETE SESSION</button>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 12, fontSize: 10, color: "#6F8792" }}>
+                  <span>Not this one?</span>
+                  <button type="button" onClick={() => requestStartWorkout(activeSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Restart it</button>
+                  <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Switch workout</button>
+                  <button type="button" onClick={() => setDiscardWorkoutWarning(true)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Delete it</button>
                 </div>
               </div>
             ) : recommendedSession ? (
@@ -6097,7 +6140,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {planChangeDialog}
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle">THIS WEEK</div>
+            <div className="t3d-ctitle">THIS WEEK <span style={{ color: "#6F8792" }}>· MON TO SUN</span></div>
             <div className="t3d-grid3" style={{ marginBottom: 18 }}>
               <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
                 <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{thisWeekLogs.length}</div>
@@ -6108,16 +6151,16 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 <div className="t3d-slabel">KG VOLUME</div>
               </div>
               <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
-                <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 14 }}>{history[0]?.session_name || "—"}</div>
+                <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 14 }}>{realHistory[0]?.session_name || "—"}</div>
                 <div className="t3d-slabel">LAST SESSION</div>
               </div>
             </div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#4A6070", letterSpacing: 2, marginBottom: 10 }}>LAST 6 DAYS</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#4A6070", letterSpacing: 2, marginBottom: 10 }}>LAST 7 DAYS</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 7 }}>
               {last6Days.map(day => (
                 <div key={day.date} style={{ minHeight: 78, padding: 9, borderRadius: 6, background: day.workouts.length ? "rgba(0,255,178,.06)" : SURFACE2, border: `1px solid ${day.isToday ? "rgba(0,255,178,.4)" : BORDER}` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 4, fontSize: 8, color: day.isToday ? NEON : "#4A6070", marginBottom: 8 }}><span>{day.day}</span><span>{day.dateLabel}</span></div>
-                  <div style={{ fontSize: 9, color: day.workouts.length ? "#E0EAF0" : "#2A3A48", lineHeight: 1.45 }}>{day.workouts.length ? day.workouts.map(log => log.session_name).join(" + ") : "REST"}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 4, fontSize: 8, color: day.isToday ? NEON : "#8AABB8", marginBottom: 8 }}><span>{day.day}</span><span>{day.dateLabel}</span></div>
+                  <div style={{ fontSize: 9, color: day.workouts.length ? "#E0EAF0" : "#6F8792", lineHeight: 1.45 }}>{day.workouts.length ? [...new Set(day.workouts.map(log => log.session_name))].join(" + ") : "NO WORKOUT"}</div>
                 </div>
               ))}
             </div>
@@ -6167,9 +6210,9 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
             <div style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${programmeApproved ? "rgba(0,255,178,.3)" : "rgba(255,181,71,.3)"}`, borderRadius: 6, background: programmeApproved ? "rgba(0,255,178,.04)" : "rgba(255,181,71,.04)" }}>
               <div style={{ fontSize: 9, color: programmeApproved ? NEON : "#FFB547", marginBottom: programmeApproved ? 0 : 7 }}>
-                {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${sessions[0]?.approval?.reviewAfter}` : "REVIEW THE DAYS, ORDER AND EXERCISES. APPROVAL IS RECOMMENDED, NOT REQUIRED."}
+                {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${sessions[0]?.approval?.reviewAfter}` : "OPTIONAL: CHECK THE DAYS AND EXERCISES, THEN LOCK THIS PLAN IN FOR 8 WEEKS. YOU CAN TRAIN WITHOUT DOING THIS."}
               </div>
-              {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalMessages([]); setApprovalReview("all"); }}>REVIEW &amp; APPROVE 8-WEEK SPLIT</button>}
+              {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalMessages([]); setApprovalReview("all"); }}>REVIEW &amp; LOCK IN PLAN</button>}
             </div>
             {draggedWorkoutDay && (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "10px 12px", border: "1px solid rgba(0,200,255,.45)", borderRadius: 6, background: "rgba(0,200,255,.08)", color: NEON2, fontSize: 9 }}>
@@ -6340,18 +6383,23 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     <span style={{ color: NEON }}>CONTINUE SESSION →</span>
                   </button>
                 )}
+                {emptyHistoryCount > 0 && (
+                  <button type="button" onClick={() => setShowEmptyWorkouts(value => !value)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "0 0 10px", textDecoration: "underline" }}>
+                    {showEmptyWorkouts ? "Hide" : "Show"} {emptyHistoryCount} empty session{emptyHistoryCount === 1 ? "" : "s"} (started but nothing logged)
+                  </button>
+                )}
                 {history.length === 0 ? (
                   !workoutInProgress && <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No workouts logged yet!</div>
-                ) : history.map((log, i) => (
+                ) : (showEmptyWorkouts ? history : realHistory).map((log, i) => (
                   <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}`, cursor: "pointer" }}
                     onClick={() => { setViewingSession(log); setViewingExercise(null); setWorkoutSaveError(""); }}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON }}>{log.session_name}</div>
-                      <div style={{ fontSize: 10, color: "#E0EAF0" }}>{log.date}</div>
+                      <div style={{ fontSize: 10, color: "#E0EAF0", whiteSpace: "nowrap" }}>{formatLogDate(log.date)}</div>
                     </div>
                     <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#E0EAF0" }}>
-                      <span>{log.duration_mins} mins</span>
-                      <span>{Math.round(log.total_volume).toLocaleString()} kg volume</span>
+                      <span>{log.duration_mins || 0} min{log.duration_mins === 1 ? "" : "s"}</span>
+                      <span>{Math.round(log.total_volume || 0).toLocaleString()} kg lifted</span>
                     </div>
                   </div>
                 ))}
@@ -8393,7 +8441,7 @@ export default function App() {
     { id: "habits", icon: "◇", label: "HABITS" },
   ];
 
-  const titles = { dashboard: "OVERVIEW", morning: "MORNING", fitness: "FITNESS", nutrition: "NUTRITION", habits: "HABITS" };
+  const titles = { dashboard: "DASHBOARD", morning: "MORNING", fitness: "FITNESS", nutrition: "NUTRITION", habits: "HABITS" };
 
   return (
     <>
@@ -8407,7 +8455,6 @@ export default function App() {
             </div>
           ))}
           <div className="t3d-sfooter">
-            STREAK: 14 DAYS 🔥<br />
             <span style={{ color: "#1A2530" }}>v1.0 · TRACK3D</span><br />
             <a href="/privacy" style={{ color: "#6F8792", textDecoration: "underline" }}>PRIVACY</a>
             <span style={{ color: "#334650" }}> · </span>
@@ -8422,9 +8469,7 @@ export default function App() {
               <div className="t3d-date">{todayLabel.toUpperCase()}</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div className="t3d-dot" />
-              <span style={{ fontSize: 10, color: "#2A3A48", letterSpacing: 1 }}>LIVE</span>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, marginLeft: 12 }}
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, color: "#8AABB8", borderColor: BORDER, background: "transparent" }}
                 onClick={async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
                 SIGN OUT
               </button>
@@ -8433,10 +8478,10 @@ export default function App() {
 
           {authError && <p role="status" style={{ color: "#FFB547", fontSize: 12 }}>{authError}</p>}
           {draftError && <p role="alert" style={{ color: "#FFB547", fontSize: 12 }}>This browser could not save your progress. Keep this page open until you finish.</p>}
-          {Object.entries(activeSessions).filter(([kind, active]) => active && kind !== tab).map(([kind]) => (
+          {[...new Set(Object.entries(activeSessions).filter(([, active]) => active).map(([kind]) => kind.startsWith("morning") ? "morning" : kind))].filter(kind => kind !== tab).map(kind => (
             <button key={kind} className="t3d-btn" onClick={() => setTab(kind)}
               style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON }}>
-              ACTIVE {kind === "morning" ? "MORNING ROUTINE" : "WORKOUT"} — CLICK TO CONTINUE →
+              ACTIVE {kind === "morning" ? "MORNING ROUTINE" : "WORKOUT"} — TAP TO CONTINUE →
             </button>
           ))}
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} />}
