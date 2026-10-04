@@ -5074,7 +5074,9 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const totalSets = currentExercise.sets || 0;
     const totalExercises = activeSession.exercises.length;
     const exerciseCompletedSets = getCompletedForExercise(exerciseIdx);
-    const currentSetRepRange = (Array.isArray(currentExercise.reps) ? currentExercise.reps[sIdx] : currentExercise.reps) || "8-12";
+    const suppliedRepRanges = Array.isArray(currentExercise.reps) ? currentExercise.reps : String(currentExercise.reps || "8-12").split("/").map(value => value.trim()).filter(Boolean);
+    const exerciseRepRanges = Array.from({ length: totalSets }, (_, index) => suppliedRepRanges[index] || suppliedRepRanges.at(-1) || "8-12");
+    const currentSetRepRange = exerciseRepRanges[sIdx] || "8-12";
     const weightGuidance = getWeightGuidance(currentExercise, sIdx);
     const suggestedWeight = weightGuidance?.weight;
     const lastSets = getLastSessionData(currentExercise);
@@ -5146,8 +5148,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
               <div className="workout-set-fields">
                 <label style={{ display: "block", textAlign: "center" }}>
-                  <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Current set reps:</span>
-                  <input className="workout-number" aria-label="Current set reps" type="number" inputMode="numeric" value={reps}
+                  <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
+                  <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps}
                     onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                     placeholder="0"
                     style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
@@ -5173,6 +5175,12 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                     {currentExercise.tempo && <div>TEMPO {currentExercise.tempo}</div>}
                   </div>
                   {currentExercise.tempo && <div style={{ marginTop: 5, fontSize: 9, color: "#6F8792" }}>Tempo = seconds to lower · pause · lift · pause</div>}
+                  <div style={{ marginTop: 11, paddingTop: 9, borderTop: `1px solid ${BORDER}` }}>
+                    <div style={{ color: "#8AABB8", fontSize: 8, letterSpacing: 1.2, marginBottom: 6 }}>REP RANGES</div>
+                    <div style={{ display: "flex", justifyContent: "center", gap: 6, flexWrap: "wrap" }}>
+                      {exerciseRepRanges.map((range, index) => <span key={index} style={{ padding: "5px 7px", borderRadius: 4, border: `1px solid ${index === sIdx ? "rgba(0,200,255,.55)" : BORDER}`, background: index === sIdx ? "rgba(0,200,255,.1)" : "rgba(255,255,255,.015)", color: index === sIdx ? NEON2 : "#A9BBC3", fontSize: 9 }}>SET {index + 1} · {range}</span>)}
+                    </div>
+                  </div>
                 </div>
               )}
 
