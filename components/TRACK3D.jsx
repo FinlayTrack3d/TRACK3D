@@ -8,7 +8,8 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
+import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
+import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
@@ -105,8 +106,6 @@ const MEALS = [
   { name: "Greek Yogurt", time: "4:00 PM", cals: 150, p: 17, c: 12, f: 3 },
 ];
 
-const TOTAL_CALS = MEALS.reduce((a, m) => a + m.cals, 0);
-const TOTAL_P = MEALS.reduce((a, m) => a + m.p, 0);
 const TOTAL_C = MEALS.reduce((a, m) => a + m.c, 0);
 const TOTAL_F = MEALS.reduce((a, m) => a + m.f, 0);
 
@@ -284,7 +283,7 @@ function ScoreRing({ score, size = 108 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ habits = [], system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
+function AICoach({ dayContext, system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -324,16 +323,14 @@ function AICoach({ habits = [], system, title, introduction, activationLabel, op
   const scroll = () => messageListRef.current?.scrollTo({ top: messageListRef.current.scrollHeight, behavior: "smooth" });
 
   const defaultSystem = `You are TRACK3D's AI coach - sharp, direct, data-driven accountability partner. Keep responses to 2-4 sentences. Be real, not fluffy.
+Only use the numbers below. When a value is "not logged", say it has not been logged; never estimate or invent it.
 User data today:
-- Completed habits: ${habits.filter(h => h.done).map(h => h.name).join(", ") || "none"}
-- Pending habits: ${habits.filter(h => !h.done).map(h => h.name).join(", ") || "all done!"}
-- Nutrition: ${TOTAL_CALS} kcal | ${TOTAL_P}g protein
-- Overall score: 74/100`;
+${dayContext || "- Nothing logged yet today"}`;
 
-  const send = async (msg) => {
+  const send = async (msg, { hidden = false } = {}) => {
     if (!msg.trim() || loading) return;
     setLoading(true);
-    const updated = [...messages, { role: "user", content: msg }];
+    const updated = [...messages, { role: "user", content: msg, ...(hidden ? { hidden: true } : {}) }];
     setMessages(updated);
     setInput("");
     setTimeout(scroll, 50);
@@ -352,7 +349,7 @@ User data today:
         headers: await chatHeaders(),
         body: JSON.stringify({
           system: system || defaultSystem,
-          messages: updated,
+          messages: updated.map(({ role, content }) => ({ role, content })),
         }),
       });
       const data = await res.json();
@@ -375,7 +372,7 @@ User data today:
   const activate = () => {
     setStarted(true);
     if (compact) setExpanded(true);
-    if (!openWithoutPrompt) send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."));
+    if (!openWithoutPrompt) send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."), { hidden: true });
   };
 
   const choosePersonality = async nextPersonality => {
@@ -415,6 +412,7 @@ User data today:
         <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
         {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
+      {coachingV12 && (!compact || expanded) && <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>COACH STYLE</div>}
       {coachingV12 && (!compact || expanded) && <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
         {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
       </div>}
@@ -429,7 +427,7 @@ User data today:
       ) : (
         <>
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
-            {(compact && !expanded ? messages.slice(-2) : messages).map((m, i) => {
+            {(compact && !expanded ? messages.filter(m => !m.hidden).slice(-2) : messages.filter(m => !m.hidden)).map((m, i) => {
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets|add_sets|log_set)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
               // Bigger, structured changes (a whole session/programme rewrite) travel as
               // JSON in a fenced block rather than the pipe-delimited marker above, which
@@ -489,7 +487,7 @@ User data today:
             })}
             <div ref={endRef} />
           </div>
-          {messages.at(-1)?.role === "assistant" && messages.at(-1)?.content?.includes("?") && (
+          {messages.at(-1)?.role === "assistant" && isYesNoQuestion(messages.at(-1)?.content) && (
             <div style={{ display: "flex", gap: 5, marginBottom: 5 }}>
               {["Yes", "No", "More detail"].map(reply => <button key={reply} className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => send(reply)}>{reply.toUpperCase()}</button>)}
             </div>
@@ -507,14 +505,52 @@ User data today:
   );
 }
 
+// ─── Routine coach: describe the applied schedule ─────────────────────────────
+// After a coach change is applied and times are recalculated, ask the coach to
+// describe that exact schedule, so its explanation matches what really changed.
+async function describeAppliedRoutine({ conversation, before, after, pendingRemovals = [], fallback }) {
+  const keyOf = task => task.id || task.name;
+  const last = after[after.length - 1];
+  const [hours, minutes] = String(last?.scheduledTime || "00:00").split(":").map(Number);
+  const finishMinutes = hours * 60 + minutes + (Number(last?.duration) || 0);
+  const finishTime = `${String(Math.floor(finishMinutes / 60) % 24).padStart(2, "0")}:${String(finishMinutes % 60).padStart(2, "0")}`;
+  const durationChanges = after.flatMap(task => {
+    const previous = before.find(item => keyOf(item) === keyOf(task));
+    return previous && Number(previous.duration) !== Number(task.duration) ? [`${task.name} ${previous.duration} → ${task.duration} min`] : [];
+  });
+  const orderChanged = before.map(keyOf).join("|") !== after.filter(task => before.some(item => keyOf(item) === keyOf(task))).map(keyOf).join("|");
+  const schedule = after.map(task => `${task.scheduledTime} ${task.name} (${task.duration} min)`).join("\n");
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: await chatHeaders(),
+      body: JSON.stringify({
+        system: `You are AI Coach. The app has just applied your routine change and recalculated the times. Tell the user what changed in at most 60 words, in 2-3 short sentences, with no headings or lists. Use only the facts below: quote task times and the finish time exactly as written, never calculate times yourself, and never describe tasks as locked or fixed unless the user said so. At most one optional follow-up question.
+Order changed: ${orderChanged ? "yes" : "no"}.
+Duration changes: ${durationChanges.join("; ") || "none"}.
+${pendingRemovals.length ? `Proposed removals waiting for the user to confirm (not yet removed): ${pendingRemovals.map(item => item.name).join(", ")}.\n` : ""}Schedule now:
+${schedule}
+Finishes at ${finishTime}.`,
+        messages: conversation.map(({ role, content }) => ({ role, content })),
+      }),
+    });
+    if (!res.ok) throw new Error("Request failed");
+    const data = await res.json();
+    return data.content?.map(block => block.text || "").join("").trim() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // ─── Schedule Review with Drag ────────────────────────────────────────────────
-function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTimes, calcFinishTime, LOCKED_LAST, onBack, onSave }) {
+function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTimes, calcFinishTime, LOCKED_LAST, nonRemovableIds = [], onRemoveTask, onBack, onSave }) {
   const [dragIdx, setDragIdx] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiConversation, setAiConversation] = useState([]);
   const [aiFeedback, setAiFeedback] = useState("");
   const [aiError, setAiError] = useState("");
   const [aiChangeStatus, setAiChangeStatus] = useState("");
+  const [removalProposals, setRemovalProposals] = useState([]);
   const aiRequestActive = useRef(false);
 
   const draggable = scheduledTasks.filter(t => t.id !== "checkin");
@@ -543,6 +579,7 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
     const tasks = draggable.map((task, index) => ({
       key: String(index), name: task.name, duration: task.duration,
       scheduledTime: task.scheduledTime, preferredTime: task.preferredTime || null,
+      locked: nonRemovableIds.includes(task.id),
     }));
     try {
       let parsed;
@@ -552,9 +589,9 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
         headers: await chatHeaders(),
         body: JSON.stringify({
           responseTokens: 2500,
-          system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical ordering immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible order just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. Explain the main concrete change. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach. If no reordering helps, briefly explain why the current order works.
-You can only reorder the supplied tasks. Keep every task exactly once, preserve durations, and leave the final check-in locked last. If the user needs duration, task, or wake-time changes, explain what they should edit using the routine controls. Timings will be recalculated consecutively from wake-up; if a fixed-time constraint cannot be met through reordering, explain that limitation instead of claiming it is satisfied.
-Respond only with valid JSON with double-quoted keys: {"order":["task key"],"explanation":"Your conversational reply, reasoning, and any follow-up question"}. Use the keys from the CURRENT task list below, not earlier keys. Your explanation must match the returned order: never claim you moved a task unless its returned position actually changes.
+          system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical plan immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible plan just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach.
+You can reorder the supplied tasks and change their durations (whole minutes, at least 1). Keep every task exactly once in "tasks", and the final check-in stays locked last. You cannot remove a task yourself: if the user's goal (for example a time limit) cannot be met by reordering and shortening, list the task(s) to drop in "proposeRemove" with a short reason and the user will confirm. Never propose removing a task marked locked. Timings are recalculated consecutively from wake-up; never claim a time or finish time yourself.
+Respond only with valid JSON with double-quoted keys: {"tasks":[{"key":"task key","duration":10}],"proposeRemove":[{"key":"task key","reason":"short reason"}],"explanation":"Your conversational reply"}. Use the keys from the CURRENT task list below, not earlier keys. Keep each duration equal to the current value unless you have a specific reason to change it.
 Wake-up: ${wakeTime}.
 Current tasks: ${JSON.stringify(tasks)}.
 Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.duration })}.`,
@@ -567,17 +604,17 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
       try {
         const cleaned = reply.replace(/```json|```/g, "").trim();
         parsed = JSON.parse(cleaned);
-        if (Array.isArray(parsed.order)) {
-          parsed.order = parsed.order.map(key => {
-            const identifier = String(key);
-            if (tasks.some(task => task.key === identifier)) return identifier;
-            const matches = tasks.filter(task => task.name === identifier);
-            return matches.length === 1 ? matches[0].key : identifier;
-          });
-        }
+        const toKey = key => {
+          const identifier = String(key);
+          if (tasks.some(task => task.key === identifier)) return identifier;
+          const matches = tasks.filter(task => task.name === identifier);
+          return matches.length === 1 ? matches[0].key : identifier;
+        };
+        if (Array.isArray(parsed.tasks)) parsed.tasks = parsed.tasks.map(entry => ({ ...entry, key: toKey(entry?.key) }));
+        const keys = (parsed.tasks || []).map(entry => entry.key);
         const expected = new Set(tasks.map(task => task.key));
-        if (!Array.isArray(parsed.order) || parsed.order.length !== tasks.length ||
-            new Set(parsed.order).size !== tasks.length || parsed.order.some(key => !expected.has(key)) ||
+        if (!Array.isArray(parsed.tasks) || keys.length !== tasks.length ||
+            new Set(keys).size !== tasks.length || keys.some(key => !expected.has(key)) ||
             typeof parsed.explanation !== "string" || !parsed.explanation.trim()) {
           throw new Error("Invalid recommendation");
         }
@@ -586,15 +623,25 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
         if (attempt === 1) throw new Error("Invalid recommendation");
       }
       }
-      const reordered = parsed.order.map(key => draggable[Number(key)]);
-      const movedCount = parsed.order.filter((key, index) => key !== String(index)).length;
-      if (movedCount > 0) {
-        setScheduledTasks(recalcTimes([...reordered, locked]));
-        setAiChangeStatus("Draft updated — " + movedCount + " tasks reordered. Review above, then lock it in.");
-      } else {
-        setAiChangeStatus("No order changes recommended — your current draft is unchanged.");
-      }
-      setAiConversation([...updated, { role: "assistant", content: parsed.explanation }]);
+      const reordered = parsed.tasks.map(entry => {
+        const task = draggable[Number(entry.key)];
+        const duration = Math.round(Number(entry.duration));
+        return { ...task, duration: duration >= 1 && duration <= 180 ? duration : task.duration };
+      });
+      const proposals = (Array.isArray(parsed.proposeRemove) ? parsed.proposeRemove : []).flatMap(entry => {
+        const task = draggable[Number(tasks.find(item => item.key === String(entry?.key) || item.name === entry?.key)?.key)];
+        if (!task || nonRemovableIds.includes(task.id)) return [];
+        return [{ id: task.id || task.name, name: task.name, reason: String(entry.reason || "") }];
+      });
+      const changed = reordered.some((task, index) => (task.id || task.name) !== (draggable[index].id || draggable[index].name) || Number(task.duration) !== Number(draggable[index].duration));
+      const applied = recalcTimes([...reordered, locked]);
+      if (changed) setScheduledTasks(applied);
+      setRemovalProposals(proposals);
+      setAiChangeStatus(changed ? "Draft updated. Review above, then lock it in." : proposals.length ? "No order or timing changes - see the coach's suggestion below." : "No changes recommended — your current draft is unchanged.");
+      const explanation = changed || proposals.length
+        ? await describeAppliedRoutine({ conversation: updated, before: recalcTimes([...draggable, locked]), after: applied, pendingRemovals: proposals, fallback: parsed.explanation })
+        : parsed.explanation;
+      setAiConversation([...updated, { role: "assistant", content: explanation }]);
       setAiFeedback("");
     } catch {
       setAiError("AI Coach could not revise your routine. The last successful update is still in place. Your message is kept — please try again.");
@@ -649,6 +696,22 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
           ))}
           {aiLoading && <p role="status" style={{ fontSize: 11, color: NEON }}>Thinking about your routine...</p>}
         </div>
+        {removalProposals.map(proposal => (
+          <div key={proposal.id} role="group" aria-label={`Remove ${proposal.name}?`} style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 4 }}>Coach suggests removing <strong>{proposal.name}</strong></div>
+            {proposal.reason && <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 8 }}>{proposal.reason}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiLoading} onClick={() => {
+                const remaining = recalcTimes(scheduledTasks.filter(task => (task.id || task.name) !== proposal.id));
+                setScheduledTasks(remaining);
+                onRemoveTask?.(proposal.id);
+                setRemovalProposals(current => current.filter(item => item.id !== proposal.id));
+                setAiChangeStatus(`Removed ${proposal.name}. Routine now finishes at ${calcFinishTime(wakeTime, remaining)}.`);
+              }}>REMOVE {proposal.name.toUpperCase()}</button>
+              <button className="t3d-btn t3d-btn-sm" disabled={aiLoading} onClick={() => setRemovalProposals(current => current.filter(item => item.id !== proposal.id))}>KEEP IT</button>
+            </div>
+          </div>
+        ))}
         <label style={{ display: "block", fontSize: 11, color: "#E0EAF0" }}>
           Anything to adjust?
           <textarea className="t3d-input" rows={2} value={aiFeedback} disabled={aiLoading}
@@ -928,13 +991,16 @@ Current tasks: ${JSON.stringify(tasks)}.`,
       }));
       const changed = parsed.tasks.some((entry, index) => String(entry.key) !== String(index) || Number(entry.duration) !== Number(editable[Number(entry.key)].duration));
       const finalList = checkin ? [...reordered, checkin] : reordered;
+      let explanation = parsed.explanation;
       if (changed) {
-        setScheduledTasks(recalcFromWake(finalList));
+        const applied = recalcFromWake(finalList);
+        setScheduledTasks(applied);
         setAiChangeStatus("Routine updated and saved.");
+        explanation = await describeAppliedRoutine({ conversation: updated, before: scheduledTasks, after: applied, fallback: parsed.explanation });
       } else {
         setAiChangeStatus("No changes recommended - your current routine is unchanged.");
       }
-      setAiConversation([...updated, { role: "assistant", content: parsed.explanation }]);
+      setAiConversation([...updated, { role: "assistant", content: explanation }]);
       setAiFeedback("");
     } catch {
       setAiError("AI Coach could not update your routine. Your last saved version is still in place - please try again.");
@@ -1694,6 +1760,33 @@ function MorningSection({ user }) {
 
   const currentStep = allSteps[checkinStep];
 
+  // Check-in answers are keyed by step id (custom tasks use "custom-<timestamp>"),
+  // so always show and send the task's name instead of its key.
+  const morningStepName = key => {
+    const step = [...scheduledTasks, ...NON_NEGS, ...selectedTasks, LOCKED_LAST].find(item => (item.id || item.name) === key);
+    if (step) return step.name;
+    return String(key).startsWith("custom-") ? "Custom task (since removed)" : key;
+  };
+  const morningCoachSystem = (data, score, routineTimingText) => {
+    const tasks = allSteps.filter(step => step.id !== "checkin").map(step => {
+      const value = data[step.id || step.name];
+      if (step.type === "tick") return { name: step.name, done: value === true ? true : value === false ? false : "not answered" };
+      if (step.type === "photos3") return { name: step.name, done: Object.values(value || {}).some(item => item && !["skipped", "deferred"].includes(item)) };
+      return { name: step.name, value: value || "not logged" };
+    });
+    const recentCheckins = history
+      .filter(entry => entry.date !== today && !entry.data?.inProgress)
+      .slice(0, 7)
+      .map(entry => entry.data?.routineSkipped
+        ? { date: entry.date, skipped: true }
+        : { date: entry.date, score: entry.score, sleep: entry.data?.sleep || "not logged", weight: entry.data?.weight || "not logged" });
+    return `You are TRACK3D's morning coach. Be concise, friendly and practical. Use short bullets with no emojis. Never claim something was missed simply because the user answered no or skipped optional photos. Refer to tasks only by the names given below, and only mention tasks that appear in the list.
+Routine timing gives the real time taken. If it is implausibly short for the number of tasks (for example under a minute per task), say plainly that the timing looks too short to be real and do not praise the score.
+Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(data.wakeTiming)}. Routine timing: ${routineTimingText}.
+Today's tasks (${tasks.length}): ${JSON.stringify(tasks)}.
+Last ${recentCheckins.length} check-ins before today, newest first: ${recentCheckins.length ? JSON.stringify(recentCheckins) : "none recorded"}.`;
+  };
+
   // Finalise the check-in as soon as the complete screen is reached, so
   // leaving by any route (not just "Back to Morning") records it as done.
   const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= allSteps.length;
@@ -2156,6 +2249,22 @@ function MorningSection({ user }) {
                       <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7, marginTop: -6 }}>
                         {routineTimingSummary(history.find(h => h.date === today)?.data?.routineTiming)}
                       </p>
+                      {(() => {
+                        const todayEntry = history.find(h => h.date === today);
+                        if (!todayEntry?.data) return null;
+                        return (
+                          <div style={{ textAlign: "left", margin: "12px 0" }}>
+                            <AICoach
+                              title="MORNING COACH"
+                              introduction="Ask about today's result, timing, or what to improve tomorrow."
+                              activationLabel="CHAT ABOUT THIS MORNING"
+                              openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
+                              storageKey={`morning-review-${user.id}-${today}`}
+                              system={morningCoachSystem(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
+                            />
+                          </div>
+                        );
+                      })()}
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
                     <button type="button" onClick={() => setCompletedAction("edit")}
                       style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
@@ -2412,7 +2521,7 @@ function MorningSection({ user }) {
                                 color: v === true ? NEON : v === false ? NEON3 : NEON2,
                                 border: `1px solid ${v === true ? "rgba(0,255,178,.2)" : v === false ? "rgba(255,45,120,.2)" : "rgba(0,200,255,.2)"}`,
                               }}>
-                                {k}: {v === true ? "✓" : v === false ? "✗" : String(v).slice(0,8)}
+                                {morningStepName(k)}: {v === true ? "✓" : v === false ? "✗" : String(v).slice(0,8)}
                               </span>
                             ))}
                           </div>
@@ -2921,6 +3030,8 @@ function MorningSection({ user }) {
               recalcTimes={recalcTimes}
               calcFinishTime={calcFinishTime}
               LOCKED_LAST={LOCKED_LAST}
+              nonRemovableIds={NON_NEGS.map(task => task.id)}
+              onRemoveTask={taskId => setSelectedTasks(current => current.filter(task => (task.id || task.name) !== taskId))}
               onBack={() => setSetupStep(1)}
               onSave={async () => {
                 await saveRoutine(scheduledTasks);
@@ -3407,7 +3518,7 @@ function MorningSection({ user }) {
           <div style={{ marginBottom: 24 }}>
             {Object.entries(checkinData).filter(([key]) => !["wakeTiming", "routineTiming"].includes(key)).map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
-                <span style={{ color: "#4A6070" }}>{k}</span>
+                <span style={{ color: "#4A6070" }}>{morningStepName(k)}</span>
                 <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
                   {v === true ? "✓" : v === false ? "✗" :
                     (v && typeof v === "object") ? `${Object.values(v).filter(p => p === "captured").length}/3 captured` : v}
@@ -3422,7 +3533,7 @@ function MorningSection({ user }) {
               activationLabel="CHAT ABOUT THIS MORNING"
               openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
               storageKey={`morning-review-${user.id}-${today}`}
-              system={`You are TRACK3D's morning coach. Be concise, friendly and practical. Use short bullets with no emojis. Never claim something was missed simply because the user answered no or skipped optional photos. Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(checkinData.wakeTiming)}. Routine timing: ${routineTimingText}. Answers: ${JSON.stringify(checkinData)}.`}
+              system={morningCoachSystem(checkinData, score, routineTimingText)}
             />
           </div>
           {submissionError && <div style={{ color: NEON3, fontSize: 11, marginBottom: 12, textAlign: "center" }}>{submissionError}</div>}
@@ -4110,6 +4221,14 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
   if (calorieGoal) scoreParts.push(Math.min(caloriesEaten / calorieGoal, 1));
   if (todaySession) scoreParts.push(fitnessDone ? 1 : 0);
   const score = Math.round((scoreParts.reduce((sum, value) => sum + value, 0) / scoreParts.length) * 100);
+  // Real figures for the dashboard coach; anything missing is "not logged".
+  const coachDayContext = [
+    `- Morning routine: ${morningSkipped ? "skipped today" : morningDone ? `done, score ${todayData.morning?.score ?? 0}/10` : morningInProgress ? "started, not finished" : "not logged"}`,
+    `- Workout: ${activeWorkout ? `${activeWorkout.session_name} in progress` : completedWorkoutNames.length ? `completed ${completedWorkoutNames.join(" + ")}` : todaySession ? `${todaySession.name} scheduled, not logged yet` : todayData.sessions.length ? "no session scheduled today" : "no training plan set up"}`,
+    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (target ${calorieGoal} kcal${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
+    `- Habits: ${habits.length ? `${done}/${habits.length} done${habits.some(h => h.done) ? ` (done: ${habits.filter(h => h.done).map(h => h.name).join(", ")})` : ""}${habits.some(h => !h.done) ? ` (pending: ${habits.filter(h => !h.done).map(h => h.name).join(", ")})` : ""}` : "none set up"}`,
+    `- Daily score: ${score}/100 (calculated from the items above)`,
+  ].join("\n");
 
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
@@ -4191,7 +4310,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
             </div>
           ))}
         </div>
-        <AICoach habits={habits} />
+        <AICoach dayContext={coachDayContext} />
       </div>
 
       <ProgressPhotos user={user} />
@@ -4376,6 +4495,9 @@ function Fitness({ user, isActive = true }) {
   const [editingSet, setEditingSet] = useState(null);
   const [completionFeedback, setCompletionFeedback] = useState("");
   const [completionFeedbackLoading, setCompletionFeedbackLoading] = useState(false);
+  const [completionFollowUps, setCompletionFollowUps] = useState([]);
+  const [completionQuestion, setCompletionQuestion] = useState("");
+  const [completionReplyLoading, setCompletionReplyLoading] = useState(false);
   const [workoutSaveError, setWorkoutSaveError] = useState("");
   const [workoutFinishing, setWorkoutFinishing] = useState(false);
   const [approvalReview, setApprovalReview] = useState(null);
@@ -4783,6 +4905,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setWorkoutSaveError("");
     setWorkoutFinishing(false);
     setCompletionFeedback("");
+    setCompletionFollowUps([]);
+    setCompletionQuestion("");
     setPendingSession(null);
     setView("workout");
   };
@@ -4858,14 +4982,42 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setHistory(current => current.map(log => log.id === logId ? { ...log, ai_feedback: feedback } : log));
   };
 
+  const completionFeedbackSystem = "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets with no emojis. WORKOUT REVIEW is authoritative: status completed means the set was performed using the exact reps and weightKg shown; status skipped means it was not recorded. Never say all sets or the session were skipped when completedSets is greater than zero. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.\nCompare every completed set with its own targetReps range. If every completed set of an exercise reached the top of its range, recommend a small weight increase for that exercise next time. If a set fell below the bottom of its range, say so plainly (for example \"set 3: 7 reps, below the 8-12 target\") and never describe it as within target. Skipped sets are not evidence that the weight was too heavy: note them, but do not tell the user to reduce weight because of them.\ndurationMinutes is the real time from start to finish. If it is implausibly short for the work logged (well under 1 minute per completed set), say plainly that the timing looks too short to be a real session and do not review it as normal.\nPREVIOUS SAME SESSION lists earlier workouts with the same name only; compare with those and nothing else.\nFor follow-up questions, answer directly in 1-4 short bullets using the same data.";
+  const completionFeedbackReview = () => {
+    const review = buildWorkoutReview(activeSession, completedSets);
+    const sameSession = history.filter(log => log.id !== workoutLogIdRef.current && String(log.session_name || "").toLowerCase() === String(activeSession?.name || "").toLowerCase());
+    return `WORKOUT REVIEW\n${JSON.stringify({ ...review, durationMinutes: Math.round((Date.now() - workoutStart) / 60000) })}\n\nPREVIOUS SAME SESSION\n${recentWorkoutsForCoach(sameSession, { perSession: 3, maxSessions: 1 })}`;
+  };
+
+  const askCompletionFollowUp = async () => {
+    const question = completionQuestion.trim();
+    if (!question || completionReplyLoading || !completionFeedback) return;
+    const updated = [...completionFollowUps, { role: "user", content: question }];
+    setCompletionFollowUps(updated);
+    setCompletionQuestion("");
+    setCompletionReplyLoading(true);
+    try {
+      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
+        system: completionFeedbackSystem,
+        messages: [{ role: "user", content: completionFeedbackReview() }, { role: "assistant", content: completionFeedback }, ...updated],
+      }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Coach request failed");
+      const reply = data.content?.map(block => block.text || "").join("").trim() || "I couldn't answer that just now. Please try again.";
+      setCompletionFollowUps([...updated, { role: "assistant", content: reply }]);
+    } catch {
+      setCompletionFollowUps([...updated, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
+    }
+    setCompletionReplyLoading(false);
+  };
+
   const getCompletionFeedback = async () => {
     if (completionFeedbackLoading || completionFeedback) return;
     setCompletionFeedbackLoading(true);
     try {
-      const review = buildWorkoutReview(activeSession, completedSets);
       const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets with no emojis. WORKOUT REVIEW is authoritative: status completed means the set was performed using the exact reps and weightKg shown; status skipped means it was not recorded. Never say all sets or the session were skipped when completedSets is greater than zero. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.",
-        messages: [{ role: "user", content: `WORKOUT REVIEW\n${JSON.stringify({ ...review, durationMinutes: Math.round((Date.now() - workoutStart) / 60000), recentHistory: history.slice(0, 5) })}` }],
+        system: completionFeedbackSystem,
+        messages: [{ role: "user", content: completionFeedbackReview() }],
       }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Feedback request failed");
@@ -5101,7 +5253,7 @@ Respond ONLY with valid JSON:
         onMemoryUpdate={saveCoachMemory}
         pendingPrompt={weekReviewPrompt}
         onConsumedPrompt={() => setWeekReviewPrompt(null)}
-        coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14) }}
+        coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
         system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Never open with a vague question such as "what would you like help with?" Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain.
 STRUCTURED ACTIVE-WORKOUT STATE is the single source of truth for exactly what has been lifted this session, per exercise and per set. Always read it fresh for any question about reps, weight or completion - never rely on numbers mentioned earlier in this conversation, since the user has likely moved on to a different exercise since then and old messages may describe a different one.
@@ -5380,8 +5532,25 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           </div>
           {workoutSaveError && <div role="alert" style={{ textAlign: "left", color: "#FF8AAD", background: "rgba(255,45,120,.07)", border: "1px solid rgba(255,45,120,.3)", borderRadius: 6, padding: 10, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{workoutSaveError}</div>}
           {completionFeedback && <div style={{ textAlign: "left", whiteSpace: "pre-wrap", color: "#C5D6DC", background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 12, fontSize: 10, lineHeight: 1.55, marginBottom: 10 }}>{cleanAiText(completionFeedback)}</div>}
+          {completionFeedback && (
+            <div style={{ textAlign: "left", marginBottom: 10 }}>
+              {completionFollowUps.map((message, index) => (
+                <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2 }}>
+                  <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "AI COACH"}</div>
+                  <span style={{ whiteSpace: "pre-wrap", color: "#C5D6DC", fontSize: 10, lineHeight: 1.55 }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
+                </div>
+              ))}
+              {completionReplyLoading && <p role="status" style={{ fontSize: 10, color: NEON }}>Coach is thinking...</p>}
+              <div style={{ display: "flex", gap: 7 }}>
+                <input className="t3d-ai-input" placeholder="Ask the coach about this workout..." value={completionQuestion}
+                  onChange={event => setCompletionQuestion(event.target.value)}
+                  onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askCompletionFollowUp(); } }} />
+                <button className="t3d-btn t3d-btn-sm" onClick={askCompletionFollowUp} disabled={completionReplyLoading || !completionQuestion.trim()}>ASK</button>
+              </div>
+            </div>
+          )}
           <button className="t3d-btn" style={{ width: "100%", padding: 11, marginBottom: 8, borderColor: NEON2, color: NEON2 }} onClick={() => { setWorkoutSaveError(""); getCompletionFeedback(); }} disabled={completionFeedbackLoading || Boolean(completionFeedback)}>{completionFeedbackLoading ? "COACH IS REVIEWING..." : completionFeedback ? "COACH FEEDBACK SAVED" : "RETRY COACH FEEDBACK"}</button>
-          <button className="t3d-btn" style={{ width: "100%", padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={async () => { await loadData(); setActiveSession(null); setCompletionFeedback(""); setWorkoutSaveError(""); setView("home"); }}>BACK TO FITNESS</button>
+          <button className="t3d-btn" style={{ width: "100%", padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={async () => { await loadData(); setActiveSession(null); setCompletionFeedback(""); setCompletionFollowUps([]); setCompletionQuestion(""); setWorkoutSaveError(""); setView("home"); }}>BACK TO FITNESS</button>
         </div>
       </div>
     );
@@ -5953,16 +6122,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       }).join(", ");
       return `${session.name} [${(session.days || []).join(", ") || "not scheduled"}]: ${exercises || "no exercises"}`;
     }).join("\n");
-    const recentWorkouts = history.slice(0, 5).map(log =>
-      `${log.date}: ${log.session_name}, ${log.duration_mins || 0} minutes, ${Math.round(log.total_volume || 0)}kg volume`
-    ).join("\n") || "No completed workouts yet.";
+    const recentWorkouts = recentWorkoutsForCoach(history);
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
           messages: updatedMessages,
         }),
       });
@@ -6260,7 +6427,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
               </div>
             )}
-            {coachMessages.at(-1)?.role === "assistant" && coachMessages.at(-1)?.content?.includes("?") && (
+            {coachMessages.at(-1)?.role === "assistant" && isYesNoQuestion(coachMessages.at(-1)?.content) && (
               <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                 {["Yes", "No", "More detail"].map(reply => <button key={reply} className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach(reply)}>{reply.toUpperCase()}</button>)}
               </div>
