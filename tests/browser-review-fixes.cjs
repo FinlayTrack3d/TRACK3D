@@ -1,14 +1,15 @@
 // Browser regression checks. Run against a production build: npm run start -- --port 3123
 // then: node tests/browser-review-fixes.cjs <scenario>   (all remote services are mocked)
 // Browser checks for review fixes 3-6. Scenarios:
-//  movefail, editfail, approvefail, aisavefail, routinefail, routineok
+//  movefail, editfail, approvefail, aisavefail, aisaveok, routinefail, routineok, rollover, tz
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'movefail';
 const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date(Date.now() + offset * 86400000));
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  // tz: the device is in Los Angeles (Mon 5 Oct, 20:00) while London is already Tue 6 Oct.
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...(scenario === 'tz' ? { timezoneId: 'America/Los_Angeles' } : {}) });
   const user = { id: '11111111-1111-4111-8111-111111111111', email: 't@example.invalid', aud: 'authenticated', role: 'authenticated', created_at: '2026-01-01T00:00:00Z' };
   const enc = o => Buffer.from(JSON.stringify(o)).toString('base64url');
   const token = enc({ alg: 'HS256', typ: 'JWT' }) + '.' + enc({ sub: user.id, exp: Math.floor(Date.now() / 1000) + 30 * 86400, aud: 'authenticated' }) + '.t';
@@ -17,7 +18,8 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
   }, { user, token });
   // rollover runs on a fake clock: Tue 6 Oct 2026, 23:50 in London.
   const fakeStart = new Date('2026-10-06T22:50:00Z');
-  const today = scenario === 'rollover' ? '2026-10-06' : londonKey(0);
+  const tzStart = new Date('2026-10-06T03:00:00Z');
+  const today = ['rollover', 'tz'].includes(scenario) ? '2026-10-06' : londonKey(0);
   const todayCode = ['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()];
   const otherDay = todayCode === 'THU' ? 'FRI' : 'THU';
   const approved = scenario !== 'approvefail';
@@ -31,6 +33,7 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     { id: 'checkin', name: 'TRACK3D Morning Check-in', type: 'tick', icon: '📱', duration: 2, scheduledTime: '06:21' } ] };
   const failSplit = ['movefail', 'editfail', 'approvefail', 'aisavefail'].includes(scenario);
   const writes = [];
+  const reads = [];
   await context.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.hostname === 'localhost') {
@@ -54,14 +57,19 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
       if (table === 'workout_splits') { split = { ...(split || {}), ...JSON.parse(req.postData()) }; return route.fulfill({ status: 201, json: single ? split : [split] }); }
       return route.fulfill({ status: 201, json: single ? {} : [] });
     }
+    reads.push(decodeURIComponent(req.url()));
     let rows = [];
     if (table === 'workout_splits') rows = split ? [split] : [];
-    if (table === 'morning_routines' && scenario.startsWith('routine')) rows = [routine];
+    if (table === 'morning_routines' && (scenario.startsWith('routine') || scenario === 'tz')) rows = [routine];
+    if (table === 'nutrition_plans' && scenario === 'tz') rows = [{ user_id: user.id, daily_calories: 2500, protein_target: 180, meals: [{ name: 'Breakfast', calories: 600, protein: 40 }], rest_day_meals: [], meal_library: [], weekly_meal_plan: {} }];
+    if (table === 'nutrition_logs' && scenario === 'tz') rows = [{ user_id: user.id, date: '2026-10-06', total_calories: 2500, total_protein: 180 }];
+    if (table === 'morning_checkins' && scenario === 'tz') rows = [{ user_id: user.id, date: '2026-10-04', score: 7, data: {} }, { user_id: user.id, date: '2026-10-05', score: 8, data: {} }];
     if (table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true') rows = [];
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();
   if (scenario === 'rollover') await page.clock.install({ time: fakeStart });
+  if (scenario === 'tz') await page.clock.install({ time: tzStart });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('dialog', d => d.dismiss());
@@ -146,6 +154,32 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     assert(latest.url.includes('id=eq.w1'), 'the same workout row was finished');
     await page.getByText('WORKOUT COMPLETE').waitFor();
     assert.match(await page.getByText(/SETS COMPLETED/).locator('..').textContent(), /2/);
+  } else if (scenario === 'tz') {
+    assert.equal(await page.evaluate(() => new Date().getDate()), 5, 'device clock is on 5 Oct');
+    await page.getByText('DAILY SCORE').waitFor();
+    await page.waitForTimeout(1500);
+    // Dashboard 7-day activity starts 6 days before the London date.
+    assert(reads.some(u => u.includes('/morning_checkins?') && u.includes('date=gte.2026-09-30')), 'activity uses home date: ' + reads.filter(u => u.includes('morning_checkins')).join(' | '));
+    assert(!reads.some(u => u.includes('date=gte.2026-09-29')), 'no device-date window');
+    // End of Day reads today's records by the London date.
+    await page.getByRole('button', { name: /END OF DAY CHECK-IN/ }).click();
+    await page.waitForTimeout(1500);
+    const eodReads = reads.filter(u => /daily_goals|nutrition_logs|workout_logs/.test(u) && u.includes('date=eq.'));
+    assert(eodReads.length && eodReads.every(u => u.includes('date=eq.2026-10-06')), 'EOD uses home date: ' + eodReads.join(' | '));
+    // Morning chart: the last day shown is Tuesday (London), not Monday.
+    await page.goto('http://localhost:3123/app');
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.waitForTimeout(1500);
+    const labels = await page.evaluate(() => [...document.querySelectorAll('*')].filter(el => el.children.length === 0 && /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$/.test(el.textContent.trim())).map(el => el.textContent.trim()));
+    console.log('chart labels:', labels.join(','));
+    assert(labels.length >= 7, 'chart shown');
+    assert.equal(labels.slice(-1)[0], 'Tue', 'chart ends on the London day');
+    await page.getByRole('button', { name: /NUTRITION$/ }).last().click();
+    await page.waitForTimeout(2000);
+    const nutritionLabels = await page.evaluate(() => [...document.querySelectorAll('*')].filter(el => el.children.length === 0 && /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$/.test(el.textContent.trim())).map(el => el.textContent.trim()));
+    console.log('nutrition labels:', nutritionLabels.join(','));
+    assert(nutritionLabels.length >= 7, 'nutrition week shown');
+    assert.equal(nutritionLabels.slice(-1)[0], 'Tue', 'nutrition week ends on the London day');
   } else if (scenario === 'routinefail' || scenario === 'routineok') {
     await page.getByRole('button', { name: /MORNING$/ }).last().click();
     await page.getByRole('button', { name: 'EDIT ROUTINE' }).click();
@@ -157,6 +191,8 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     } else {
       await page.getByText('✓ Routine saved').waitFor();
     }
+  } else {
+    throw new Error('unknown scenario ' + scenario);
   }
   assert.deepEqual(errors, []);
   console.log('PASS', scenario);

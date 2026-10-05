@@ -57,6 +57,13 @@ const getZonedDateInfo = (date = new Date(), timeZone = DEFAULT_HOME_TIME_ZONE) 
   };
 };
 
+// Today's date (YYYY-MM-DD) in the user's home timezone, optionally shifted
+// by whole days. Use this rather than the device clock's local date.
+const homeDateKey = (user, offsetDays = 0) => shiftDateKey(getZonedDateInfo(new Date(), resolveHomeTimeZone(user)).dateKey, offsetDays);
+// Labels for a YYYY-MM-DD key, independent of the device timezone.
+const dateKeyLabel = (dateKey, options) => new Date(`${dateKey}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", ...options });
+const dateKeyDayCode = dateKey => ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${dateKey}T12:00:00Z`).getUTCDay()];
+
 function useZonedDateKey(timeZone) {
   const [dateKey, setDateKey] = useState(() => getZonedDateInfo(new Date(), timeZone).dateKey);
   useEffect(() => {
@@ -2242,11 +2249,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   // 7-day chart data
   const last7 = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const dateStr = shiftDateKey(today, -(6 - i));
     const entry = history.find(h => h.date === dateStr && !h.data?.inProgress);
-    return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
+    return { date: dateStr, score: entry ? entry.score : null, label: dateKeyLabel(dateStr, { weekday: "short" }) };
   });
 
   // Inputs for sleep, number and photo steps. Shared by the check-in steps and
@@ -4052,11 +4057,7 @@ function EndOfDayCheckin({ user, onComplete }) {
   const [needsGoalsPrompt, setNeedsGoalsPrompt] = useState(false);
   const [newGoalText, setNewGoalText] = useState("");
 
-  const getLocalDate = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
-  const today = getLocalDate();
+  const today = homeDateKey(user);
 
   useEffect(() => {
     if (!user) return;
@@ -4339,12 +4340,10 @@ Give me my daily roundup and spot any patterns.` }],
 // ─── Daily activity helper (shared by heatmap, history view & weekly report) ──
 const DAY_NAMES = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
 
-async function fetchDailyActivity(userId, days) {
-  const dates = Array.from({ length: days }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (days - 1 - i));
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  });
+async function fetchDailyActivity(user, days) {
+  const userId = user.id;
+  const today = homeDateKey(user);
+  const dates = Array.from({ length: days }, (_, i) => shiftDateKey(today, -(days - 1 - i)));
   const earliest = dates[0];
   const [morning, nutrition, workout, eod] = await Promise.all([
     supabase.from("morning_checkins").select("date,score").eq("user_id", userId).gte("date", earliest),
@@ -4456,7 +4455,7 @@ function DashboardHistory({ user, onBack }) {
 
   useEffect(() => {
     if (!user) return;
-    fetchDailyActivity(user.id, 90).then(a => { setActivity(a); setLoading(false); });
+    fetchDailyActivity(user, 90).then(a => { setActivity(a); setLoading(false); });
   }, [user]);
 
   if (loading) return (
@@ -4855,7 +4854,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
     if (!user) return;
     supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", today).maybeSingle()
       .then(({ data }) => { if (data) setEodDone(true); });
-    fetchDailyActivity(user.id, 7).then(setActivity7);
+    fetchDailyActivity(user, 7).then(setActivity7);
     Promise.all([
       supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
@@ -8329,27 +8328,22 @@ function Nutrition({ user, userSessions }) {
   const [nutritionSaveError, setNutritionSaveError] = useState("");
   const [mealLibrary, setMealLibrary] = useState([]);
   const [weeklyMealPlan, setWeeklyMealPlan] = useState({});
-  const [plannerDate, setPlannerDate] = useState(() => { const date = new Date(); date.setDate(date.getDate() + 1); return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`; });
+  const [plannerDate, setPlannerDate] = useState(() => homeDateKey(user, 1));
   const [showLibraryForm, setShowLibraryForm] = useState(false);
   const [libraryMealDraft, setLibraryMealDraft] = useState({ name: "", calories: "", protein: "", carbs: "", fats: "" });
   const [nutritionPlanningStatus, setNutritionPlanningStatus] = useState("");
 
-  const getLocalDate = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
-  const today = getLocalDate();
+  const today = homeDateKey(user);
 
   useEffect(() => { if (!user) return; loadData(); }, [user]);
 
   // Auto detect training day from fitness split
   useEffect(() => {
     if (!userSessions?.length) return;
-    const todayNum = new Date().getDay();
-    const todayShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][todayNum];
+    const todayShort = dateKeyDayCode(today);
     const isTraining = userSessions.some(s => s.days?.includes(todayShort));
     setIsTrainingDay(isTraining);
-  }, [userSessions]);
+  }, [userSessions, today]);
 
   const loadData = async () => {
     setLoading(true);
@@ -8548,36 +8542,35 @@ function Nutrition({ user, userSessions }) {
   const loggedNutrition = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
   const remainingNutrition = remainingNutritionTargets({ calories: plan?.daily_calories, protein: plan?.protein_target, carbs: plan?.carbs_target, fats: plan?.fats_target }, loggedNutrition);
   const planningDates = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() + index + 1);
-    const key = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
-    return { key, label: index === 0 ? "TOMORROW" : date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).toUpperCase() };
+    const key = shiftDateKey(today, index + 1);
+    return { key, label: index === 0 ? "TOMORROW" : dateKeyLabel(key, { weekday: "short", day: "numeric", month: "short" }).toUpperCase() };
   });
   const plannerMeals = weeklyMealPlan[plannerDate] || [];
-  const plannerDayCode = plannerDate ? ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${plannerDate}T12:00:00`).getDay()] : "";
+  const plannerDayCode = plannerDate ? dateKeyDayCode(plannerDate) : "";
   const plannerIsTrainingDay = userSessions?.some(session => session.days?.includes(plannerDayCode));
   const plannerTemplateMeals = plannerIsTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals?.length ? plan.rest_day_meals : plan?.meals || []);
 
   const last7Logs = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(); d.setDate(d.getDate() - (6-i));
-    const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-    return { date: ds, label: d.toLocaleDateString("en-GB", { weekday: "short" }), log: logs.find(l => l.date === ds) };
+    const ds = shiftDateKey(today, -(6 - i));
+    return { date: ds, label: dateKeyLabel(ds, { weekday: "short" }), log: logs.find(l => l.date === ds) };
   });
 
-  const weekLogs = logs.filter(l => { const d = new Date(l.date); const now = new Date(); const ws = new Date(now); ws.setDate(now.getDate()-now.getDay()); return d >= ws; });
+  // This week runs from Sunday, as before, but on the home-timezone date.
+  const weekStartKey = shiftDateKey(today, -new Date(`${today}T12:00:00Z`).getUTCDay());
+  const weekLogs = logs.filter(l => l.date >= weekStartKey && l.date <= today);
   const avgCals = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_calories||0),0)/weekLogs.length) : 0;
   const avgProtein = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_protein||0),0)/weekLogs.length) : 0;
   const nutritionLogOnTarget = log => nutritionDayOnTarget(log, plan);
   const onPlanDays = weekLogs.filter(nutritionLogOnTarget).length;
 
   const streak = (() => {
-    let s = 0; const d = new Date();
+    let s = 0;
     while (s < 100) {
-      const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      const ds = shiftDateKey(today, -s);
       const log = logs.find(l => l.date === ds);
       if (!log) break;
       if (!nutritionLogOnTarget(log)) break;
-      s++; d.setDate(d.getDate()-1);
+      s++;
     }
     return s;
   })();
@@ -9438,7 +9431,7 @@ function Nutrition({ user, userSessions }) {
 function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: defaultTrainingDay }) {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [selectedDate, setSelectedDate] = useState(getCalendarDate(new Date()));
+  const [selectedDate, setSelectedDate] = useState(() => homeDateKey(user));
   const [addModal, setAddModal] = useState(null);
   const [newTask, setNewTask] = useState({ title: "", startTime: "", endTime: "", addDaily: false });
   const [library, setLibrary] = useState([]);
@@ -9457,11 +9450,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   const [nutritionMeals, setNutritionMeals] = useState([]);
   const [fitnessData, setFitnessData] = useState(null);
 
-  function getCalendarDate(d) {
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  }
-
-  const today = getCalendarDate(new Date());
+  const today = homeDateKey(user);
   const isToday = selectedDate === today;
   const HOURS = Array.from({ length: 18 }, (_, i) => i + 6);
 
@@ -9477,8 +9466,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     ]).then(([morning, nutrition, fitness]) => {
       if (morning.data?.tasks) setMorningRoutine(morning.data.tasks);
       if (nutrition.data) {
-        const todayNum = new Date(selectedDate).getDay();
-        const todayShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][todayNum];
+        const todayShort = dateKeyDayCode(selectedDate);
         const isTraining = fitness.data?.sessions?.some(s => s.days?.includes(todayShort));
         const meals = isTraining ? (nutrition.data.meals || []) : (nutrition.data.rest_day_meals || nutrition.data.meals || []);
         setNutritionMeals(meals);
@@ -9504,9 +9492,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   };
 
   const navigateDay = (dir) => {
-    const d = new Date(selectedDate);
-    d.setDate(d.getDate() + dir);
-    setSelectedDate(getCalendarDate(d));
+    setSelectedDate(shiftDateKey(selectedDate, dir));
   };
 
   const addTask = async (taskData) => {
@@ -9515,11 +9501,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
     if (taskData.addDaily) {
       // Add for next 7 days
-      const inserts = Array.from({ length: 7 }, (_, i) => {
-        const d = new Date(selectedDate);
-        d.setDate(d.getDate() + i);
-        return { ...baseTask, date: getCalendarDate(d) };
-      });
+      const inserts = Array.from({ length: 7 }, (_, i) => ({ ...baseTask, date: shiftDateKey(selectedDate, i) }));
       await supabase.from("calendar_tasks").insert(inserts);
     } else {
       await supabase.from("calendar_tasks").insert({ ...baseTask, date: selectedDate });
@@ -9609,8 +9591,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   // Auto blocks from other sections
   const getAutoBlocks = () => {
     const blocks = [];
-    const dateDay = new Date(selectedDate).getDay();
-    const dateShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][dateDay];
+    const dateShort = dateKeyDayCode(selectedDate);
 
     morningRoutine.forEach(t => {
       if (t.scheduledTime) blocks.push({ time: t.scheduledTime, title: t.name, type: "morning", icon: t.icon||"☀️" });
