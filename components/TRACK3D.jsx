@@ -4,6 +4,7 @@ import { readDraft, useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 import { resolveActivePain, sendCoachMessage } from "../lib/coaching/coach-client";
 import { COACH_PERSONALITIES } from "../lib/coaching/personality";
+import { normaliseExperience } from "../lib/coaching/system";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
@@ -14,7 +15,7 @@ import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
-import { IMPORT_FILE_MAX_BYTES, fitnessImportSystemPrompt, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
+import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
 import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
@@ -35,6 +36,7 @@ async function readCoachReply(res) {
 }
 
 const NEON = "#00FFB2";
+const EXPERIENCE_OPTIONS = [["beginner", "BEGINNER"], ["intermediate", "INTERMEDIATE"], ["advanced", "ADVANCED"]];
 const NEON2 = "#00C8FF";
 const NEON3 = "#FF2D78";
 const BG = "#080C10";
@@ -398,7 +400,7 @@ function ScoreRing({ score, size = 108, max = 100 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ dayContext, system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
+function AICoach({ dayContext, area = "dashboard", context, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -410,6 +412,8 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
   const [painActive, setPainActive] = useState(false); // an unresolved pain report shapes the coach's replies
   const [painNote, setPainNote] = useState("");
   const [personality, setPersonality] = useState("balanced");
+  const [experienceLevel, setExperienceLevel] = useState(null);
+  const [settingsError, setSettingsError] = useState("");
   const endRef = useRef(null);
   const messageListRef = useRef(null);
 
@@ -423,14 +427,15 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
     setRestored(true);
   }, [storageKey]);
 
+  // One coach style and level for every coach, stored in coach_profiles.
   useEffect(() => {
-    if (!coachingV12) return;
     supabase.auth.getUser().then(async ({ data: { user } }) => {
       if (!user) return;
-      const { data } = await supabase.from("coach_profiles").select("personality").eq("user_id", user.id).maybeSingle();
+      const { data } = await supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", user.id).maybeSingle();
       if (data?.personality) setPersonality(data.personality);
+      if (data?.experience_level) setExperienceLevel(data.experience_level);
     });
-  }, [coachingV12]);
+  }, []);
 
   useEffect(() => {
     if (!storageKey || !restored) return;
@@ -438,11 +443,6 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
   }, [storageKey, restored, started, messages]);
 
   const scroll = () => messageListRef.current?.scrollTo({ top: messageListRef.current.scrollHeight, behavior: "smooth" });
-
-  const defaultSystem = `You are TRACK3D's AI coach - sharp, direct, data-driven accountability partner. Keep responses to 2-4 sentences. Be real, not fluffy.
-Only use the numbers below. When a value is "not logged", say it has not been logged; never estimate or invent it.
-User data today:
-${dayContext || "- Nothing logged yet today"}`;
 
   const send = async (msg, { hidden = false } = {}) => {
     if (!msg.trim() || loading) return;
@@ -469,8 +469,9 @@ ${dayContext || "- Nothing logged yet today"}`;
         method: "POST",
         headers: await chatHeaders(),
         body: JSON.stringify({
-          system: system || defaultSystem,
-          messages: recentChatMessages(updated),
+          area,
+          context: context ?? `User data today:\n${dayContext || "- Nothing logged yet today"}`,
+          messages: recentChatMessages(updated.filter(message => message.role === "user" || message.role === "assistant")),
         }),
       });
       const reply = await readCoachReply(res);
@@ -491,13 +492,30 @@ ${dayContext || "- Nothing logged yet today"}`;
   const activate = () => {
     setStarted(true);
     if (compact) setExpanded(true);
-    if (!openWithoutPrompt) send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."), { hidden: true });
+    if (!openWithoutPrompt) send(openingMessage || "Give me a quick assessment of my day so far and what I should focus on.", { hidden: true });
   };
 
-  const choosePersonality = async nextPersonality => {
-    setPersonality(nextPersonality);
+  // A change mid-chat leaves a visible note so the new style is obvious.
+  const saveCoachSetting = async (field, value, note) => {
+    setSettingsError("");
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) await supabase.from("coach_profiles").upsert({ user_id: user.id, personality: nextPersonality, updated_at: new Date().toISOString() });
+    if (!user) return false;
+    const { error } = await supabase.from("coach_profiles").upsert({ user_id: user.id, [field]: value, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) { setSettingsError(`Couldn't save that setting: ${error.message}`); return false; }
+    if (messages.some(message => message.role === "user" || message.role === "assistant")) setMessages(current => [...current, { role: "note", content: note }]);
+    return true;
+  };
+  const choosePersonality = async nextPersonality => {
+    if (nextPersonality === personality) return;
+    const previous = personality;
+    setPersonality(nextPersonality);
+    if (!await saveCoachSetting("personality", nextPersonality, `Coach style: ${COACH_PERSONALITIES[nextPersonality]?.label || nextPersonality}`)) setPersonality(previous);
+  };
+  const chooseExperience = async level => {
+    if (level === experienceLevel) return;
+    const previous = experienceLevel;
+    setExperienceLevel(level);
+    if (!await saveCoachSetting("experience_level", level, `Level: ${level.toUpperCase()}`)) setExperienceLevel(previous);
   };
 
   // Apply a coach change and report only what the app confirms happened.
@@ -545,25 +563,35 @@ ${dayContext || "- Nothing logged yet today"}`;
   return (
     <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
+        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || "AI COACH"}</div>
         {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
-      {coachingV12 && (!compact || expanded) && <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>COACH STYLE</div>}
-      {coachingV12 && (!compact || expanded) && <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
-        {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
-      </div>}
+      {(!compact || expanded) && (
+        <div data-testid="coach-settings" style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>COACH STYLE</div>
+          <div style={{ display: "flex", gap: 5, marginBottom: 7 }}>
+            {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={personality === key} onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
+          </div>
+          <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>YOUR LEVEL</div>
+          <div style={{ display: "flex", gap: 5 }}>
+            {EXPERIENCE_OPTIONS.map(([key, label]) => <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={experienceLevel === key} onClick={() => chooseExperience(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: experienceLevel === key ? NEON : "#3A5060", borderColor: experienceLevel === key ? NEON : BORDER }}>{label}</button>)}
+          </div>
+          {settingsError && <div role="alert" style={{ fontSize: 9, color: "#FFB547", marginTop: 5 }}>{settingsError}</div>}
+        </div>
+      )}
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
           <div style={{ flex: 1, fontSize: compact ? 9 : 11, color: "#E0EAF0", marginBottom: compact ? 0 : 18, textAlign: compact ? "left" : "center", lineHeight: 1.5, letterSpacing: compact ? 0 : 1 }}>
-            {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Ask your AI coach about your habits,\nworkouts and nutrition.")}
+            {introduction || "Ask your AI coach about your habits,\nworkouts and nutrition."}
           </div>
-          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : openingMessage || openWithoutPrompt ? "OPEN COACH CHAT" : "REVIEW MY DAY SO FAR")}</button>
+          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (openingMessage || openWithoutPrompt ? "OPEN COACH CHAT" : "REVIEW MY DAY SO FAR")}</button>
         </div>
       ) : (
         <>
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {(compact && !expanded ? messages.filter(m => !m.hidden).slice(-2) : messages.filter(m => !m.hidden)).map((m, i) => {
+              if (m.role === "note") return <div key={i} data-testid="coach-note" style={{ textAlign: "center", fontSize: 9, color: "#6F8792", letterSpacing: 1, margin: "6px 0" }}>{m.content}</div>;
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets|add_sets|log_set)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
               // Bigger, structured changes (a whole session/programme rewrite) travel as
               // JSON in a fenced block rather than the pipe-delimited marker above, which
@@ -678,8 +706,8 @@ async function describeAppliedRoutine({ conversation, before, after, pendingRemo
       method: "POST",
       headers: await chatHeaders(),
       body: JSON.stringify({
-        system: `You are AI Coach. The app has just applied your routine change and recalculated the times. Tell the user what changed in at most 60 words, in 2-3 short sentences, with no headings or lists. Use only the facts below: quote task times and the finish time exactly as written, never calculate times yourself, and never describe tasks as locked or fixed unless the user said so. At most one optional follow-up question.
-Order changed: ${orderChanged ? "yes" : "no"}.
+        area: "routine_change_summary",
+        context: `Order changed: ${orderChanged ? "yes" : "no"}.
 Duration changes: ${durationChanges.join("; ") || "none"}.
 ${pendingRemovals.length ? `Proposed removals waiting for the user to confirm (not yet removed): ${pendingRemovals.map(item => item.name).join(", ")}.\n` : ""}Schedule now:
 ${schedule}
@@ -760,10 +788,8 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
         headers: await chatHeaders(),
         body: JSON.stringify({
           responseTokens: 2500,
-          system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical plan immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible plan just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach.
-You can reorder the supplied tasks and change their durations (whole minutes, at least 1). Keep every task exactly once in "tasks", and the final check-in stays locked last. You cannot remove a task yourself: if the user's goal (for example a time limit) cannot be met by reordering and shortening, list the task(s) to drop in "proposeRemove" with a short reason and the user will confirm. Never propose removing a task marked locked. Timings are recalculated consecutively from wake-up; never claim a time or finish time yourself.
-Respond only with valid JSON with double-quoted keys: {"tasks":[{"key":"task key","duration":10}],"proposeRemove":[{"key":"task key","reason":"short reason"}],"explanation":"Your conversational reply"}. Use the keys from the CURRENT task list below, not earlier keys. Keep each duration equal to the current value unless you have a specific reason to change it.
-Wake-up: ${wakeTime}.
+          area: "routine_plan",
+          context: `Wake-up: ${wakeTime}.
 Current tasks: ${JSON.stringify(tasks)}.
 Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.duration })}.`,
           messages: updated.map(({ role, content }, index) => ({ role, content: attempt && index === updated.length - 1 ? content + "\nReturn a complete valid JSON object with every current task key once. Use string keys and a brief explanation. Your previous response could not be applied." : content })),
@@ -1137,9 +1163,8 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
           headers: await chatHeaders(),
           body: JSON.stringify({
             responseTokens: 2500,
-            system: `You help refine an existing morning routine through conversation. You can reorder tasks and adjust their durations, but you cannot add or remove tasks (the user does that with the routine controls) and the final check-in step always stays last. Use the conversation, especially reasons given for agreeing or disagreeing. Keep the explanation to at most 60 words, in 2-3 short sentences, no headings or lists, identify yourself as AI Coach, and explain the main concrete change. At most one optional follow-up question, only after making a recommendation.
-Respond only with valid JSON with double-quoted keys: {"tasks":[{"key":"task key","duration":10}],"explanation":"your reply"}. Include every task key from the current list exactly once, in your recommended order. Keep duration equal to the current value unless you have a specific reason to change it. Use the keys from the CURRENT task list below, not earlier keys.
-Wake-up: ${wakeTime}.
+            area: "routine_refine",
+            context: `Wake-up: ${wakeTime}.
 Current tasks: ${JSON.stringify(tasks)}.`,
             messages: updated.map(({ role, content }, index) => ({ role, content: attempt && index === updated.length - 1 ? content + "\nReturn a complete valid JSON object with every current task key once. Your previous response could not be applied." : content })),
           }),
@@ -2035,7 +2060,7 @@ function MorningSection({ user }) {
     if (step) return step.name;
     return String(key).startsWith("custom-") ? "Custom task (since removed)" : key;
   };
-  const morningCoachSystem = (data, score, routineTimingText) => {
+  const morningCoachContext = (data, score, routineTimingText) => {
     const tasks = allSteps.filter(step => step.id !== "checkin").map(step => {
       const value = data[step.id || step.name];
       if (step.type === "tick") return { name: step.name, done: value === true ? true : value === false ? false : "not answered" };
@@ -2048,9 +2073,7 @@ function MorningSection({ user }) {
       .map(entry => entry.data?.routineSkipped
         ? { date: entry.date, skipped: true }
         : { date: entry.date, score: entry.score, sleep: entry.data?.sleep || "not logged", weight: entry.data?.weight || "not logged" });
-    return `You are TRACK3D's morning coach. Be concise, friendly and practical. Use short bullets with no emojis. Never claim something was missed simply because the user answered no or skipped optional photos. Refer to tasks only by the names given below, and only mention tasks that appear in the list.
-Routine timing gives the real time taken. If it is implausibly short for the number of tasks (for example under a minute per task), say plainly that the timing looks too short to be real and do not praise the score.
-Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(data.wakeTiming)}. Routine timing: ${routineTimingText}.
+    return `Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(data.wakeTiming)}. Routine timing: ${routineTimingText}.
 Today's tasks (${tasks.length}): ${JSON.stringify(tasks)}.
 Last ${recentCheckins.length} check-ins before today, newest first: ${recentCheckins.length ? JSON.stringify(recentCheckins) : "none recorded"}.`;
   };
@@ -2915,7 +2938,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                               activationLabel="CHAT ABOUT THIS MORNING"
                               openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
                               storageKey={`morning-review-${user.id}-${today}`}
-                              system={morningCoachSystem(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
+                              area="morning_review"
+                              context={morningCoachContext(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
                             />
                           </div>
                         );
@@ -4076,7 +4100,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               activationLabel="CHAT ABOUT THIS MORNING"
               openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
               storageKey={`morning-review-${user.id}-${today}`}
-              system={morningCoachSystem(checkinData, score, routineTimingText)}
+              area="morning_review"
+              context={morningCoachContext(checkinData, score, routineTimingText)}
             />
           </div>
           {submissionError && <div style={{ color: NEON3, fontSize: 11, marginBottom: 12, textAlign: "center" }}>{submissionError}</div>}
@@ -4187,7 +4212,7 @@ function EndOfDayCheckin({ user, onComplete }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, wake-up timing against the planned time when recorded, nutrition, fitness, calendar alignment, mood/energy, and whether the user's top goals for today got done. Treat the live start time as the recorded wake-up time, not independently verified waking. Do not assume missing wake-up data or praise earlier waking at the expense of sleep. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
+          area: "end_of_day",
           messages: [{ role: "user", content: `Today's data:
 - Morning score: ${morningScore}/10
 - ${wakeTimingSummary(morning.data?.data?.wakeTiming)}
@@ -4693,11 +4718,7 @@ function WeeklyRecap({ user, onBack }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's coach writing a short weekly recap. Use only the facts provided; never invent numbers, sessions or foods. Reply ONLY with JSON: {"biggest_win": "...", "focus": "...", "verdict": "..."}.
-biggest_win: one or two sentences on what genuinely went best this week, naming the specific number.
-focus: one clear, specific, actionable improvement for next week.
-verdict: two short sentences summarising the week honestly and encouragingly.
-If there is very little data, say so plainly instead of padding. No emojis, no markdown, no medical advice.`,
+          area: "weekly_summary",
           messages: [{ role: "user", content: `Week ${week.start} to ${week.end}${week.inProgress ? " (still in progress)" : ""}:\n- ${facts.join("\n- ")}` }],
         }),
       });
@@ -5285,6 +5306,7 @@ function Fitness({ user, isActive = true }) {
   const [numSessions, setNumSessions] = useState(3);
   const [sessions, setSessions] = useState([]);
   const [planPreview, setPlanPreview] = useState(null); // read-only plan sheet
+  const [setupExperience, setSetupExperience] = useState(null); // asked once during fitness setup
   const [importText, setImportText] = useState("");
   const [importResult, setImportResult] = useState(null); // interpreted plan awaiting review
   const [importError, setImportError] = useState("");
@@ -5471,6 +5493,13 @@ function withPlanApproval(sessions, now = new Date()) {
     const timer = setInterval(() => setAiBuildStage(stage => Math.min(stage + 1, AI_BUILD_STAGES.length - 1)), 6000);
     return () => clearInterval(timer);
   }, [aiBuilding]);
+
+  // The training level every coach uses (coach_profiles.experience_level).
+  const saveExperienceLevel = async level => {
+    if (!user || !level) return;
+    const { error } = await supabase.from("coach_profiles").upsert({ user_id: user.id, experience_level: level, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) console.log("Experience level not saved:", error.message);
+  };
 
   const openAiBuilder = () => {
     setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
@@ -5882,7 +5911,6 @@ function withPlanApproval(sessions, now = new Date()) {
     setHistory(current => current.map(log => log.id === logId ? { ...log, ai_feedback: feedback } : log));
   };
 
-  const completionFeedbackSystem = "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets with no emojis. WORKOUT REVIEW is authoritative: status completed means the set was performed using the exact reps and weightKg shown; status skipped means it was not recorded. Never say all sets or the session were skipped when completedSets is greater than zero. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.\nCompare every completed set with its own targetReps range. If every completed set of an exercise reached the top of its range, recommend a small weight increase for that exercise next time. If a set fell below the bottom of its range, say so plainly (for example \"set 3: 7 reps, below the 8-12 target\") and never describe it as within target. Skipped sets are not evidence that the weight was too heavy: note them, but do not tell the user to reduce weight because of them.\ndurationMinutes is the real time from start to finish. If it is implausibly short for the work logged (well under 1 minute per completed set), say plainly that the timing looks too short to be a real session and do not review it as normal.\nPREVIOUS SAME SESSION lists earlier workouts with the same name only; compare with those and nothing else.\nFor follow-up questions, answer directly in 1-4 short bullets using the same data.";
   const completionFeedbackReview = () => {
     const review = buildWorkoutReview(activeSession, completedSets);
     const sameSession = history.filter(log => log.id !== workoutLogIdRef.current && String(log.session_name || "").toLowerCase() === String(activeSession?.name || "").toLowerCase());
@@ -5900,7 +5928,7 @@ function withPlanApproval(sessions, now = new Date()) {
     setCompletionReplyLoading(true);
     try {
       const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: completionFeedbackSystem,
+        area: "workout_review",
         messages: [{ role: "user", content: completionFeedbackReview() }, { role: "assistant", content: completionFeedback }, ...updated],
       }) });
       const data = await response.json();
@@ -5918,7 +5946,7 @@ function withPlanApproval(sessions, now = new Date()) {
     setCompletionFeedbackLoading(true);
     try {
       const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: completionFeedbackSystem,
+        area: "workout_review",
         messages: [{ role: "user", content: completionFeedbackReview() }],
       }) });
       const data = await response.json();
@@ -6007,6 +6035,9 @@ function withPlanApproval(sessions, now = new Date()) {
 
   const buildAIPlan = async (answers = aiAnswers, chatContext = aiChatContext) => {
     if (aiBuilding) return;
+    const experienceQuestion = AI_QUESTIONS.find(question => question.id === "experience");
+    const builderLevel = experienceQuestion ? normaliseExperience(aiAnswerText(experienceQuestion, answers)) : null;
+    if (builderLevel) saveExperienceLevel(builderLevel);
     setAiPlanError("");
     setAiBuildStage(0);
     setAiBuilding(true);
@@ -6023,11 +6054,7 @@ function withPlanApproval(sessions, now = new Date()) {
           exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
           exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
           typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)));
-    const system = `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
-TIME LIMIT: Every session must fit the user's stated time for its day. The app times a session like this, and so must you: 5 minutes general warm-up; for each exercise, warmup_sets ramp-up sets (default 2) of about 8 reps × the tempo total in seconds plus 60 seconds each; each working set lasts the top of its rep range × the tempo total in seconds; rest_seconds between working sets (default 120, minimum 60); 90 seconds to change exercise. duration_mins must be that total, and must not exceed the user's limit. If it would, use fewer exercises or sets, shorter rest or fewer ramp-up sets.
-SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
-Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "duration_mins": 60, "reasoning": "short explanation", "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "rest_seconds": 90, "warmup_sets": 1, "notes": "string"}]}], "notes": "string"}`;
+    const builderContext = `Home timezone: ${homeTimeZone}. Authoritative local day: ${homeDate.weekday}, ${homeDate.dateKey}.`;
     try {
       // Up to two attempts: retry once if the reply cannot be read as a
       // complete programme, or if a session runs over the stated time.
@@ -6036,7 +6063,7 @@ Respond ONLY with valid JSON:
       for (let attempt = 0; attempt < 2; attempt++) {
         const res = await fetch("/api/chat", {
           method: "POST", headers: await chatHeaders(),
-          body: JSON.stringify({ responseTokens: 6000, system, messages }),
+          body: JSON.stringify({ responseTokens: 6000, area: "programme_builder", context: builderContext, messages }),
         });
         if (!res.ok) throw new Error("Could not build programme");
         const data = await res.json();
@@ -6183,17 +6210,6 @@ Respond ONLY with valid JSON:
         onConsumedPrompt={() => setWeekReviewPrompt(null)}
         coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
-        system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Never open with a vague question such as "what would you like help with?" Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain.
-STRUCTURED ACTIVE-WORKOUT STATE is the single source of truth for exactly what has been lifted this session, per exercise and per set. Always read it fresh for any question about reps, weight or completion - never rely on numbers mentioned earlier in this conversation, since the user has likely moved on to a different exercise since then and old messages may describe a different one.
-For a single small change, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], [ACTION:remove_sets|exercise|number], or [ACTION:add_sets|exercise|number]. During an active workout you can also log a completed set directly for the exercise the user is currently on with [ACTION:log_set|exercise|reps x weight] (e.g. [ACTION:log_set|Bench Press|10x60]) when the user tells you what they just did instead of entering it themselves - use the exact exercise name from the structured state and only when isCurrentExercise is true for it.
-For a bigger change - restructuring a whole day's session, swapping several exercises at once, or building a session that doesn't exist yet - never write out JSON or a plan as plain chat text. Instead append exactly this fenced block on its own lines: [ACTION_JSON:replace_session]{"sessionName":"exact session name","exercises":[{"name":"Exercise","sets":3,"reps":"8-12","tempo":"3-0-1-0","rest_seconds":90}]}[/ACTION_JSON] - valid JSON only inside the fence, one exercise object per exercise in the new session, "reps" as a rep-range string (or "8-12/6-10" per set if it varies by set). Whichever kind of marker you use, never say the change has been applied - the user chooses whether it affects this workout only or future sessions too, and the app shows that choice as buttons.
-COACH MEMORY is a short running summary you maintain yourself, carried between separate conversations (even on a different day or device) - it is how you remember this user over time beyond what's in today's chat history. Read it below for anything relevant. At the very end of every reply, on its own line, append an updated version: [MEMORY]a concise 2-4 sentence running summary of durable facts worth carrying forward - goals, injuries or limitations, preferences, notable decisions or changes made, recurring patterns worth remembering. Carry forward anything from the memory below that's still true, fold in anything new from this conversation, and drop anything no longer relevant.[/MEMORY] - always include this, even for short replies; it is stripped from what the user sees.
-Coach memory so far: ${coachMemory || "None yet - this is the first conversation."}
- Home timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.
- Saved programme: ${JSON.stringify(split?.sessions || [])}
-Current programme shown in the app: ${JSON.stringify(sessions)}
-Recent workout logs: ${JSON.stringify(history.slice(0, 5))}
-Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       />
     </div>
   );
@@ -6842,7 +6858,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
         const res = await fetch("/api/chat", {
           method: "POST", headers: await chatHeaders(),
-          body: JSON.stringify({ responseTokens: 6000, system: fitnessImportSystemPrompt(), messages }),
+          body: JSON.stringify({ responseTokens: 6000, area: "plan_import", messages }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `the coach service is unavailable (${res.status})`);
@@ -6964,6 +6980,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {setupStep === 0 && (
             <div>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")}>← BACK</button>
+              <div className="t3d-ctitle">YOUR TRAINING EXPERIENCE</div>
+              <p style={{ fontSize: 10, color: "#8AABB8", margin: "0 0 8px" }}>The coach explains things to match. You can change this later in any coach chat.</p>
+              <div style={{ display: "flex", gap: 6, marginBottom: 22 }}>
+                {EXPERIENCE_OPTIONS.map(([key, label]) => (
+                  <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={setupExperience === key} style={{ flex: 1, fontSize: 8, background: setupExperience === key ? "rgba(0,255,178,.15)" : "transparent", borderColor: setupExperience === key ? NEON : BORDER, color: setupExperience === key ? NEON : "#E0EAF0" }}
+                    onClick={() => { setSetupExperience(key); saveExperienceLevel(key); }}>{label}</button>
+                ))}
+              </div>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
               <button className="t3d-btn t3d-btn-sm" onClick={openAiBuilder}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
@@ -7258,8 +7282,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           headers: await chatHeaders(),
           body: JSON.stringify({
             responseTokens: 1500,
-            system: `Read a conversation between a user and their fitness coach and fill in the user's answers to a training questionnaire. Use what the user said (and anything the coach proposed that the user accepted). Use null only for questions the conversation does not answer. Respond with one JSON object and nothing else, using exactly these keys:
-{"goal": [up to two of ${JSON.stringify(AI_QUESTIONS[0].options)}], "goal_custom": "any other goal in the user's words, or null", "experience": "text or null", "days_per_week": number 1-7 or null, "preferred_days": ["MON".."SUN"] or ["FLEXIBLE"] or null, "session_length": "time available per session, e.g. 45 minutes, or null", "equipment": "text or null", "split": "text or null", "favourites": "exercises they enjoy, or null", "priorities": "focus areas, or null", "limitations": "injuries or things to avoid, or null"}`,
+            area: "questionnaire_extract",
+            context: `GOAL OPTIONS: ${JSON.stringify(AI_QUESTIONS[0].options)}`,
             messages: [{ role: "user", content: `CONVERSATION\n${transcript}\n\nReturn the JSON object now.` }],
           }),
         });
@@ -7499,7 +7523,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         method: "POST",
         headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nYou cannot change the saved plan from this chat: never say a change has been made, saved or applied. If the user wants a change, tell them to use Change Plan.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+          area: "plan_coach",
+          context: `Home timezone: ${homeTimeZone}. Local date and time: ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
           messages: recentChatMessages(updatedMessages),
         }),
       });
@@ -7526,7 +7551,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     setApprovalLoading(true);
     try {
       const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: `You are TRACK3D's fitness coach helping a user decide whether to approve a programme. Answer directly in 2-5 short bullets with no emojis. Explain the purpose of the day selection, recovery spacing, duration, exercise order, sets and rep ranges. Listen to feedback and suggest reasonable adjustments, but warn clearly against unsafe or counterproductive requests. Approval is optional and means an 8-week commitment with review afterwards. Sessions may move within a rolling 8-day cycle. Home timezone: ${homeTimeZone}.`,
+        area: "plan_approval",
+        context: `Home timezone: ${homeTimeZone}.`,
         messages: [{ role: "user", content: `Programme under review: ${JSON.stringify(reviewedSessions)}` }, ...updated],
       }) });
       if (!response.ok) throw new Error("Coach request failed");
@@ -8216,7 +8242,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are a nutrition expert. The user wants to tweak their meal plan. Apply their requested changes and return the full updated plan. Respond ONLY with valid JSON with no extra text: {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
+          area: "meal_plan_tweak",
           messages: [{ role: "user", content: `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan keeping similar calories (${macros.calories} kcal target) and protein (${macros.protein}g target).` }],
         }),
       });
@@ -8238,7 +8264,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are a nutrition expert. Build a rest day meal plan — slightly lower calories, fewer carbs. Respond ONLY with valid JSON: {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
+          area: "rest_day_plan",
           messages: [{ role: "user", content: `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${meals.map(m=>m.name).join(", ")}` }],
         }),
       });
@@ -8313,7 +8339,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's nutrition coach. You already gave feedback on the user's day. Continue the conversation naturally. Keep answers concise — 2-4 sentences. Never give medical advice. Be direct and helpful.`,
+          area: "nutrition_chat",
           messages: recentChatMessages(updated),
         }),
       });
@@ -8577,7 +8603,7 @@ function Nutrition({ user, userSessions }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's nutrition coach. Give honest, direct, motivating feedback in 2-3 sentences. Be real but encouraging. Never shame. Never give medical advice. If under 18 is mentioned be age-appropriate.`,
+          area: "nutrition_day",
           messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
         }),
       });
@@ -8600,8 +8626,7 @@ function Nutrition({ user, userSessions }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are a nutrition expert. Build a daily meal plan. Never give medical advice. Respond ONLY with valid JSON with no extra text:
-{"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
+          area: "meal_plan_build",
           messages: [{ role: "user", content: `Build a ${mealsPerDay} meal daily plan. Targets: ${macros.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats. User preferences:\n${context}` }],
         }),
       });
@@ -9644,7 +9669,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's daily accountability coach. Give honest, direct feedback in 3-4 sentences. Find one pattern and give one actionable suggestion for tomorrow. Never give medical advice.`,
+          area: "daily_debrief",
           messages: [{ role: "user", content: `Day review: ${done} tasks done, ${half} partial, ${missed} missed. Score: ${score}/10. Tasks: ${tasks.map(t=>`${t.title} (${t.start_time}) — ${results[t.id]||"pending"}`).join(", ")}. Give feedback.` }],
         }),
       });

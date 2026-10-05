@@ -1,8 +1,9 @@
 import { createClient } from "@supabase/supabase-js";
 import { prepareAction } from "../../../lib/coaching/actions.js";
-import { needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
-import { buildCoachSystemInstructions } from "../../../lib/coaching/playbook.js";
-import { activePainDirective, activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
+import { conversationTurns, needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
+import { WORKOUT_COACH_INSTRUCTIONS } from "../../../lib/coaching/playbook.js";
+import { buildCoachSystem } from "../../../lib/coaching/system.js";
+import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 
 const responseShape = `Return only JSON matching:
@@ -72,11 +73,18 @@ export async function POST(request) {
       activePain = [{ report: message, body_area: safety.bodyArea, status: "active", reported_at: new Date().toISOString() }, ...activePain];
     }
 
-    const [{ data: context, error: contextError }, { data: profile }] = await Promise.all([
+    const [{ data: rawContext, error: contextError }, { data: profile }, { data: recentTurns }] = await Promise.all([
       supabase.rpc("get_coach_recent_context", { window_days: 14 }),
-      supabase.from("coach_profiles").select("personality").eq("user_id", user.id).maybeSingle(),
+      supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", user.id).maybeSingle(),
+      supabase.from("coach_messages").select("role,content,created_at").eq("user_id", user.id).eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false }).limit(11),
     ]);
     if (contextError) return Response.json({ error: "Could not load Coach context" }, { status: 500 });
+    // Old coach messages are left out of the context: the model copied its
+    // earlier answers and voice from them. Only this conversation's recent
+    // turns are sent, as real messages.
+    const { messages: _oldMessages, ...context } = rawContext || {};
+    const turns = conversationTurns(recentTurns || [], message);
 
     let olderHistory = [];
     const usedHistoricalRetrieval = needsHistoricalRetrieval(message);
@@ -91,8 +99,15 @@ export async function POST(request) {
       const providerResponse = await postAnthropicMessages({
           model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
           max_tokens: 1200,
-          system: `${activePain.length ? `${activePainDirective(activePain)}\n\n` : ""}${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
-          messages: [{ role: "user", content: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}\n\nUSER\n${message}` }],
+          system: buildCoachSystem({
+            areaInstructions: `${WORKOUT_COACH_INSTRUCTIONS}\n\n${responseShape}`,
+            kind: "conversation",
+            personality: profile?.personality,
+            experienceLevel: profile?.experience_level,
+            activePain,
+            context: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}`,
+          }),
+          messages: [...turns, { role: "user", content: message }],
         });
       if (!providerResponse.ok) return Response.json({ error: providerResponse.error }, { status: 502 });
       const providerPayload = providerResponse.payload;

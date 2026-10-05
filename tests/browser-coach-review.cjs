@@ -1,7 +1,7 @@
 // Browser regression checks for the AI coach review. Run against a production build: npm run start -- --port 3123
 // then: node tests/browser-coach-review.cjs <scenario>   (all remote services are mocked)
 // Browser checks for the AI coach review (sections F-J). Scenarios:
-//  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve
+//  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve, coachstyle, setuplevel
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -39,7 +39,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         const body = JSON.parse(req.postData() || '{}');
         chats.push(body);
         if (chatFails) return route.fulfill({ status: 502, json: { error: 'Coach provider failed (529): Overloaded' } });
-        if ((body.system || '').includes('weekly recap')) return route.fulfill({ json: { content: [{ text: '{"biggest_win":"You trained twice.","focus":"Log meals.","verdict":"First tracked week."}' }] } });
+        if (body.area === 'weekly_summary') return route.fulfill({ json: { content: [{ text: '{"biggest_win":"You trained twice.","focus":"Log meals.","verdict":"First tracked week."}' }] } });
         return route.fulfill({ json: { content: [{ text: 'Solid day: two meals on plan and a workout. Tomorrow, plan dinner before 6pm.' }] } });
       }
       if (url.pathname === '/api/coach') {
@@ -125,6 +125,35 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(JSON.parse(update.body).status, 'resolved');
     assert(decodeURIComponent(update.url).includes('status=neq.resolved'));
     assert.equal(await page.getByRole('button', { name: 'PAIN RESOLVED' }).count(), 0);
+  } else if (scenario === 'coachstyle') {
+    await page.getByRole('button', { name: 'REVIEW MY DAY SO FAR' }).click();
+    await page.getByText(/Solid day/).waitFor();
+    const sent = chats.at(-1);
+    assert.equal(sent.area, 'dashboard');
+    assert.equal(sent.system, undefined, 'no client-written prompt');
+    assert.match(sent.context, /User data today/);
+    const settings = page.getByTestId('coach-settings').first();
+    await settings.getByRole('button', { name: 'BACK ME' }).click();
+    await page.getByTestId('coach-note').filter({ hasText: 'Coach style: BACK ME' }).waitFor();
+    await settings.getByRole('button', { name: 'ADVANCED' }).click();
+    await page.getByTestId('coach-note').filter({ hasText: 'Level: ADVANCED' }).waitFor();
+    const profileWrites = writes.filter(w => w.table === 'coach_profiles').map(w => JSON.parse(w.body));
+    assert(profileWrites.some(b => b.personality === 'supportive'), 'style saved');
+    assert(profileWrites.some(b => b.experience_level === 'advanced'), 'level saved');
+    // Notes are shown, never sent to the coach.
+    const input = page.getByPlaceholder('Ask anything...').first();
+    await input.fill('How much protein should I eat?');
+    await input.press('Enter');
+    await page.waitForTimeout(800);
+    assert(chats.at(-1).messages.every(m => m.role === 'user' || m.role === 'assistant'), 'no notes sent');
+  } else if (scenario === 'setuplevel') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: '📋 BUILD MY SPLIT' }).click();
+    await page.getByText('YOUR TRAINING EXPERIENCE').waitFor();
+    await page.getByRole('button', { name: 'BEGINNER', exact: true }).click();
+    await page.waitForTimeout(500);
+    const saved = writes.filter(w => w.table === 'coach_profiles').map(w => JSON.parse(w.body));
+    assert(saved.some(b => b.experience_level === 'beginner'), 'level saved during setup');
   } else {
     throw new Error('unknown scenario ' + scenario);
   }

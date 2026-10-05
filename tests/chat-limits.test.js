@@ -5,23 +5,24 @@ import { CHAT_LIMITS, createMemoryRateLimiter, recentChatMessages, validateChatP
 const user = (content) => ({ role: "user", content });
 
 test("valid chat payloads pass and are trimmed to role and content", () => {
-  const result = validateChatPayload({ system: "Coach", messages: [{ ...user("Hi"), extra: 1 }], responseTokens: 6000 });
+  const result = validateChatPayload({ area: "dashboard", context: "data", messages: [{ ...user("Hi"), extra: 1 }], responseTokens: 6000 });
   assert.equal(result.ok, true);
   assert.deepEqual(result.value.messages, [user("Hi")]);
   assert.equal(result.value.maxTokens, 6000);
-  assert.equal(validateChatPayload({ messages: [user("Hi")], responseTokens: 99999 }).value.maxTokens, 6000);
-  assert.equal(validateChatPayload({ messages: [user("Hi")] }).value.maxTokens, 1000);
-  assert.equal(validateChatPayload({ messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }] }).ok, true);
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [user("Hi")], responseTokens: 99999 }).value.maxTokens, 6000);
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [user("Hi")] }).value.maxTokens, 1000);
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }] }).ok, true);
 });
 
 test("oversized or malformed payloads are rejected", () => {
-  assert.equal(validateChatPayload({ messages: [] }).status, 400);
-  assert.equal(validateChatPayload({ messages: [{ role: "system", content: "x" }] }).status, 400);
-  assert.equal(validateChatPayload({ messages: [{ role: "user", content: [{ type: "image", source: {} }] }] }).status, 400);
-  assert.equal(validateChatPayload({ messages: [user("x")], system: { evil: true } }).status, 400);
+  assert.equal(validateChatPayload({ messages: [user("x")] }).status, 400, "area is required");
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [] }).status, 400);
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [{ role: "system", content: "x" }] }).status, 400);
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [{ role: "user", content: [{ type: "image", source: {} }] }] }).status, 400);
+  assert.equal(validateChatPayload({ area: "dashboard", messages: [user("x")], context: { evil: true } }).status, 400);
   const tooMany = Array.from({ length: CHAT_LIMITS.maxMessages + 1 }, (_, i) => (i % 2 ? { role: "assistant", content: "a" } : user("u")));
-  assert.equal(validateChatPayload({ messages: tooMany }).status, 413);
-  const tooLong = validateChatPayload({ system: "s".repeat(10), messages: [user("x".repeat(CHAT_LIMITS.maxInputChars))] });
+  assert.equal(validateChatPayload({ area: "dashboard", messages: tooMany }).status, 413);
+  const tooLong = validateChatPayload({ area: "dashboard", context: "s".repeat(10), messages: [user("x".repeat(CHAT_LIMITS.maxInputChars))] });
   assert.equal(tooLong.status, 413);
   assert.match(tooLong.error, /too long/);
 });

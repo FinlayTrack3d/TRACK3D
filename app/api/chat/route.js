@@ -1,6 +1,9 @@
 import { createClient } from "@supabase/supabase-js";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 import { CHAT_LIMITS, createMemoryRateLimiter, validateChatPayload } from "../../../lib/chat-limits.js";
+import { chatArea } from "../../../lib/coaching/chat-areas.js";
+import { buildCoachSystem } from "../../../lib/coaching/system.js";
+import { activePainReports, bodyAreaOf, classifySafetyText } from "../../../lib/coaching/safety.js";
 
 function supabaseForToken(token) {
   const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -27,6 +30,21 @@ async function databaseLimit(supabase) {
   return { ok: true };
 }
 
+// Coach settings and recent unresolved pain, read with the user's own token.
+async function coachState(supabase, userId, latestUserText) {
+  const [profileResult, painResult] = await Promise.all([
+    supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", userId).maybeSingle(),
+    supabase.from("pain_reports").select("report,body_area,exercise_key,status,reported_at").eq("user_id", userId).neq("status", "resolved")
+      .gte("reported_at", new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()).order("reported_at", { ascending: false }).limit(5),
+  ]);
+  const activePain = activePainReports(painResult.data || []);
+  // Pain mentioned in this message counts too, even before it is recorded.
+  if (latestUserText && classifySafetyText(latestUserText).hasPain) {
+    activePain.unshift({ report: latestUserText.slice(0, 300), body_area: bodyAreaOf(latestUserText), status: "active", reported_at: new Date().toISOString() });
+  }
+  return { personality: profileResult.data?.personality || "balanced", experienceLevel: profileResult.data?.experience_level || null, activePain };
+}
+
 export async function POST(request) {
   try {
     const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
@@ -42,16 +60,30 @@ export async function POST(request) {
     try { payload = JSON.parse(raw); } catch { return Response.json({ error: "Invalid request" }, { status: 400 }); }
     const checked = validateChatPayload(payload);
     if (!checked.ok) return Response.json({ error: checked.error }, { status: checked.status });
+    // Instructions come from the server, never from the request.
+    const area = chatArea(checked.value.area);
+    if (!area) return Response.json({ error: "Unknown coach area" }, { status: 400 });
 
     const limited = memoryLimit(user.id);
     const allowed = limited.ok ? await databaseLimit(supabase) : limited;
     if (!allowed.ok) return Response.json({ error: allowed.error }, { status: 429, headers: { "Retry-After": String(allowed.retryAfter) } });
 
     if (!process.env.ANTHROPIC_API_KEY) return Response.json({ error: "No API key found" }, { status: 500 });
+    const latestUser = [...checked.value.messages].reverse().find((message) => message.role === "user");
+    const latestUserText = typeof latestUser?.content === "string" ? latestUser.content : "";
+    const state = await coachState(supabase, user.id, area.kind === "conversation" ? latestUserText : "");
+    const system = buildCoachSystem({
+      areaInstructions: area.instructions,
+      kind: area.kind,
+      personality: state.personality,
+      experienceLevel: state.experienceLevel,
+      activePain: area.kind === "conversation" ? state.activePain : [],
+      context: checked.value.context,
+    });
     const result = await postAnthropicMessages({
       model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
       max_tokens: checked.value.maxTokens,
-      system: (checked.value.system || "You are TRACK3D's AI coach.") + "\nFor conversational replies default to 1–2 short sentences and at most 60 words. Answer directly. Expand when explicitly asked for detail. Preserve complete requested JSON and structured plans.",
+      system,
       messages: checked.value.messages,
     });
     if (!result.ok) return Response.json({ error: result.error }, { status: result.status === 429 ? 429 : 502 });
