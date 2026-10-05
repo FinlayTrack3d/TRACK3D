@@ -2,7 +2,7 @@
 // then: node tests/browser-coach-review.cjs <scenario>   (all remote services are mocked)
 // Browser checks for the AI coach review (sections F-J). Scenarios:
 //  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve, coachstyle, setuplevel,
-//  reviewskip, dashexcludes, changeplanhint, planmarkdown
+//  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -29,7 +29,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
     calendar_tasks: [{ title: 'Gym', status: 'done' }, { title: 'Emails', status: 'pending' }],
     workout_logs: scenario === 'dashexcludes' ? [{ id: 'w1', user_id: user.id, date: today, session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '6', personalBest: { type: 'weight_pb', label: 'Weight PB' } }, { weight: '80', reps: '5' }] }] }] : [],
-    workout_splits: ['painresolve', 'changeplanhint', 'planmarkdown'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
+    workout_splits: ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
   const writes = [];
   const chats = [];
@@ -41,6 +41,8 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         const body = JSON.parse(req.postData() || '{}');
         chats.push(body);
         if (chatFails) return route.fulfill({ status: 502, json: { error: 'Coach provider failed (529): Overloaded' } });
+        if (body.stream && scenario === 'streamchat') return route.fulfill({ status: 200, headers: { 'content-type': 'text/plain; charset=utf-8', 'x-coach-stream': '1' }, body: 'Streamed: you have logged 1,300 kcal of your 2,100 kcal target.' });
+        if (body.stream && scenario === 'streamerror') return route.fulfill({ status: 200, headers: { 'content-type': 'text/plain; charset=utf-8', 'x-coach-stream': '1' }, body: 'Partial reply that gets cut\u0000ERROR:Coach provider failed: stream error' });
         if (body.area === 'food_estimate') return route.fulfill({ json: { content: [{ text: JSON.stringify({ items: [{ name: 'Large pepperoni pizza', amount: '1 large (as stated)', calories_low: 1800, calories_high: 2400, protein_low: 70, protein_high: 95 }, { name: 'Beer', amount: '2 (as stated)', calories_low: 360, calories_high: 480, protein_low: 2, protein_high: 4 }] }) }] } });
         if (body.area === 'weekly_summary') return route.fulfill({ json: { content: [{ text: '{"biggest_win":"You trained twice.","focus":"Log meals.","verdict":"First tracked week."}' }] } });
         return route.fulfill({ json: { content: [{ text: 'Solid day: two meals on plan and a workout. Tomorrow, plan dinner before 6pm.' }] } });
@@ -48,6 +50,10 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       if (url.pathname === '/api/coach') {
         const body = JSON.parse(req.postData() || '{}');
         chats.push({ coach: true, ...body });
+        if (scenario === 'streamcoach') {
+          const lines = [{ type: 'partial', message: 'Next set:' }, { type: 'partial', message: 'Next set: 10 reps at 20kg' }, { type: 'final', message: 'Next set: 10 reps at 20kg, then rest 90 seconds.', insights: [], actions: [], activePain: false, conversationId: 'c1' }];
+          return route.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson; charset=utf-8' }, body: lines.map(l => JSON.stringify(l)).join('\n') + '\n' });
+        }
         if (/permanently/i.test(body.message)) return route.fulfill({ json: { message: "I can't change your saved plan from here — use CHANGE PLAN on the Fitness page. For today, tap swap.", insights: [], actions: [], activePain: false, planChangeHint: true, conversationId: 'c1' } });
         return route.fulfill({ json: /pain/i.test(body.message) ? { message: 'Stop that exercise for today — get it checked by a physio or doctor if it continues.', insights: [], actions: [], activePain: true, safetyStop: true, conversationId: 'c1' } : { message: 'Next set: 10 reps.', insights: [], actions: [], activePain: false, conversationId: 'c1' } });
       }
@@ -211,6 +217,27 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: 'SEND' }).click();
     await page.getByText(/chest gets 7 direct sets/).waitFor();
     assert.equal(await page.getByText(/\*\*/).count(), 0, 'no raw markdown');
+  } else if (scenario === 'streamchat' || scenario === 'streamerror') {
+    await page.getByRole('button', { name: 'REVIEW MY DAY SO FAR' }).click();
+    if (scenario === 'streamchat') {
+      await page.getByText('Streamed: you have logged 1,300 kcal of your 2,100 kcal target.').waitFor();
+      assert.equal(chats.at(-1).stream, true);
+    } else {
+      await page.getByText(/Coach provider failed: stream error/).waitFor();
+      assert.equal(await page.getByText('Partial reply that gets cut', { exact: true }).count(), 0, 'cut-off text is not left as the reply');
+    }
+  } else if (scenario === 'streamcoach') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    await page.getByRole('button', { name: 'CHAT WITH FITNESS COACH' }).click();
+    const input = page.getByPlaceholder('Ask anything...');
+    await input.fill('What next?');
+    await input.press('Enter');
+    await page.getByText('Next set: 10 reps at 20kg, then rest 90 seconds.').waitFor();
+    const sent = chats.filter(c => c.coach).at(-1);
+    assert.equal(sent.stream, true);
+    assert.deepEqual(sent.clientContext.programme.map(s => s.name), ['Push A'], 'only today\'s session');
+    assert.equal(sent.clientContext.recentLegacyWorkouts, undefined, 'no 14-workout history between sets');
   } else {
     throw new Error('unknown scenario ' + scenario);
   }

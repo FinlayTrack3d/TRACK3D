@@ -56,3 +56,17 @@ test("internal field names never reach the user", async () => {
   assert.equal(leaked.planChangeHint, true);
   assert.deepEqual(cleanCoachReply("Drop to 18 kg for the last set."), { message: "Drop to 18 kg for the last set.", planChangeHint: false });
 });
+
+test("the stable prompt is cached; data, level and tone come after it", async () => {
+  const { buildCoachSystemBlocks, systemText, buildCoachSystem } = await import("../lib/coaching/system.js");
+  const options = { areaInstructions: "Dashboard coach.", personality: "strict", experienceLevel: "advanced", context: "Calories: 900" };
+  const blocks = buildCoachSystemBlocks(options);
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks[0].cache_control, { type: "ephemeral" });
+  assert.doesNotMatch(blocks[0].text, /Calories: 900|TONE:|EXPERIENCE:/, "nothing per-user in the cached block");
+  assert.match(blocks[1].text, /Calories: 900[\s\S]*EXPERIENCE: ADVANCED[\s\S]*TONE: PUSH ME/);
+  assert.equal(systemText(blocks), buildCoachSystem(options), "same text as the plain prompt");
+  const withPain = buildCoachSystemBlocks({ ...options, activePain: [{ report: "knee pain" }] });
+  assert.match(withPain[0].text, /^ACTIVE PAIN/);
+  assert.equal(withPain.some((block) => block.cache_control), false, "a pain request is not cached");
+});

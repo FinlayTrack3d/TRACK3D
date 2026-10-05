@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { readDraft, useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
-import { resolveActivePain, sendCoachMessage } from "../lib/coaching/coach-client";
+import { resolveActivePain, streamCoachMessage } from "../lib/coaching/coach-client";
 import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { normaliseExperience } from "../lib/coaching/system";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
@@ -23,6 +23,31 @@ import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, unl
 async function chatHeaders() {
   const { data: { session } } = await supabase.auth.getSession();
   return { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) };
+}
+
+// Streams a coach conversation reply from /api/chat, calling onText with the
+// text so far as it arrives. Falls back to a normal JSON reply. Throws on
+// failure, including a failure part-way through the stream.
+async function streamCoachText(payload, onText = () => {}) {
+  const res = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({ ...payload, stream: true }) });
+  if (!res.ok || !res.body || res.headers.get("X-Coach-Stream") !== "1") {
+    const text = await readCoachReply(res);
+    onText(text);
+    return text;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+    const errorAt = text.indexOf("\u0000ERROR:");
+    if (errorAt >= 0) throw new Error(text.slice(errorAt + 7) || "the coach reply was cut off");
+    onText(text);
+  }
+  if (!text.trim()) throw new Error("the coach sent an empty reply");
+  return text.trim();
 }
 
 // The text of a coach reply. Throws when the request failed or the reply is
@@ -455,7 +480,10 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     setTimeout(scroll, 50);
     try {
       if (coachingV12) {
-        const data = await sendCoachMessage(msg, conversationId, coachContext);
+        const data = await streamCoachMessage(msg, conversationId, coachContext, partial => {
+          setMessages([...updated, { role: "assistant", content: partial }]);
+          scroll();
+        });
         setConversationId(data.conversationId);
         setActions((data.actions || []).map(action => ({ ...action, type: action.type || action.action_type })));
         setPainActive(Boolean(data.activePain));
@@ -465,16 +493,11 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
         setTimeout(scroll, 50);
         return;
       }
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: await chatHeaders(),
-        body: JSON.stringify({
-          area,
-          context: context ?? `User data today:\n${dayContext || "- Nothing logged yet today"}`,
-          messages: recentChatMessages(updated.filter(message => message.role === "user" || message.role === "assistant")),
-        }),
-      });
-      const reply = await readCoachReply(res);
+      const reply = await streamCoachText({
+        area,
+        context: context ?? `User data today:\n${dayContext || "- Nothing logged yet today"}`,
+        messages: recentChatMessages(updated.filter(message => message.role === "user" || message.role === "assistant")),
+      }, text => { setMessages([...updated, { role: "assistant", content: text }]); scroll(); });
       setMessages([...updated, { role: "assistant", content: reply }]);
       // A coach that carries a running memory ends every reply with a hidden
       // updated summary - persist it so the next conversation (even on a
@@ -4213,9 +4236,7 @@ function EndOfDayCheckin({ user, onComplete }) {
         ? `${goals.filter(g => g.done).length} of ${goals.length} completed - ${goals.map(g => `"${g.text}" (${g.done ? "done" : "not done"})`).join(", ")}`
         : "no goals set for today";
 
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
+      const text = await streamCoachText({
           area: "end_of_day",
           messages: [{ role: "user", content: `Today's data:
 - Morning score: ${morningScore}/10
@@ -4232,9 +4253,8 @@ function EndOfDayCheckin({ user, onComplete }) {
 - Pattern history: ${patterns}
 
 Give me my daily roundup and spot any patterns.` }],
-        }),
-      });
-      setAiRoundup(await readCoachReply(res));
+      }, setAiRoundup);
+      setAiRoundup(text);
     } catch (e) {
       console.log("Roundup error:", e?.message);
       setAiRoundup("");
@@ -5945,13 +5965,10 @@ function withPlanApproval(sessions, now = new Date()) {
     setCompletionQuestion("");
     setCompletionReplyLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
+      const reply = await streamCoachText({
         area: "workout_review",
         messages: [{ role: "user", content: completionFeedbackReview() }, { role: "assistant", content: completionFeedback }, ...updated],
-      }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Coach request failed");
-      const reply = data.content?.map(block => block.text || "").join("").trim() || "I couldn't answer that just now. Please try again.";
+      }, text => setCompletionFollowUps([...updated, { role: "assistant", content: text }]));
       setCompletionFollowUps([...updated, { role: "assistant", content: reply }]);
     } catch {
       setCompletionFollowUps([...updated, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
@@ -5963,18 +5980,15 @@ function withPlanApproval(sessions, now = new Date()) {
     if (completionFeedbackLoading || completionFeedback) return;
     setCompletionFeedbackLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
+      const feedback = await streamCoachText({
         area: "workout_review",
         messages: [{ role: "user", content: completionFeedbackReview() }],
-      }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Feedback request failed");
-      const feedback = data.content?.map(block => block.text || "").join("").trim();
-      if (!feedback) throw new Error("Feedback response was empty");
+      }, text => setCompletionFeedback(text));
       setCompletionFeedback(feedback);
       await persistCompletionFeedback(feedback);
     } catch (error) {
       console.error("Workout feedback error:", error.message);
+      setCompletionFeedback("");
       setWorkoutSaveError("Your workout is saved, but Coach feedback is temporarily unavailable. You can retry below.");
     }
     setCompletionFeedbackLoading(false);
@@ -6226,7 +6240,14 @@ function withPlanApproval(sessions, now = new Date()) {
         onMemoryUpdate={saveCoachMemory}
         pendingPrompt={weekReviewPrompt}
         onConsumedPrompt={() => setWeekReviewPrompt(null)}
-        coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
+        coachContext={workoutInProgress && activeSession ? {
+          // Between sets: today's session and the last 2 workouts with the same name only.
+          programme: sessions.filter(session => session.name?.toLowerCase() === activeSession.name?.toLowerCase()),
+          workoutId: activeSession.trainingSessionId || null,
+          activeWorkout: structuredWorkoutState,
+          gymContext: activeSession.gymContext || null,
+          recentWorkoutsBySession: recentWorkoutsForCoach(history.filter(log => log.session_name?.toLowerCase() === activeSession.name?.toLowerCase()), { perSession: 2, maxSessions: 1 }),
+        } : { programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
         onOpenChangePlan={() => { setPlanChangeMessages([]); setPlanChangeInput(""); setPlanChangeRecommendation(null); setPlanChangeOpen(true); setView("home"); }}
       />
@@ -7538,18 +7559,11 @@ function withPlanApproval(sessions, now = new Date()) {
     const recentWorkouts = recentWorkoutsForCoach(history);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: await chatHeaders(),
-        body: JSON.stringify({
-          area: "plan_coach",
-          context: `Home timezone: ${homeTimeZone}. Local date and time: ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
-          messages: recentChatMessages(updatedMessages),
-        }),
-      });
-      if (!response.ok) throw new Error("Coach request failed");
-      const data = await response.json();
-      const reply = data.content?.map(block => block.text || "").join("") || "I couldn't answer that just now. Please try again.";
+      const reply = await streamCoachText({
+        area: "plan_coach",
+        context: `Home timezone: ${homeTimeZone}. Local date and time: ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+        messages: recentChatMessages(updatedMessages),
+      }, text => setCoachMessages([...updatedMessages, { role: "assistant", content: text }]));
       setCoachMessages([...updatedMessages, { role: "assistant", content: reply }]);
     } catch {
       setCoachMessages([...updatedMessages, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
@@ -7569,14 +7583,11 @@ function withPlanApproval(sessions, now = new Date()) {
     setApprovalQuestion("");
     setApprovalLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
+      const reply = await streamCoachText({
         area: "plan_approval",
         context: `Home timezone: ${homeTimeZone}.`,
         messages: [{ role: "user", content: `Programme under review: ${JSON.stringify(reviewedSessions)}` }, ...updated],
-      }) });
-      if (!response.ok) throw new Error("Coach request failed");
-      const data = await response.json();
-      const reply = data.content?.map(block => block.text || "").join("") || "I could not answer that just now.";
+      }, text => setApprovalMessages([...updated, { role: "assistant", content: text }]));
       setApprovalMessages([...updated, { role: "assistant", content: reply }]);
     } catch { setApprovalMessages([...updated, { role: "assistant", content: "I could not connect just now. Please try again." }]); }
     setApprovalLoading(false);
@@ -8364,15 +8375,9 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
     setReply("");
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          area: "nutrition_chat",
-          messages: recentChatMessages(updated),
-        }),
-      });
-      const text = await readCoachReply(res);
-      setMessages(m => [...m, { role: "assistant", content: text }]);
+      const text = await streamCoachText({ area: "nutrition_chat", messages: recentChatMessages(updated) },
+        partial => setMessages([...updated, { role: "assistant", content: partial }]));
+      setMessages([...updated, { role: "assistant", content: text }]);
     } catch (e) {
       console.log("Nutrition chat error:", e?.message);
       setReplyError("The coach couldn't reply. Your message is above — try sending it again.");
@@ -8652,16 +8657,14 @@ function Nutrition({ user, userSessions }) {
     const calorieTarget = plan?.daily_calories || 2000;
     const diff = totalCals - calorieTarget;
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
+      const text = await streamCoachText({
           area: "nutrition_day",
           messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; return result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
-        }),
-      });
-      setAiFeedback(await readCoachReply(res));
+      }, setAiFeedback);
+      setAiFeedback(text);
     } catch (e) {
       console.log("Nutrition feedback error:", e?.message);
+      setAiFeedback("");
       setAiFeedbackError("Couldn't get feedback on your day.");
     }
     setAiFeedbackLoading(false);
@@ -8791,8 +8794,8 @@ function Nutrition({ user, userSessions }) {
             )}
             {aiFeedbackError && !aiFeedbackLoading && <p role="alert" style={{ fontSize: 11, color: "#FFB547", margin: "0 0 8px" }}>{aiFeedbackError}</p>}
             {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>{aiFeedbackError ? "TRY AGAIN" : "GET AI FEEDBACK"}</button>}
-            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
-            {aiFeedback && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
+            {aiFeedbackLoading && <div style={{ fontSize: 11, color: aiFeedback ? "#8AABB8" : "#E0EAF0", marginBottom: 16, lineHeight: 1.6, whiteSpace: "pre-wrap", textAlign: "left" }}>{aiFeedback ? cleanAiText(aiFeedback) : "AI analysing your day..."}</div>}
+            {aiFeedback && !aiFeedbackLoading && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
             {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>Could not save: {nutritionSaveError}</div>}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { const saved = await saveLog(); if (!saved) return; setTodayLogged(true); await loadData(); setView("home"); }}>SAVE & FINISH</button>
           </div>
@@ -9744,16 +9747,14 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     const half = Object.values(results).filter(v => v==="half").length;
     const missed = Object.values(results).filter(v => v==="none").length;
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
+      const text = await streamCoachText({
           area: "daily_debrief",
           messages: [{ role: "user", content: `Day review: ${done} tasks done, ${half} partial, ${missed} missed. Score: ${score}/10. Tasks: ${tasks.map(t=>`${t.title} (${t.start_time}) — ${results[t.id]||"pending"}`).join(", ")}. Give feedback.` }],
-        }),
-      });
-      setAiFeedback(await readCoachReply(res));
+      }, setAiFeedback);
+      setAiFeedback(text);
     } catch (e) {
       console.log("Debrief feedback error:", e?.message);
+      setAiFeedback("");
       setAiFeedbackError("Couldn't get feedback on your day.");
     }
     setAiFeedbackLoading(false);
