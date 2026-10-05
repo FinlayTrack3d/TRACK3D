@@ -189,7 +189,9 @@ const css = `
   .t3d-grid12 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; margin-bottom: 16px; }
   body.t3d-workout-active { overflow: hidden; overscroll-behavior: none; }
   body.t3d-workout-active .t3d { height: 100dvh; min-height: 0; overflow: hidden; }
-  body.t3d-workout-active .t3d-main { height: 100dvh; overflow: hidden; }
+  /* The page stays locked during a workout, but the workout area itself can
+     scroll so the coach below it is reachable on short phone screens. */
+  body.t3d-workout-active .t3d-main { height: 100dvh; overflow-y: auto; overscroll-behavior: contain; }
   body.t3d-workout-active .t3d-header { display: none; }
   body.t3d-workout-active .t3d-bottom-nav { display: none !important; }
   .t3d-workout-screen { height: 100%; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 10px; }
@@ -2456,11 +2458,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       </div>
     );
   })() : null;
+  // Session controls are plain grey so the main action on screen stands out.
+  const secondaryButtonStyle = { background: "transparent", borderColor: "#31434F", color: "#C5D6DC" };
   const sessionControls = (canGoBack, onBack) => (
     <div style={{ marginTop: 16 }}>
       <div style={{ display: "flex", gap: 8 }}>
-        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} disabled={!canGoBack} onClick={onBack}>← BACK</button>
-        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setMorningConfirm("end")}>END MORNING</button>
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44, ...secondaryButtonStyle }} disabled={!canGoBack} onClick={onBack}>← BACK</button>
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44, ...secondaryButtonStyle }} onClick={() => setMorningConfirm("end")}>END MORNING</button>
       </div>
       <button type="button" onClick={() => setMorningConfirm("delete")}
         style={{ display: "block", margin: "10px auto 0", background: "none", border: 0, color: NEON3, cursor: "pointer", fontSize: 10, minHeight: 32, textDecoration: "underline" }}>
@@ -3818,8 +3822,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 style={{
                   flex: 1,
                   padding: 13,
-                  background: "rgba(0,255,178,.12)",
-                  borderColor: "rgba(0,255,178,.5)"
+                  background: "linear-gradient(90deg, #00FFB2, #00D99A)",
+                  borderColor: NEON,
+                  color: "#06100D",
+                  fontWeight: 900
                 }}
                 onClick={completeLiveTask}
               >

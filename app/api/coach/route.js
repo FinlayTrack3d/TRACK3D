@@ -3,6 +3,7 @@ import { prepareAction } from "../../../lib/coaching/actions.js";
 import { needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
 import { buildCoachSystemInstructions } from "../../../lib/coaching/playbook.js";
 import { safetyDirective } from "../../../lib/coaching/safety.js";
+import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 
 const responseShape = `Return only JSON matching:
 {"message":"concise answer","insights":[{"kind":"progress|recovery|form|consistency|safety","text":"..."}],"actions":[],"memoryCandidates":[]}.
@@ -71,18 +72,14 @@ export async function POST(request) {
     // Retry once when the model's reply is not valid JSON before reporting an error.
     let answer;
     for (let attempt = 0; attempt < 2 && !answer; attempt++) {
-      const providerResponse = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({
+      const providerResponse = await postAnthropicMessages({
           model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
           max_tokens: 1200,
           system: `${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
           messages: [{ role: "user", content: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}\n\nUSER\n${message}` }],
-        }),
-      });
-      if (!providerResponse.ok) return Response.json({ error: "Coach provider failed" }, { status: 502 });
-      const providerPayload = await providerResponse.json();
+        });
+      if (!providerResponse.ok) return Response.json({ error: providerResponse.error }, { status: 502 });
+      const providerPayload = providerResponse.payload;
       const text = providerPayload.content?.map((block) => block.text || "").join("") || "";
       try { answer = extractJson(text); } catch { answer = undefined; }
     }
