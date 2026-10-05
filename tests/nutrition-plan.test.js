@@ -55,3 +55,14 @@ test("meal library merges repeat meals by name without duplicating them", () => 
   assert.equal(merged[0].calories, 400);
   assert.equal(merged[1].name, "Final meal");
 });
+
+test("countCompletedMeals handles every saved shape", async () => {
+  const { countCompletedMeals } = await import("../lib/nutrition-plan.js");
+  assert.equal(countCompletedMeals({ 0: true, 1: { completed: false, note: "pizza" }, 2: { completed: true, calories: 500 }, _review_complete: true }), 2);
+  assert.equal(countCompletedMeals([true, false, { done: true }, null]), 2);
+  assert.equal(countCompletedMeals({}), 0);
+  assert.equal(countCompletedMeals(null), 0);
+  assert.equal(countCompletedMeals(undefined), 0);
+  assert.equal(countCompletedMeals("bad"), 0);
+  assert.equal(countCompletedMeals({ _review_complete: true }), 0, "bookkeeping keys are not meals");
+});

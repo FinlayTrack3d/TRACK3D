@@ -16,12 +16,22 @@ import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/wor
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, fitnessImportSystemPrompt, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
-import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
 async function chatHeaders() {
   const { data: { session } } = await supabase.auth.getSession();
   return { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) };
+}
+
+// The text of a coach reply. Throws when the request failed or the reply is
+// empty, so a screen never shows canned text as if the coach had written it.
+async function readCoachReply(res) {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `the coach is unavailable (${res.status})`);
+  const text = (data.content || []).map(block => block.text || "").join("").trim();
+  if (!text) throw new Error("the coach sent an empty reply");
+  return text;
 }
 
 const NEON = "#00FFB2";
@@ -459,9 +469,7 @@ ${dayContext || "- Nothing logged yet today"}`;
           messages: recentChatMessages(updated),
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Coach is unavailable right now.");
-      const reply = data.content?.map(b => b.text || "").join("") || "Unable to connect.";
+      const reply = await readCoachReply(res);
       setMessages([...updated, { role: "assistant", content: reply }]);
       // A coach that carries a running memory ends every reply with a hidden
       // updated summary - persist it so the next conversation (even on a
@@ -4082,6 +4090,7 @@ function EndOfDayCheckin({ user, onComplete }) {
   const [steps, setSteps] = useState("");
   const [futureYou, setFutureYou] = useState(null);
   const [aiRoundup, setAiRoundup] = useState("");
+  const [aiRoundupError, setAiRoundupError] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [goals, setGoals] = useState([]);
@@ -4134,9 +4143,10 @@ function EndOfDayCheckin({ user, onComplete }) {
 
   const getAIRoundup = async () => {
     setAiLoading(true);
+    setAiRoundupError("");
     try {
-      // Gather all today's data
-      const [morning, nutrition, fitness, calendar, debrief, eodHistory] = await Promise.all([
+      // Gather all today's data (same order as the queries below)
+      const [morning, nutrition, fitness, debrief, calendar, eodHistory] = await Promise.all([
         supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).single(),
         supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food").eq("user_id", user.id).eq("date", today).single(),
         supabase.from("workout_logs").select("session_name,total_volume,duration_mins").eq("user_id", user.id).eq("date", today).eq("in_progress", false).single(),
@@ -4181,10 +4191,11 @@ function EndOfDayCheckin({ user, onComplete }) {
 Give me my daily roundup and spot any patterns.` }],
         }),
       });
-      const data = await res.json();
-      setAiRoundup(data.content?.map(b=>b.text||"").join("") || "Great effort today. Keep building the habits.");
+      setAiRoundup(await readCoachReply(res));
     } catch (e) {
-      setAiRoundup("Keep pushing — every day you show up is progress.");
+      console.log("Roundup error:", e?.message);
+      setAiRoundup("");
+      setAiRoundupError("Couldn't write your roundup.");
     }
     setAiLoading(false);
   };
@@ -4327,6 +4338,11 @@ Give me my daily roundup and spot any patterns.` }],
             <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 16, marginBottom: 16 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>AI DAILY ROUNDUP</div>
               <div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.7 }}>{aiRoundup}</div>
+            </div>
+          ) : aiRoundupError ? (
+            <div role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
+              <span style={{ fontSize: 11, color: "#FFB547" }}>{aiRoundupError}</span>
+              <button className="t3d-btn t3d-btn-sm" onClick={getAIRoundup}>TRY AGAIN</button>
             </div>
           ) : null}
 
@@ -4650,7 +4666,7 @@ function WeeklyRecap({ user, onBack }) {
     setData(null); setLoadError(""); setSummaryError("");
     loadWeeklyReportData(user, week)
       .then(result => { if (!cancelled) setData(result); })
-      .catch(error => { if (!cancelled) setLoadError(error?.message || "connection problem"); });
+      .catch(error => { console.log("Weekly report load error:", error?.message); if (!cancelled) setLoadError("Check your connection and try again."); });
     return () => { cancelled = true; };
   }, [user, week]);
 
@@ -4681,9 +4697,13 @@ If there is very little data, say so plainly instead of padding. No emojis, no m
         user_id: user.id, report_date: week.end, week_start: week.start, week_end: week.end,
         patterns: formatCoachSummary(summary), diet_suggestions: null,
       }, { onConflict: "user_id,report_date" });
-      if (error) setSummaryError(`Shown below but not saved: ${error.message}`);
+      if (error) {
+        console.log("Weekly report save error:", error.message);
+        setSummaryError("Your coach summary is below, but it couldn't be saved, so it will be written again next time you open this week.");
+      }
     } catch (error) {
-      setSummaryError(`Coach summary unavailable: ${error?.message || "connection problem"}. Your numbers above are unaffected.`);
+      console.log("Weekly summary error:", error?.message);
+      setSummaryError("The coach summary couldn't be written just now. Your numbers above are unaffected — try again in a moment.");
     } finally {
       setGenerating(false);
     }
@@ -4725,7 +4745,7 @@ If there is very little data, say so plainly instead of padding. No emojis, no m
         )}
       </div>
 
-      {loadError && <div className="t3d-card" role="alert" style={{ color: "#FF8AAD", fontSize: 11 }}>Your report could not be loaded: {loadError}</div>}
+      {loadError && <div className="t3d-card" role="alert" style={{ color: "#FF8AAD", fontSize: 11 }}>Your report couldn&apos;t be loaded. {loadError}</div>}
       {!metrics && !loadError && <div className="t3d-card" style={{ textAlign: "center", fontSize: 11, color: "#8AABB8" }}>Loading your week...</div>}
       {metrics && !metrics.hasData && (
         <div className="t3d-card" style={{ textAlign: "center", padding: 24, fontSize: 12, color: "#C5D6DC", lineHeight: 1.7 }}>
@@ -8264,11 +8284,13 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
   const [reply, setReply] = useState("");
   const [messages, setMessages] = useState([{ role: "assistant", content: feedback }]);
   const [loading, setLoading] = useState(false);
+  const [replyError, setReplyError] = useState("");
   const endRef = useRef(null);
 
   const send = async () => {
     if (!reply.trim() || loading) return;
     setLoading(true);
+    setReplyError("");
     const updated = [...messages, { role: "user", content: reply }];
     setMessages(updated);
     setReply("");
@@ -8281,10 +8303,12 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
           messages: recentChatMessages(updated),
         }),
       });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "Unable to connect.";
+      const text = await readCoachReply(res);
       setMessages(m => [...m, { role: "assistant", content: text }]);
-    } catch { setMessages(m => [...m, { role: "assistant", content: "Connection error." }]); }
+    } catch (e) {
+      console.log("Nutrition chat error:", e?.message);
+      setReplyError("The coach couldn't reply. Your message is above — try sending it again.");
+    }
     setLoading(false);
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
   };
@@ -8300,6 +8324,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
           </div>
         ))}
         {loading && <div style={{ fontSize: 11, color: "#E0EAF0" }}>Thinking...</div>}
+        {replyError && <div role="alert" style={{ fontSize: 11, color: "#FFB547" }}>{replyError}</div>}
         <div ref={endRef} />
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -8359,6 +8384,7 @@ function Nutrition({ user, userSessions }) {
   const [offPlanCals, setOffPlanCals] = useState("");
   const [aiFeedback, setAiFeedback] = useState("");
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const [aiFeedbackError, setAiFeedbackError] = useState("");
   const [todayLogged, setTodayLogged] = useState(false);
   const [editingHistoryIdx, setEditingHistoryIdx] = useState(null);
   const [planSaveError, setPlanSaveError] = useState(false);
@@ -8526,6 +8552,7 @@ function Nutrition({ user, userSessions }) {
 
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
+    setAiFeedbackError("");
     const activeMeals = weeklyMealPlan[today]?.length ? weeklyMealPlan[today] : isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
     const totals = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
     const completedCount = totals.completedMeals;
@@ -8540,9 +8567,11 @@ function Nutrition({ user, userSessions }) {
           messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
         }),
       });
-      const data = await res.json();
-      setAiFeedback(data.content?.map(b => b.text||"").join("") || "Keep pushing — consistency is everything.");
-    } catch (e) { setAiFeedback("Keep pushing — every day is a new opportunity."); }
+      setAiFeedback(await readCoachReply(res));
+    } catch (e) {
+      console.log("Nutrition feedback error:", e?.message);
+      setAiFeedbackError("Couldn't get feedback on your day.");
+    }
     setAiFeedbackLoading(false);
   };
 
@@ -8654,7 +8683,8 @@ function Nutrition({ user, userSessions }) {
                 {offPlanFood}{offPlanCals ? ` — +${offPlanCals} extra kcal added to total` : " — no calories estimated"}
               </div>
             )}
-            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>GET AI FEEDBACK</button>}
+            {aiFeedbackError && !aiFeedbackLoading && <p role="alert" style={{ fontSize: 11, color: "#FFB547", margin: "0 0 8px" }}>{aiFeedbackError}</p>}
+            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>{aiFeedbackError ? "TRY AGAIN" : "GET AI FEEDBACK"}</button>}
             {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
             {aiFeedback && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
             {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>Could not save: {nutritionSaveError}</div>}
@@ -9482,6 +9512,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   const [taskResults, setTaskResults] = useState({});
   const [aiFeedback, setAiFeedback] = useState("");
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const [aiFeedbackError, setAiFeedbackError] = useState("");
   const [todayDebriefed, setTodayDebriefed] = useState(false);
   const [dragTask, setDragTask] = useState(null);
   const [editingTask, setEditingTask] = useState(null);
@@ -9591,6 +9622,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
   const getAIDebrief = async (results, score) => {
     setAiFeedbackLoading(true);
+    setAiFeedbackError("");
     const done = Object.values(results).filter(v => v==="done").length;
     const half = Object.values(results).filter(v => v==="half").length;
     const missed = Object.values(results).filter(v => v==="none").length;
@@ -9602,9 +9634,11 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
           messages: [{ role: "user", content: `Day review: ${done} tasks done, ${half} partial, ${missed} missed. Score: ${score}/10. Tasks: ${tasks.map(t=>`${t.title} (${t.start_time}) — ${results[t.id]||"pending"}`).join(", ")}. Give feedback.` }],
         }),
       });
-      const data = await res.json();
-      setAiFeedback(data.content?.map(b=>b.text||"").join("") || "Keep building the habit — consistency compounds.");
-    } catch { setAiFeedback("Keep pushing — every day is progress."); }
+      setAiFeedback(await readCoachReply(res));
+    } catch (e) {
+      console.log("Debrief feedback error:", e?.message);
+      setAiFeedbackError("Couldn't get feedback on your day.");
+    }
     setAiFeedbackLoading(false);
   };
 
@@ -9688,7 +9722,8 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
                 );
               })}
             </div>
-            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={() => getAIDebrief(taskResults, score)}>GET AI FEEDBACK</button>}
+            {aiFeedbackError && !aiFeedbackLoading && <p role="alert" style={{ fontSize: 11, color: "#FFB547", margin: "0 0 8px" }}>{aiFeedbackError}</p>}
+            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={() => getAIDebrief(taskResults, score)}>{aiFeedbackError ? "TRY AGAIN" : "GET AI FEEDBACK"}</button>}
             {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
             {aiFeedback && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 14, marginBottom: 20, textAlign: "left" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 6 }}>AI COACH</div><div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.65 }}>{aiFeedback}</div></div>}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { await saveDebrief(taskResults, score); setDebriefView(false); }}>SAVE & FINISH</button>
