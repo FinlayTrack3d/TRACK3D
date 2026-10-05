@@ -61,3 +61,11 @@ test("PB detection does not reward total-volume gaming", () => {
   assert.equal(detectPersonalBest({ weight: 70, reps: 10 }, [{ weight: 80, reps: 8 }]), null);
 });
 
+
+test("an uneven set pattern only asks for a rest and form check after repeated overshoot", () => {
+  // The app does not record repeated overshoot yet, so a single uneven
+  // workout holds the load instead of showing CHECK REST & FORM.
+  const result = evaluateProgression({ repRange: "8-10", currentWeight: 80, sets: sets(13, 11, 9) });
+  assert.equal(result.decision, "hold");
+  assert.notEqual(result.cue, "CHECK REST & FORM");
+});

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recoverWorkoutState, workoutVolume } from "../lib/fitness-session.js";
+import { buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recoverWorkoutState, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session.js";
 
 test("an in-progress server log restores the remaining prescribed workout", () => {
   const planned = { name: "Push", exercises: [{ name: "Bench Press", sets: 3, reps: ["8", "8", "8"] }, { name: "Cable Fly", sets: 2, reps: ["12", "12"] }] };
@@ -63,4 +63,59 @@ test("saved plans are compared without depending on jsonb key order", async () =
   const { sameJson } = await import("../lib/fitness-session.js");
   assert.equal(sameJson([{ name: "Push", days: ["MON"], exercises: [{ sets: 3, name: "Bench" }] }], [{ exercises: [{ name: "Bench", sets: 3 }], days: ["MON"], name: "Push", note: undefined }]), true);
   assert.equal(sameJson([{ name: "Push", days: ["MON"] }], [{ name: "Push", days: ["TUE"] }]), false);
+});
+
+test("detected PBs are kept on the saved sets", () => {
+  const session = { name: "Push", exercises: [{ name: "Bench Press", sets: 2, reps: ["8", "8"] }] };
+  const pb = { type: "weight_pb", label: "Weight PB" };
+  const [exercise] = buildLoggedExercises(session, { 0: [{ weight: "80", reps: "8", personalBest: pb }, { weight: "80", reps: "6", personalBest: pb }] });
+  assert.deepEqual(exercise.sets[0].personalBest, pb);
+});
+
+test("workout PB summary gives one line per exercise, weight PBs first", () => {
+  const weight = { type: "weight_pb", label: "Weight PB" };
+  const rep = { type: "rep_pb", label: "Rep PB" };
+  const pbs = workoutPersonalBests([
+    { name: "Bench Press", sets: [{ weight: "80", reps: "6", personalBest: weight }, { weight: "80", reps: "8", personalBest: weight }, { weight: "75", reps: "12", personalBest: rep }] },
+    { name: "Lat Pulldown", sets: [{ weight: "60", reps: "12", personalBest: rep }, { weight: "60", reps: "10", personalBest: null }] },
+    { name: "Row", sets: [{ weight: "50", reps: "10" }] },
+  ]);
+  assert.deepEqual(pbs, [
+    { exercise: "Bench Press", type: "weight_pb", label: "Weight PB", weight: 80, reps: 8 },
+    { exercise: "Lat Pulldown", type: "rep_pb", label: "Rep PB", weight: 60, reps: 12 },
+  ]);
+});
+
+test("improvements are only claimed when the previous workout supports them", () => {
+  const exercises = [
+    { name: "Bench Press", sets: [{ weight: "80", reps: "6" }] },
+    { name: "Shoulder Press", sets: [{ weight: "30", reps: "10" }, { weight: "30", reps: "9" }] },
+    { name: "Row", sets: [{ weight: "50", reps: "8" }] },
+    { name: "Curl", sets: [{ weight: "12", reps: "12" }] },
+    { name: "New Exercise", sets: [{ weight: "20", reps: "10" }] },
+  ];
+  const previous = [
+    [{ weight: "75", reps: "8" }],
+    [{ weight: "30", reps: "8" }, { weight: "30", reps: "8" }],
+    [{ weight: "55", reps: "6" }],
+    [{ weight: "12", reps: "12" }],
+    null,
+  ];
+  assert.deepEqual(improvementsSinceLastTime(exercises, previous), [
+    { exercise: "Bench Press", kind: "weight", delta: 5, weight: 80, previousWeight: 75 },
+    { exercise: "Shoulder Press", kind: "reps", delta: 2, weight: 30 },
+  ]);
+});
+
+test("weekly workout progress counts this week's real workouts plus the one just finished", () => {
+  const history = [
+    { id: 1, date: "2026-10-05", total_volume: 3000 },
+    { id: 2, date: "2026-10-06", total_volume: 2000 },
+    { id: 3, date: "2026-10-04", total_volume: 4000 },
+    { id: 4, date: "2026-10-06", total_volume: 0, duration_mins: 1 },
+    { id: 9, date: "2026-10-07", total_volume: 5000 },
+  ];
+  const sessions = [{ name: "Push", days: ["MON", "THU"] }, { name: "Pull", days: ["TUE"] }, { name: "Legs", days: ["sat"] }];
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", sessions, 9), { completed: 3, planned: 4 });
+  assert.deepEqual(weeklyWorkoutProgress([], "2026-10-07", [], null), { completed: 1, planned: 0 });
 });

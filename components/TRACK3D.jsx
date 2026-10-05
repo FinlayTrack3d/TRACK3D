@@ -8,10 +8,11 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, workoutVolume } from "../lib/fitness-session";
+import { buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
+import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
@@ -184,6 +185,12 @@ const css = `
   /* No "forwards" fill: a held transform makes fixed popups position against
      the section instead of the screen, so they opened off-screen when scrolled. */
   .t3d-fade { animation: t3dfade .35s ease; }
+  @keyframes t3dcheckpop { 0%{opacity:0;transform:scale(.6)} 60%{opacity:1;transform:scale(1.08)} 100%{transform:scale(1)} }
+  @keyframes t3dring { 0%{opacity:.7;transform:scale(.9)} 100%{opacity:0;transform:scale(1.7)} }
+  .t3d-done-badge { position: relative; width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 50%; border: 2px solid #00FFB2; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #00FFB2; box-shadow: 0 0 24px rgba(0,255,178,.25); animation: t3dcheckpop .6s cubic-bezier(.16,1,.3,1); }
+  .t3d-done-badge::after { content: ""; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid #00FFB2; opacity: 0; animation: t3dring 1.1s ease-out .2s 2; }
+  .t3d-reveal { animation: t3dfade .45s ease backwards; }
+  @media (prefers-reduced-motion: reduce) { .t3d-done-badge, .t3d-done-badge::after, .t3d-reveal { animation: none; } }
   .t3d-grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid12 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; margin-bottom: 16px; }
@@ -1606,6 +1613,7 @@ function MorningSection({ user }) {
   const [isSetup, setIsSetup] = useState(false);
   const [completedToday, setCompletedToday] = useState(false);
   const [skippedToday, setSkippedToday] = useState(false);
+  const [olderCheckins, setOlderCheckins] = useState([]); // beyond the 30 loaded into history, for the streak only
   const [showMissedRoutineChoice, setShowMissedRoutineChoice] = useState(false);
   const [savingSkippedMorning, setSavingSkippedMorning] = useState(false);
   const [skipMorningError, setSkipMorningError] = useState("");
@@ -1721,6 +1729,15 @@ function MorningSection({ user }) {
 
       if (checkinHistory) {
         setHistory(checkinHistory);
+        // A streak can run past the 30 most recent days, so read older dates too.
+        if (checkinHistory.length >= 30) {
+          const { data: older } = await supabase.from("morning_checkins").select("date,data")
+            .eq("user_id", user.id).lt("date", checkinHistory[checkinHistory.length - 1].date)
+            .order("date", { ascending: false }).limit(336);
+          setOlderCheckins(older || []);
+        } else {
+          setOlderCheckins([]);
+        }
         const todayEntry = checkinHistory.find(c => c.date === today);
         setCompletedToday(Boolean(todayEntry) && !todayEntry?.data?.inProgress);
         setSkippedToday(Boolean(todayEntry?.data?.routineSkipped));
@@ -2731,6 +2748,17 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
             {/* Check-in button or completed state */}
             <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 32 }}>
+              {(() => {
+                const oldestLoaded = history[history.length - 1]?.date;
+                const streak = morningStreak([...history, ...olderCheckins.filter(entry => !oldestLoaded || entry.date < oldestLoaded)], today);
+                if (!streak || skippedToday) return null;
+                const doneToday = history.some(entry => entry.date === today && isCompletedMorning(entry));
+                return (
+                  <div data-testid="morning-streak" style={{ display: "inline-block", marginBottom: 18, padding: "6px 14px", border: "1px solid rgba(255,140,0,.45)", borderRadius: 20, background: "rgba(255,140,0,.07)", fontFamily: "'Orbitron',monospace", fontSize: 10, letterSpacing: 1.5, color: "#FF8C00" }}>
+                    🔥 {streak}-DAY MORNING STREAK{doneToday ? "" : " · FINISH TODAY TO KEEP IT GOING"}
+                  </div>
+                );
+              })()}
               {completedToday ? (
                 <>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>{skippedToday ? "↗" : "✅"}</div>
@@ -4769,7 +4797,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
             <div key={h.id} className="t3d-hrow" onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}>
               <div className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</div>
               <div className="t3d-hname" style={{ color: h.done ? "#E0EAF0" : "#4A6070" }}>{h.name}</div>
-              <div className={`t3d-hstreak ${h.streak>=7?"fire":""}`}>{h.streak>=7?"🔥":"◆"} {h.streak}d</div>
+              <div className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</div>
             </div>
           ))}
         </div>
@@ -5270,10 +5298,10 @@ function withPlanApproval(sessions, now = new Date()) {
   }, [completedSets, workoutInProgress, activeSession]);
 
   // Get last session's data for a specific exercise
-  const getLastSessionData = (exercise) => {
+  const getLastSessionData = (exercise, logs = history) => {
     const currentContext = activeSession?.gymContext || { type: "usual", name: "" };
     if (currentContext.type === "away") return null;
-    for (const log of history) {
+    for (const log of logs) {
       const ex = log.exercises?.find(item => exerciseMatchesHistory(exercise, item.name));
       const savedContext = ex?.context || { type: "usual", name: "" };
       const sameContext = currentContext.type === "usual"
@@ -6082,7 +6110,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   }}>DELETE SET</button>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => setEditingSet(null)}>CANCEL</button>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => {
-                    setCompletedSets(previous => ({ ...previous, [editingSet.exerciseIdx]: previous[editingSet.exerciseIdx].map((set, index) => index === editingSet.setIdx ? { ...set, reps: editingSet.reps, weight: editingSet.weight } : set) }));
+                    // Re-check the PB against earlier workouts so an edited set never keeps a stale PB.
+                    const priorSets = getExerciseHistory(activeSession.exercises[editingSet.exerciseIdx]).flatMap(exposure => exposure.sets || []);
+                    const personalBest = detectPersonalBest({ weight: editingSet.weight, reps: editingSet.reps }, priorSets);
+                    setCompletedSets(previous => ({ ...previous, [editingSet.exerciseIdx]: previous[editingSet.exerciseIdx].map((set, index) => index === editingSet.setIdx ? { ...set, reps: editingSet.reps, weight: editingSet.weight, personalBest } : set) }));
                     setEditingSet(null);
                   }}>SAVE SET</button>
                 </div>
@@ -6099,10 +6130,58 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   if (view === "complete") {
     const completionReview = buildWorkoutReview(activeSession, completedSets);
     const duration = Math.round((Date.now() - workoutStart) / 60000);
+    // PBs, comparison and weekly count use only what is already saved: the PB
+    // flag stored on each set, and earlier finished workouts in history.
+    const finishedLogId = workoutLogIdRef.current || activeWorkoutLogId;
+    const earlierLogs = history.filter(log => log.id !== finishedLogId);
+    const loggedExercises = buildLoggedExercises(activeSession, completedSets);
+    const newPbs = workoutPersonalBests(loggedExercises);
+    const improvements = improvementsSinceLastTime(loggedExercises, (activeSession?.exercises || []).map(exercise => getLastSessionData(exercise, earlierLogs)));
+    const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId);
+    const highlightRow = { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "7px 0", borderTop: `1px solid ${BORDER}` };
+    const highlightTitle = color => ({ fontFamily: "'Orbitron',monospace", fontSize: 10, color, letterSpacing: 2, marginBottom: 6 });
     return (
       <div className="t3d-fade">
         <div className="t3d-card" style={{ textAlign: "center", padding: 20 }}>
-          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: NEON, letterSpacing: 3, marginBottom: 16 }}>WORKOUT COMPLETE</div>
+          <div className="t3d-done-badge" aria-hidden="true">✓</div>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: NEON, letterSpacing: 3, marginBottom: 4 }}>WORKOUT COMPLETE</div>
+          <div style={{ fontSize: 11, color: "#8AABB8", marginBottom: 16 }}>{activeSession?.name}</div>
+          {newPbs.length > 0 && (
+            <div className="t3d-reveal" data-testid="complete-pbs" style={{ textAlign: "left", marginBottom: 12, padding: "12px 14px", border: "1px solid rgba(255,181,71,.5)", background: "linear-gradient(135deg, rgba(255,181,71,.12), rgba(255,181,71,.03))", borderRadius: 8, animationDelay: ".15s" }}>
+              <div style={highlightTitle("#FFB547")}>🏆 {newPbs.length} NEW PB{newPbs.length === 1 ? "" : "S"}</div>
+              {newPbs.map((pb, index) => (
+                <div key={`${pb.exercise}-${index}`} style={highlightRow}>
+                  <strong style={{ color: "#E0EAF0" }}>{pb.exercise}</strong>
+                  <span style={{ color: "#FFB547", whiteSpace: "nowrap" }}>{pb.type === "weight_pb" ? `${pb.weight}kg × ${pb.reps}` : `${pb.reps} reps @ ${pb.weight}kg`} · {pb.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {improvements.length > 0 && (
+            <div className="t3d-reveal" data-testid="complete-improvements" style={{ textAlign: "left", marginBottom: 12, padding: "12px 14px", border: `1px solid rgba(0,255,178,.3)`, background: "rgba(0,255,178,.05)", borderRadius: 8, animationDelay: ".3s" }}>
+              <div style={highlightTitle(NEON)}>BETTER THAN LAST TIME</div>
+              {improvements.map((item, index) => (
+                <div key={`${item.exercise}-${index}`} style={highlightRow}>
+                  <strong style={{ color: "#E0EAF0" }}>{item.exercise}</strong>
+                  <span style={{ color: NEON, whiteSpace: "nowrap" }}>{item.kind === "weight" ? `+${item.delta}kg (${item.previousWeight} → ${item.weight}kg)` : `+${item.delta} rep${item.delta === 1 ? "" : "s"} @ ${item.weight}kg`}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="t3d-reveal" data-testid="complete-week" style={{ textAlign: "left", marginBottom: 16, padding: "12px 14px", border: `1px solid ${BORDER}`, background: SURFACE2, borderRadius: 8, animationDelay: ".45s" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={highlightTitle(NEON2)}>THIS WEEK</div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0" }}>
+                {weekProgress.planned ? `${weekProgress.completed} / ${weekProgress.planned}` : weekProgress.completed} <span style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1 }}>WORKOUT{(weekProgress.planned || weekProgress.completed) === 1 ? "" : "S"}</span>
+              </div>
+            </div>
+            {weekProgress.planned > 0 && (
+              <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${Math.min(weekProgress.completed / weekProgress.planned, 1) * 100}%`, background: weekProgress.completed >= weekProgress.planned ? NEON : NEON2 }} /></div>
+            )}
+            {weekProgress.planned > 0 && weekProgress.completed >= weekProgress.planned && (
+              <div style={{ fontSize: 10, color: NEON, marginTop: 8 }}>Every planned session done this week.</div>
+            )}
+          </div>
           <div className="t3d-grid3" style={{ marginBottom: 14 }}>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>MINUTES</div></div>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{completionReview.completedSets}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>SETS COMPLETED</div></div>
@@ -6975,6 +7054,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const recommendedSession = missedRecommendation?.session || todaySession;
   const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase()));
   const trainedToday = history.some(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2));
+  const completedTodayNames = [...new Set(history.filter(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)).map(log => log.session_name).filter(Boolean))];
+  const doneForToday = !(workoutInProgress && activeSession) && (recommendedDoneToday || trainedToday);
   let nextScheduled = null;
   for (let daysAhead = 1; daysAhead <= 7 && !nextScheduled; daysAhead += 1) {
     const date = new Date(homeTodayAnchor);
@@ -7060,7 +7141,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
           )}
           <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle" style={{ color: NEON }}>{workoutInProgress && activeSession ? "ACTIVE WORKOUT" : "RECOMMENDED NEXT SESSION"}</div>
+            <div className="t3d-ctitle" style={{ color: NEON }}>{workoutInProgress && activeSession ? "ACTIVE WORKOUT" : doneForToday ? "TODAY" : "RECOMMENDED NEXT SESSION"}</div>
             {workoutInProgress && activeSession ? (
               <div>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
@@ -7082,6 +7163,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             ) : (recommendedDoneToday || trainedToday) ? (
               <div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON, letterSpacing: 2, marginBottom: 8 }}>DONE FOR TODAY ✓</div>
+                {completedTodayNames.length > 0 && <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 6 }}>{completedTodayNames.join(" + ")} completed</div>}
                 <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
                   {nextScheduled ? `Next scheduled: ${nextScheduled.session.name}, ${nextScheduled.dayLabel}.` : "No more sessions scheduled this week."}
                 </div>
@@ -9414,7 +9496,7 @@ function HabitsPage({ habits, setHabits }) {
   const addHabit = (habit = newHabit) => {
     const name = habit.name?.trim();
     if (!name || habits.some(existing => existing.name.toLowerCase() === name.toLowerCase())) return;
-    setHabits(current => [...current, { id: String(Date.now()), name, category: habit.category || "daily", done: false, streak: 0 }]);
+    setHabits(current => [...current, { id: String(Date.now()), name, category: habit.category || "daily", done: false, streakBeforeToday: 0 }]);
     setNewHabit({ name: "" });
     setAdding(false);
   };
@@ -9439,7 +9521,7 @@ function HabitsPage({ habits, setHabits }) {
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">BEST STREAK</div>
-          <div className="t3d-sval" style={{ color: "#FF8C00" }}>{habits.length ? Math.max(...habits.map(h => h.streak || 0)) : 0}</div>
+          <div className="t3d-sval" style={{ color: "#FF8C00" }}>{habits.length ? Math.max(...habits.map(habitStreak)) : 0}</div>
           <div className="t3d-slabel">DAYS</div>
         </div>
         <div className="t3d-card">
@@ -9465,9 +9547,9 @@ function HabitsPage({ habits, setHabits }) {
               <button aria-label={`${h.done ? "Unselect" : "Complete"} ${h.name}`} onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x,done:!x.done} : x))} className={`t3d-hcheck ${h.done?"done":""}`} style={{ background: h.done ? "rgba(0,255,178,.1)" : "transparent", color: NEON, cursor: "pointer" }}>{h.done?"✓":""}</button>
               <div className="t3d-hname" style={{ color: h.done?"#E0EAF0":"#8AABB8" }}>{h.name}</div>
               <div className="t3d-pbar" style={{ flex: 1, margin: "0 14px" }}>
-                <div className="t3d-pfill" style={{ width: `${Math.min((h.streak/30)*100,100)}%`, background: h.streak>=7?"#FF8C00":NEON }} />
+                <div className="t3d-pfill" style={{ width: `${Math.min((habitStreak(h)/30)*100,100)}%`, background: habitStreak(h)>=7?"#FF8C00":NEON }} />
               </div>
-              <div className={`t3d-hstreak ${h.streak>=7?"fire":""}`}>{h.streak>=7?"🔥":"◆"} {h.streak}d</div>
+              <div className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</div>
               <button aria-label={`Remove ${h.name}`} onClick={() => setHabits(current => current.filter(item => item.id !== h.id))} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 16, padding: 4 }}>×</button>
             </div>
           ))}
@@ -9518,10 +9600,15 @@ export default function App() {
       try {
         const { data: defs, error: defsError } = await supabase.from("habits").select("*").eq("user_id", user.id).order("created_at", { ascending: true });
         if (defsError) throw defsError;
-        const { data: completions, error: compError } = await supabase.from("habit_completions").select("habit_id").eq("user_id", user.id).eq("date", todayKey);
+        // Completion history (up to a year) gives each habit's real streak.
+        const { data: completions, error: compError } = await supabase.from("habit_completions").select("habit_id,date").eq("user_id", user.id).gte("date", shiftDateKey(todayKey, -366)).lte("date", todayKey);
         if (compError) throw compError;
-        const doneIds = new Set((completions || []).map(c => c.habit_id));
-        loaded = (defs || []).map(h => ({ id: h.id, name: h.name, category: h.category || "daily", streak: h.streak || 0, done: doneIds.has(h.id) }));
+        const datesByHabit = new Map();
+        (completions || []).forEach(c => datesByHabit.set(String(c.habit_id), [...(datesByHabit.get(String(c.habit_id)) || []), c.date]));
+        loaded = (defs || []).map(h => {
+          const dates = datesByHabit.get(String(h.id)) || [];
+          return { id: h.id, name: h.name, category: h.category || "daily", streakBeforeToday: streakBeforeToday(dates, todayKey), done: dates.includes(todayKey) };
+        });
       } catch (e) {
         console.log("Habit load error:", e);
         if (!cancelled) setHabitSaveError(`Your habits could not be loaded from your account (${e?.message || "connection problem"}). Changes may not be saved.`);
@@ -9560,7 +9647,7 @@ export default function App() {
       if (!prevMatch || prevMatch.name !== h.name || prevMatch.category !== h.category) {
         writes.push(supabase.from("habits").upsert({
           id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
-          streak: h.streak || 0, updated_at: new Date().toISOString(),
+          streak: habitStreak(h), updated_at: new Date().toISOString(),
         }, { onConflict: "user_id,id" }));
       }
       if (!prevMatch || Boolean(prevMatch.done) !== Boolean(h.done)) {
@@ -9591,7 +9678,7 @@ export default function App() {
     const results = await Promise.all([
       ...habits.map(h => supabase.from("habits").upsert({
         id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
-        streak: h.streak || 0, updated_at: new Date().toISOString(),
+        streak: habitStreak(h), updated_at: new Date().toISOString(),
       }, { onConflict: "user_id,id" })),
       ...habits.map(h => h.done
         ? supabase.from("habit_completions").upsert({ user_id: user.id, habit_id: String(h.id), date: todayKey, done: true, updated_at: new Date().toISOString() }, { onConflict: "user_id,habit_id,date" })
