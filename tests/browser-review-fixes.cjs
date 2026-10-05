@@ -1,7 +1,7 @@
 // Browser regression checks. Run against a production build: npm run start -- --port 3123
 // then: node tests/browser-review-fixes.cjs <scenario>   (all remote services are mocked)
 // Browser checks for review fixes 3-6. Scenarios:
-//  movefail, editfail, approvefail, aisavefail, aisaveok, routinefail, routineok
+//  movefail, editfail, approvefail, aisavefail, routinefail, routineok
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'movefail';
@@ -11,11 +11,13 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const user = { id: '11111111-1111-4111-8111-111111111111', email: 't@example.invalid', aud: 'authenticated', role: 'authenticated', created_at: '2026-01-01T00:00:00Z' };
   const enc = o => Buffer.from(JSON.stringify(o)).toString('base64url');
-  const token = enc({ alg: 'HS256', typ: 'JWT' }) + '.' + enc({ sub: user.id, exp: Math.floor(Date.now() / 1000) + 3600, aud: 'authenticated' }) + '.t';
+  const token = enc({ alg: 'HS256', typ: 'JWT' }) + '.' + enc({ sub: user.id, exp: Math.floor(Date.now() / 1000) + 30 * 86400, aud: 'authenticated' }) + '.t';
   await context.addInitScript(({ user, token }) => {
-    localStorage.setItem('track3d-auth', JSON.stringify({ access_token: token, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: 'bearer', user }));
+    localStorage.setItem('track3d-auth', JSON.stringify({ access_token: token, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 30 * 86400, token_type: 'bearer', user }));
   }, { user, token });
-  const today = londonKey(0);
+  // rollover runs on a fake clock: Tue 6 Oct 2026, 23:50 in London.
+  const fakeStart = new Date('2026-10-06T22:50:00Z');
+  const today = scenario === 'rollover' ? '2026-10-06' : londonKey(0);
   const todayCode = ['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()];
   const otherDay = todayCode === 'THU' ? 'FRI' : 'THU';
   const approved = scenario !== 'approvefail';
@@ -46,6 +48,7 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     const single = req.headers().accept?.includes('vnd.pgrst.object');
     if (req.method() !== 'GET') {
       writes.push({ table, method: req.method(), body: req.postData(), url: req.url() });
+      if (table === 'workout_logs' && req.method() === 'POST') return route.fulfill({ status: 201, json: single ? { id: 'w1' } : [{ id: 'w1' }] });
       if (table === 'workout_splits' && failSplit) return route.fulfill({ status: 500, json: { message: 'database unavailable' } });
       if (table === 'morning_routines' && scenario === 'routinefail') return route.fulfill({ status: 500, json: { message: 'database unavailable' } });
       if (table === 'workout_splits') { split = { ...(split || {}), ...JSON.parse(req.postData()) }; return route.fulfill({ status: 201, json: single ? split : [split] }); }
@@ -58,6 +61,7 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();
+  if (scenario === 'rollover') await page.clock.install({ time: fakeStart });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('dialog', d => d.dismiss());
@@ -113,6 +117,35 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
       assert.equal(saved.split_name, 'AI Plan');
       assert(saved.sessions[0].approval?.approved);
     }
+  } else if (scenario === 'rollover') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    const logSet = async (weight, reps) => {
+      await page.getByLabel('Weight in kilograms').fill(String(weight));
+      await page.getByLabel('Reps', { exact: true }).fill(String(reps));
+      await page.getByRole('button', { name: 'Log set' }).click();
+    };
+    await logSet(60, 8);
+    await page.waitForTimeout(500);
+    assert(writes.some(w => w.table === 'workout_logs' && w.method === 'POST'), 'workout row created');
+    // Cross midnight with the workout still open.
+    await page.clock.fastForward('20:00');
+    await page.waitForTimeout(1500);
+    await page.clock.fastForward('00:06');
+    await page.waitForTimeout(1500);
+    const cleanup = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body === '{"in_progress":false}' && decodeURIComponent(w.url).includes('date=lt.2026-10-07'));
+    assert(cleanup.length >= 1, 'stale cleanup ran after the date changed');
+    cleanup.forEach(w => assert(w.url.includes('id=neq.w1'), 'cleanup skips the active workout: ' + w.url));
+    await logSet(60, 7);
+    await page.waitForTimeout(800);
+    const latest = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body.includes('"exercises"')).pop();
+    const body = JSON.parse(latest.body);
+    assert.equal(body.date, '2026-10-06', 'the workout keeps the day it started');
+    // That was the session's last set: it finishes normally, after midnight.
+    assert.equal(body.in_progress, false);
+    assert(latest.url.includes('id=eq.w1'), 'the same workout row was finished');
+    await page.getByText('WORKOUT COMPLETE').waitFor();
+    assert.match(await page.getByText(/SETS COMPLETED/).locator('..').textContent(), /2/);
   } else if (scenario === 'routinefail' || scenario === 'routineok') {
     await page.getByRole('button', { name: /MORNING$/ }).last().click();
     await page.getByRole('button', { name: 'EDIT ROUTINE' }).click();

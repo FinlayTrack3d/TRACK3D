@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
-import { useSessionDraft } from "../lib/session-drafts";
+import { readDraft, useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
 import { sendCoachMessage } from "../lib/coaching/coach-client";
 import { COACH_PERSONALITIES } from "../lib/coaching/personality";
@@ -8,7 +8,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
+import { activeWorkoutLogIds, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -5426,11 +5426,17 @@ function withPlanApproval(sessions, now = new Date()) {
 
   // Only yesterday's abandoned workouts are finalized. A workout started
   // today remains resumable until the user ends it or the UK/home date rolls.
+  // The workout in progress is never finalised here, even when it started
+  // before midnight and the date has just rolled over.
   const finalizeStaleWorkouts = async () => {
     if (!user) return;
     try {
-      await supabase.from("workout_logs").update({ in_progress: false })
+      const draft = await readDraft(user.id, "fitness").catch(() => null);
+      const keep = activeWorkoutLogIds({ currentId: workoutLogIdRef.current, finalised: workoutFinalizedRef.current, draft });
+      let query = supabase.from("workout_logs").update({ in_progress: false })
         .eq("user_id", user.id).eq("in_progress", true).lt("date", today);
+      keep.forEach(id => { query = query.neq("id", id); });
+      await query;
     } catch (e) { console.log("Stale workout cleanup error:", e); }
   };
 
@@ -5509,7 +5515,8 @@ function withPlanApproval(sessions, now = new Date()) {
   };
 
   const buildWorkoutLogPayload = (setsToSave) => {
-    const dateStr = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
+    // A workout belongs to the day it started, even if it runs past midnight.
+    const dateStr = getZonedDateInfo(new Date(workoutStart || Date.now()), homeTimeZone).dateKey;
     const exerciseData = buildLoggedExercises(activeSession, setsToSave);
     const totalVol = workoutVolume(exerciseData);
     return {
