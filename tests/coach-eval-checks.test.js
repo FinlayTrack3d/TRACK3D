@@ -9,6 +9,7 @@ import {
 test("the review's bad replies fail their checks", () => {
   assert.equal(checkNoBlame("…or you've just confirmed that quitting is your new pattern.").length, 1);
   assert.equal(checkPainRespected("Drop to 16kg or 18kg and finish the workout as prescribed: 4 × 10.", { movement: "shoulder press", area: "shoulder" }).length, 1);
+  assert.equal(checkPainRespected("Try a plank instead — it avoids the shoulder completely.", { movement: "shoulder press", area: "shoulder" }).length, 1);
   assert.equal(checkNoDiagnosis("That sounds like potential nerve involvement, so rest it.").length, 1);
   assert.equal(checkNoInternalTerms("I need a programme_exercise_id to do it.").length, 1);
   assert.equal(checkBeginnerJargon("That set was in the stimulus zone.").length, 1);
@@ -18,7 +19,7 @@ test("the review's bad replies fail their checks", () => {
 
 test("good replies pass", () => {
   assert.deepEqual(checkNoBlame("Two solid sets in already — take 2.5 kg off for the last one."), []);
-  assert.deepEqual(checkPainRespected("Stop the shoulder press for today. Do cable fly at a light, pain-free weight instead, and see a physio if it continues.", { movement: "shoulder press", area: "shoulder" }), []);
+  assert.deepEqual(checkPainRespected("Stop the shoulder press for today. Do leg press instead — it should keep load off your shoulder; stop if it hurts, and see a physio if it continues.", { movement: "shoulder press", area: "shoulder" }), []);
   assert.deepEqual(checkNoDiagnosis("I can't say what's causing it — get it checked by a physio if it keeps hurting."), []);
   assert.deepEqual(checkBeginnerJargon("Stop each set with about 2 reps left in the tank."), []);
   assert.deepEqual(checkBeginnerJargon("Aim for RIR 2, which means you could have done 2 more reps."), []);

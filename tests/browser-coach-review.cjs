@@ -1,6 +1,6 @@
 // Browser checks for the AI coach review (sections F-J). Scenarios:
 //  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve, coachstyle, setuplevel,
-//  nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
+//  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
 //  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || '/opt/node-tools/node_modules/playwright');
 const assert = require('node:assert/strict');
@@ -32,7 +32,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
     calendar_tasks: [{ title: 'Gym', status: 'done' }, { title: 'Emails', status: 'pending' }],
     workout_logs: scenario === 'dashexcludes' ? [{ id: 'w1', user_id: user.id, date: today, session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '6', personalBest: { type: 'weight_pb', label: 'Weight PB' } }, { weight: '80', reps: '5' }] }] }] : [],
-    workout_splits: ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
+    workout_splits: ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach', 'planchangebutton'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
   const writes = [];
   const chats = [];
@@ -293,6 +293,12 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await input.press('Enter');
     await page.waitForTimeout(800);
     assert(chats.at(-1).messages.every(m => m.role === 'user' || m.role === 'assistant'), 'no notes sent');
+    // The change is passed on with the next message so the coach can't repeat itself.
+    assert.match(chats.at(-1).messages.at(-1).content, /^\(Coach style: BACK ME; Level: ADVANCED\. Answer in this style and level, in fresh words\.\)\nHow much protein should I eat\?$/);
+    await input.fill('And on rest days?');
+    await input.press('Enter');
+    await page.waitForTimeout(800);
+    assert.equal(chats.at(-1).messages.at(-1).content, 'And on rest days?', 'only once');
   } else if (scenario === 'setuplevel') {
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();
     await page.getByRole('button', { name: '📋 BUILD MY SPLIT' }).click();
@@ -345,6 +351,16 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: 'OPEN CHANGE PLAN' }).click();
     await page.getByPlaceholder('Tell the coach what you want to change...').waitFor();
     assert.equal(await page.getByText(/programme_exercise_id/).count(), 0);
+  } else if (scenario === 'planchangebutton') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    const ask = page.getByPlaceholder('Ask a question about your current plan...');
+    await ask.fill('Add lunges to my plan permanently');
+    await ask.press('Enter');
+    await page.getByText(/Tap OPEN CHANGE PLAN to send it your request/).waitFor();
+    await page.waitForTimeout(500);
+    assert.equal(await page.getByPlaceholder('Tell the coach what you want to change...').count(), 0, 'Change Plan not opened by itself');
+    await page.getByRole('button', { name: 'OPEN CHANGE PLAN' }).click();
+    await page.getByText(/chest gets 7 direct sets/).waitFor();
   } else if (scenario === 'planmarkdown') {
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();
     await page.getByRole('button', { name: 'CHANGE PLAN' }).click();

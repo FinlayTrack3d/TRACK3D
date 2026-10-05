@@ -17,7 +17,7 @@ test("the three tones are different, tone comes last, and the decision rule is s
   const systems = Object.keys(TONES).map((personality) => buildCoachSystem({ areaInstructions: "Dashboard coach.", personality }));
   assert.equal(new Set(systems).size, 3);
   for (const system of systems) {
-    assert.match(system, /TONE: [A-Z ]+\.[\s\S]*Example[\s\S]*Tone changes the wording only\. The decision, the numbers and any safety advice must be exactly the same whichever tone is selected\.$/);
+    assert.match(system, /TONE: [A-Z ]+\.[\s\S]*Example[\s\S]*Tone changes the wording only\. The decision, the numbers and any safety advice must be exactly the same whichever tone is selected\. [^\n]*never copy or reuse their wording[^\n]*$/);
     assert.ok(system.lastIndexOf("TONE:") > system.lastIndexOf("EXPERIENCE"), "tone after experience");
     assert.ok(system.lastIndexOf("TONE:") > system.lastIndexOf("APP DATA") || !system.includes("APP DATA"));
   }

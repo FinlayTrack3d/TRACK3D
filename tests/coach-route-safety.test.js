@@ -114,17 +114,18 @@ test("the workout coach streams its message, then sends the full result", async 
   const final = events.at(-1);
   assert.equal(final.type, "final");
   assert.equal(final.message, modelReply.message);
-  assert.equal(anthropicCalls.at(-1).max_tokens, 500, "a short budget between sets");
+  assert.equal(anthropicCalls.at(-1).max_tokens, 900, "a short budget between sets");
   assert.equal(anthropicCalls.at(-1).stream, true);
 });
 
-test("a reply cut off by the short budget is retried with a bigger one", async () => {
+test("a reply cut off by the short budget is retried, then its readable part is used", async () => {
   const before = anthropicCalls.length;
   modelReply = '{"message":"This reply was cut off mid';
   const reply = await ask("Explain my whole week in detail");
   assert.equal(anthropicCalls.length, before + 2);
-  assert.equal(anthropicCalls.at(-1).max_tokens, 1200);
-  assert.ok(reply.error, "still invalid after the retry, so an error is returned");
+  assert.equal(anthropicCalls.at(-1).max_tokens, 2000);
+  assert.equal(reply.error, undefined, "no 'invalid response' error");
+  assert.equal(reply.message, "This reply was cut off mid", "the readable part is shown");
   modelReply = { message: "ok", insights: [], actions: [] };
 });
 
