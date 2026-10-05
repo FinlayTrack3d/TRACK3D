@@ -10,6 +10,7 @@ import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/c
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
 import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
+import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
@@ -2328,7 +2329,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="live-start-title" style={{ width: "100%", maxWidth: 360, borderColor: "#FFB547", textAlign: "center" }}>
         <div id="live-start-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>START YOUR MORNING ROUTINE NOW?</div>
         <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>
-          It is {getZonedDateInfo(new Date(), homeTimeZone).time} and your planned wake-up is {wakeTime}. Starting now records {getZonedDateInfo(new Date(), homeTimeZone).time} as today&apos;s wake-up time. If you already did your morning, log it instead.
+          {(() => {
+            // One string: the compiler dropped the space after {time} when the text followed an expression.
+            const now = getZonedDateInfo(new Date(), homeTimeZone).time;
+            return `It is ${now} and your planned wake-up is ${wakeTime}. Starting now records ${now} as today's wake-up time. If you already did your morning, log it instead.`;
+          })()}
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <button className="t3d-btn" style={{ minHeight: 44 }} onClick={() => { const start = pendingLiveStart; setPendingLiveStart(null); start(); }}>YES, START NOW</button>
@@ -3674,15 +3679,18 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </button>
             )}
 
-            <button
-              className="t3d-btn t3d-btn-red"
-              style={{
-                padding: "13px 18px"
-              }}
-              onClick={skipLiveTask}
-            >
-              SKIP
-            </button>
+            {/* Input steps already have their own skip on the task card. */}
+            {!needsInput && (
+              <button
+                className="t3d-btn t3d-btn-red"
+                style={{
+                  padding: "13px 18px"
+                }}
+                onClick={skipLiveTask}
+              >
+                SKIP
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -4461,7 +4469,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
-      supabase.from("workout_logs").select("session_name,date,in_progress").eq("user_id", user.id).eq("date", today),
+      supabase.from("workout_logs").select("session_name,date,in_progress,total_volume,duration_mins").eq("user_id", user.id).eq("date", today),
       supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
     ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
       loaded: true,
@@ -4471,13 +4479,16 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       nutrition: nutrition.data || null,
       nutritionPlan: nutritionPlan.data || null,
       sessions: split.data?.sessions || [],
-      workouts: (workouts.data || []).filter(log => !log.in_progress),
+      // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
+      workouts: (workouts.data || []).filter(log => !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
       activeWorkout: (workouts.data || []).find(log => log.in_progress) || null,
     }));
   }, [user, today]);
 
   const todaySession = todayData.sessions.find(session => (session.days || []).some(day => String(day).toUpperCase().startsWith(homeDate.dayCode)));
-  const fitnessDone = Boolean(todaySession && todayData.workouts.some(log => log.session_name?.toLowerCase() === todaySession.name?.toLowerCase()));
+  // Any workout completed today counts, even if the plan (and its session
+  // names) changed after it was done.
+  const fitnessDone = Boolean(todaySession && todayData.workouts.length > 0);
   const activeWorkout = todayData.activeWorkout;
   const completedWorkoutNames = [...new Set(todayData.workouts.map(log => log.session_name).filter(Boolean))];
   const morningInProgress = Boolean(todayData.morning?.data?.inProgress);
@@ -4759,6 +4770,7 @@ function Fitness({ user, isActive = true }) {
   const [aiQuestionIds, setAiQuestionIds] = useState(null);
   const [aiChatContext, setAiChatContext] = useState("");
   const [planRebuildPreparing, setPlanRebuildPreparing] = useState(false);
+  const [aiPrefillNote, setAiPrefillNote] = useState("");
   const [aiPlan, setAiPlan] = useState(null);
   const [aiPlanError, setAiPlanError] = useState("");
   const [aiPlanSaving, setAiPlanSaving] = useState(false);
@@ -4921,7 +4933,7 @@ function withPlanApproval(sessions, now = new Date()) {
   }, [aiBuilding]);
 
   const openAiBuilder = () => {
-    setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setView("ai_builder");
+    setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
   };
 
   useEffect(() => { if (!user) return; loadData(); }, [user, today]);
@@ -6030,6 +6042,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= aiStep ? NEON : BORDER, transition: "background .3s" }} />
             ))}
           </div>
+          {aiPrefillNote && <p role="status" style={{ fontSize: 11, color: "#FFB547", lineHeight: 1.6, marginTop: 0 }}>{aiPrefillNote}</p>}
           {aiQuestionIds && aiQuestionIds.length < AI_QUESTIONS.length && (
             <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>
               Your other answers were taken from your chat with the coach. Only the missing ones are asked here.
@@ -6421,34 +6434,28 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     setPlanRebuildPreparing(true);
     const transcript = planChangeMessages.map(message => `${message.role === "user" ? "User" : "Coach"}: ${message.content}`).join("\n");
     let answers = {};
-    try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: await chatHeaders(),
-        body: JSON.stringify({
-          responseTokens: 1500,
-          system: `Extract a user's answers to a training questionnaire from their conversation with a coach. Use null for anything the user has not clearly stated; never guess. Respond only with valid JSON:
-{"goal":["up to two of: ${AI_QUESTIONS[0].options.join(", ")}"],"goal_custom":"other goal in their words or null","experience":"one of: ${AI_QUESTIONS[1].options.join(", ")} or null","days_per_week":"N days or null","preferred_days":["MON".."SUN" codes, or ["FLEXIBLE"], or null],"session_length":"text or null","equipment":"text or null","split":"text or null","favourites":"text or null","priorities":"text or null","limitations":"injuries or things to avoid, or null"}`,
-          messages: [{ role: "user", content: `CONVERSATION\n${transcript}` }],
-        }),
-      });
-      if (!response.ok) throw new Error("Request failed");
-      const data = await response.json();
-      const parsed = JSON.parse((data.content?.map(block => block.text || "").join("") || "").replace(/```json|```/g, "").trim());
-      const text = value => typeof value === "string" && value.trim() && value.trim().toLowerCase() !== "null" ? value.trim() : null;
-      const goals = (Array.isArray(parsed.goal) ? parsed.goal : []).filter(goal => AI_QUESTIONS[0].options.includes(goal)).slice(0, 2);
-      if (goals.length) answers.goal = goals;
-      if (text(parsed.goal_custom)) answers.goal_custom = text(parsed.goal_custom);
-      const dayCount = parseInt(parsed.days_per_week, 10);
-      if (dayCount >= 1 && dayCount <= 7) answers.days_per_week = `${dayCount} ${dayCount === 1 ? "day" : "days"}`;
-      const preferredDays = Array.isArray(parsed.preferred_days) ? parsed.preferred_days.map(day => String(day).toUpperCase()).filter(day => DAYS.includes(day) || day === "FLEXIBLE") : [];
-      if (preferredDays.length) answers.preferred_days = preferredDays.includes("FLEXIBLE") ? ["FLEXIBLE"] : preferredDays;
-      for (const id of ["experience", "session_length", "equipment", "split", "favourites", "priorities", "limitations"]) {
-        if (text(parsed[id])) answers[id] = text(parsed[id]);
+    // Ask the model to read the chat, retrying once if the reply is unusable.
+    for (let attempt = 0; attempt < 2 && !Object.keys(answers).length; attempt++) {
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: await chatHeaders(),
+          body: JSON.stringify({
+            responseTokens: 1500,
+            system: `Read a conversation between a user and their fitness coach and fill in the user's answers to a training questionnaire. Use what the user said (and anything the coach proposed that the user accepted). Use null only for questions the conversation does not answer. Respond with one JSON object and nothing else, using exactly these keys:
+{"goal": [up to two of ${JSON.stringify(AI_QUESTIONS[0].options)}], "goal_custom": "any other goal in the user's words, or null", "experience": "text or null", "days_per_week": number 1-7 or null, "preferred_days": ["MON".."SUN"] or ["FLEXIBLE"] or null, "session_length": "time available per session, e.g. 45 minutes, or null", "equipment": "text or null", "split": "text or null", "favourites": "exercises they enjoy, or null", "priorities": "focus areas, or null", "limitations": "injuries or things to avoid, or null"}`,
+            messages: [{ role: "user", content: `CONVERSATION\n${transcript}\n\nReturn the JSON object now.` }],
+          }),
+        });
+        if (!response.ok) throw new Error(`Extraction request failed (${response.status})`);
+        const data = await response.json();
+        const parsed = extractJsonObject(data.content?.map(block => block.text || "").join("") || "");
+        answers = questionnaireAnswersFromExtraction(parsed, AI_QUESTIONS[0].options);
+      } catch (error) {
+        console.warn("Could not pre-fill answers from the coach chat:", error.message);
       }
-    } catch {
-      answers = {};
     }
+    setAiPrefillNote(Object.keys(answers).length ? "" : "We could not read your answers from the coach chat, so please answer the questions below.");
     const missing = AI_QUESTIONS.filter(question => !aiAnswerText(question, answers).trim()).map(question => question.id);
     setPlanRebuildPreparing(false);
     setPlanChangeOpen(false);
@@ -6827,7 +6834,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   <button type="button" onClick={() => setDiscardWorkoutWarning(true)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Delete it</button>
                 </div>
               </div>
-            ) : (recommendedDoneToday || (!recommendedSession && trainedToday)) ? (
+            ) : (recommendedDoneToday || trainedToday) ? (
               <div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON, letterSpacing: 2, marginBottom: 8 }}>DONE FOR TODAY ✓</div>
                 <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
