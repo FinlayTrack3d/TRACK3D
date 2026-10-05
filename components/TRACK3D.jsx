@@ -13,6 +13,8 @@ import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
+import { fitnessImportSystemPrompt, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
+import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
@@ -4477,117 +4479,299 @@ function DashboardHistory({ user, onBack }) {
 }
 
 // ─── Weekly Report ──────────────────────────────────────────────────────────────
-function WeeklyReport({ user }) {
-  const [report, setReport] = useState(null);
-  const [loading, setLoading] = useState(true);
+// Every number comes from data the app already stores; the AI only writes
+// the Biggest Win / Focus / Verdict lines, from those same numbers.
+async function loadWeeklyReportData(user, week) {
+  const todayKey = getZonedDateInfo(new Date(), resolveHomeTimeZone(user)).dateKey;
+  const historyFrom = shiftDateKey(todayKey, -366);
+  const previousStart = shiftDateKey(week.start, -7);
+  const [workouts, split, habits, completions, checkins, routine, nutritionLogs, nutritionPlan, stored] = await Promise.all([
+    supabase.from("workout_logs").select("id,date,total_volume,duration_mins,exercises,in_progress").eq("user_id", user.id).gte("date", previousStart).lte("date", week.end).eq("in_progress", false),
+    supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
+    supabase.from("habits").select("id,name,created_at").eq("user_id", user.id),
+    supabase.from("habit_completions").select("habit_id,date").eq("user_id", user.id).gte("date", historyFrom).lte("date", todayKey),
+    supabase.from("morning_checkins").select("date,score,data").eq("user_id", user.id).gte("date", historyFrom).order("date", { ascending: false }),
+    supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
+    supabase.from("nutrition_logs").select("date,total_calories,total_protein").eq("user_id", user.id).gte("date", week.start).lte("date", week.end),
+    supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
+    supabase.from("weekly_reports").select("*").eq("user_id", user.id).eq("week_start", week.start).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  const failed = [workouts, habits, completions, checkins, nutritionLogs].find(result => result.error);
+  if (failed) throw failed.error;
+  const metrics = buildWeeklyMetrics({
+    week, todayKey,
+    workoutLogs: workouts.data || [],
+    sessions: split.data?.sessions || [],
+    habits: habits.data || [],
+    habitCompletions: completions.data || [],
+    checkins: checkins.data || [],
+    hasMorningRoutine: Boolean(routine.data),
+    nutritionLogs: nutritionLogs.data || [],
+    nutritionPlan: nutritionPlan.data || null,
+  });
+  return { metrics, summary: parseCoachSummary(stored.data?.patterns) };
+}
+
+const formatWeekRange = week => {
+  const label = key => new Date(`${key}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" }).toUpperCase();
+  return `${label(week.start)} – ${label(week.end)}`;
+};
+
+function ReportTile({ label, value, sub, progress, color = NEON, testId }) {
+  return (
+    <div data-testid={testId} style={{ padding: "14px 12px", background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, minWidth: 0, height: "100%", boxSizing: "border-box" }}>
+      <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1.5, marginBottom: 8 }}>{label}</div>
+      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color, overflowWrap: "anywhere" }}>{value}</div>
+      {sub && <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 5, lineHeight: 1.4 }}>{sub}</div>}
+      {progress !== undefined && progress !== null && (
+        <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${Math.max(0, Math.min(progress, 1)) * 100}%`, background: color }} /></div>
+      )}
+    </div>
+  );
+}
+
+const signed = value => `${value > 0 ? "+" : ""}${value}`;
+
+// Dashboard card: a short teaser that opens the full recap.
+function WeeklyReport({ user, onOpen }) {
+  const week = useMemo(() => reportWeek(getZonedDateInfo(new Date(), resolveHomeTimeZone(user)).dateKey), [user]);
+  const [metrics, setMetrics] = useState(null);
+  const [loadError, setLoadError] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    loadWeeklyReportData(user, week)
+      .then(result => { if (!cancelled) setMetrics(result.metrics); })
+      .catch(() => { if (!cancelled) setLoadError(true); });
+    return () => { cancelled = true; };
+  }, [user, week]);
+
+  const workouts = metrics?.workouts;
+  const habits = metrics?.habits;
+  const morning = metrics?.morning;
+  const headline = [
+    workouts && { label: "WORKOUTS", value: workouts.planned ? `${workouts.completed}/${workouts.planned}` : workouts.completed },
+    workouts?.completed > 0 && { label: "NEW PBS", value: workouts.personalBests.length, color: "#FFB547" },
+    habits?.completionPct !== null && habits && { label: "HABITS", value: `${habits.completionPct}%`, color: NEON2 },
+    morning && { label: "MORNINGS", value: `${morning.completed}/${morning.days}`, color: "#FF8C00" },
+  ].filter(Boolean).slice(0, 3);
+
+  return (
+    <div className="t3d-card" data-testid="weekly-report-card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
+        <div className="t3d-ctitle" style={{ margin: 0 }}>YOUR WEEK</div>
+        <div style={{ fontSize: 9, color: "#6F8792", letterSpacing: 1 }}>{formatWeekRange(week)}{week.inProgress ? " · SO FAR" : ""}</div>
+      </div>
+      {loadError ? (
+        <div style={{ fontSize: 11, color: "#8AABB8" }}>Your weekly report could not be loaded right now.</div>
+      ) : !metrics ? (
+        <div style={{ fontSize: 11, color: "#8AABB8" }}>Loading your week...</div>
+      ) : !metrics.hasData ? (
+        <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>Nothing tracked for this week yet. Log a workout, a morning or your habits and your weekly recap will build from there.</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${headline.length}, minmax(0,1fr))`, gap: 10 }}>
+          {headline.map(item => (
+            <div key={item.label} style={{ textAlign: "center", padding: "10px 6px", background: SURFACE2, borderRadius: 6 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: item.color || NEON }}>{item.value}</div>
+              <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginTop: 4 }}>{item.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <button className="t3d-btn" style={{ width: "100%", marginTop: 14 }} onClick={onOpen}>OPEN WEEKLY REPORT →</button>
+    </div>
+  );
+}
+
+// Full-screen weekly recap.
+function WeeklyRecap({ user, onBack }) {
+  const todayKey = getZonedDateInfo(new Date(), resolveHomeTimeZone(user)).dateKey;
+  const [offset, setOffset] = useState(0);
+  const week = useMemo(() => reportWeek(todayKey, offset), [todayKey, offset]);
+  const [data, setData] = useState(null);
+  const [loadError, setLoadError] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [summaryError, setSummaryError] = useState("");
+  const autoRequested = useRef(new Set());
 
-  const getLocalDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  useEffect(() => {
+    let cancelled = false;
+    setData(null); setLoadError(""); setSummaryError("");
+    loadWeeklyReportData(user, week)
+      .then(result => { if (!cancelled) setData(result); })
+      .catch(error => { if (!cancelled) setLoadError(error?.message || "connection problem"); });
+    return () => { cancelled = true; };
+  }, [user, week]);
 
-  useEffect(() => { if (!user) return; init(); }, [user]);
-
-  const init = async () => {
-    setLoading(true);
-    const day = 0;
-
-    const { data: latest } = await supabase.from("weekly_reports").select("*").eq("user_id", user.id).order("report_date", { ascending: false }).limit(1).single();
-    setReport(latest || null);
-
-    const todayStr = getLocalDate();
-    if (new Date().getDay() === day && latest?.report_date !== todayStr) {
-      await generateReport();
-    }
-    setLoading(false);
-  };
-
-  const generateReport = async () => {
+  const generateSummary = async () => {
+    if (!data?.metrics?.hasData || generating) return;
     setGenerating(true);
+    setSummaryError("");
     try {
-      const activity = await fetchDailyActivity(user.id, 7);
-      const morningScores = activity.map(a => a.morningScore).filter(v => v != null);
-      const avgMorning = morningScores.length ? (morningScores.reduce((a,b) => a+b, 0) / morningScores.length).toFixed(1) : "n/a";
-      const daysActive = activity.filter(a => a.activity > 0).length;
-      const weekStart = activity[0].date;
-      const weekEnd = activity[activity.length - 1].date;
-
-      const [nutrition, workouts, planRes] = await Promise.all([
-        supabase.from("nutrition_logs").select("total_calories,total_protein").eq("user_id", user.id).gte("date", weekStart),
-        supabase.from("workout_logs").select("date").eq("user_id", user.id).gte("date", weekStart).eq("in_progress", false),
-        supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).single(),
-      ]);
-      const nutLogs = nutrition.data || [];
-      const avgCals = nutLogs.length ? Math.round(nutLogs.reduce((a,n) => a+(n.total_calories||0), 0) / nutLogs.length) : null;
-      const avgProtein = nutLogs.length ? Math.round(nutLogs.reduce((a,n) => a+(n.total_protein||0), 0) / nutLogs.length) : null;
-      const plan = planRes.data;
-
+      const facts = weeklyFactsForCoach(data.metrics);
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: "You are TRACK3D's weekly coach. Reply in exactly two labelled sections, each 3-5 sentences: 'PATTERNS:' (trends you notice across the week) and 'DIET SUGGESTIONS:' (only suggest a change if the data clearly supports it, otherwise say nutrition looks on track). Be direct and specific. Never give medical advice.",
-          messages: [{ role: "user", content: `Last 7 days for this user:
-- Morning check-ins completed: ${morningScores.length}/7, avg score ${avgMorning}/10
-- Days with any activity logged: ${daysActive}/7
-- Nutrition logged on ${nutLogs.length}/7 days, avg ${avgCals ?? "n/a"} kcal / ${avgProtein ?? "n/a"}g protein vs target ${plan?.daily_calories ?? "unknown"} kcal / ${plan?.protein_target ?? "unknown"}g protein
-- Workouts logged: ${workouts.data?.length || 0}/7 days
-
-Give me my weekly patterns and diet suggestions.` }],
+          system: `You are TRACK3D's coach writing a short weekly recap. Use only the facts provided; never invent numbers, sessions or foods. Reply ONLY with JSON: {"biggest_win": "...", "focus": "...", "verdict": "..."}.
+biggest_win: one or two sentences on what genuinely went best this week, naming the specific number.
+focus: one clear, specific, actionable improvement for next week.
+verdict: two short sentences summarising the week honestly and encouragingly.
+If there is very little data, say so plainly instead of padding. No emojis, no markdown, no medical advice.`,
+          messages: [{ role: "user", content: `Week ${week.start} to ${week.end}${week.inProgress ? " (still in progress)" : ""}:\n- ${facts.join("\n- ")}` }],
         }),
       });
+      if (!res.ok) throw new Error(`coach unavailable (${res.status})`);
       const json = await res.json();
-      const text = json.content?.map(b => b.text || "").join("") || "";
-      const parts = text.split("DIET SUGGESTIONS:");
-      const patterns = (parts[0] || "").replace("PATTERNS:", "").trim();
-      const dietSuggestions = (parts[1] || "").trim();
-
-      const { data: saved } = await supabase.from("weekly_reports").upsert({
-        user_id: user.id, report_date: getLocalDate(), week_start: weekStart, week_end: weekEnd,
-        patterns, diet_suggestions: dietSuggestions,
-      }, { onConflict: "user_id,report_date" }).select().single();
-      setReport(saved || { report_date: getLocalDate(), week_start: weekStart, week_end: weekEnd, patterns, diet_suggestions: dietSuggestions });
-    } catch (e) {
-      console.log("Weekly report error:", e);
+      const parsed = extractJsonObject(json.content?.map(block => block.text || "").join("") || "");
+      if (!parsed?.biggest_win && !parsed?.verdict) throw new Error("the coach reply could not be read");
+      const summary = { biggestWin: cleanAiText(parsed.biggest_win), focus: cleanAiText(parsed.focus), verdict: cleanAiText(parsed.verdict) };
+      setData(current => ({ ...current, summary }));
+      const { error } = await supabase.from("weekly_reports").upsert({
+        user_id: user.id, report_date: week.end, week_start: week.start, week_end: week.end,
+        patterns: formatCoachSummary(summary), diet_suggestions: null,
+      }, { onConflict: "user_id,report_date" });
+      if (error) setSummaryError(`Shown below but not saved: ${error.message}`);
+    } catch (error) {
+      setSummaryError(`Coach summary unavailable: ${error?.message || "connection problem"}. Your numbers above are unaffected.`);
+    } finally {
+      setGenerating(false);
     }
-    setGenerating(false);
   };
 
-  if (loading) return (
-    <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 24 }}>
-      <div style={{ fontSize: 11, color: "#E0EAF0" }}>LOADING WEEKLY REPORT...</div>
-    </div>
-  );
+  // A finished week with data gets its coach summary once, automatically.
+  useEffect(() => {
+    if (!data?.metrics?.hasData || data.summary || week.inProgress || autoRequested.current.has(week.start)) return;
+    autoRequested.current.add(week.start);
+    generateSummary();
+  }, [data, week]);
 
-  const homeToday = getZonedDateInfo(new Date(), resolveHomeTimeZone(user));
-  const nextSunday = new Date(`${homeToday.dateKey}T12:00:00Z`);
-  nextSunday.setUTCDate(nextSunday.getUTCDate() + (7 - nextSunday.getUTCDay()));
-  const nextReportLabel = nextSunday.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
+  const metrics = data?.metrics;
+  const { workouts, habits, morning, bodyWeight, nutrition } = metrics || {};
+  const reveal = index => ({ animationDelay: `${0.06 * index}s` });
 
   return (
-    <div className="t3d-card" style={{ marginBottom: 16 }}>
-      <div style={{ marginBottom: 14 }}>
-        <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY REPORT</div>
-        <div style={{ fontSize: 9, color: "#6F8792", marginTop: 4 }}>Your next report is due on {nextReportLabel}.</div>
+    <div className="t3d-fade" data-testid="weekly-recap">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
+        <button className="t3d-btn t3d-btn-sm" onClick={onBack}>← BACK</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button className="t3d-btn t3d-btn-sm" aria-label="Previous week" onClick={() => setOffset(value => Math.min(value + 1, 52))}>‹</button>
+          <span style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, minWidth: 108, textAlign: "center" }}>{formatWeekRange(week)}</span>
+          <button className="t3d-btn t3d-btn-sm" aria-label="Next week" disabled={offset === 0} onClick={() => setOffset(value => Math.max(value - 1, 0))}>›</button>
+        </div>
       </div>
-      {generating ? (
-        <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>Generating this week's report...</div>
-      ) : report ? (
-        <div>
-          <div style={{ fontSize: 9, color: "#6F8792", letterSpacing: 1, marginBottom: 12 }}>
-            {new Date(report.week_start).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – {new Date(report.week_end).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+
+      <div className="t3d-card t3d-reveal" style={{ textAlign: "center", padding: "28px 18px", background: "linear-gradient(160deg, rgba(0,255,178,.08), rgba(0,200,255,.04) 60%, transparent)", borderColor: "rgba(0,255,178,.3)" }}>
+        <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 3, marginBottom: 8 }}>{week.inProgress ? "THIS WEEK SO FAR" : offset === 0 ? "LAST WEEK" : "WEEKLY REPORT"}</div>
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: NEON, letterSpacing: 4 }}>YOUR WEEK</div>
+        {workouts?.completed > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 40, color: "#E0EAF0", lineHeight: 1 }}>{workouts.volume.toLocaleString()}<span style={{ fontSize: 14, color: "#8AABB8" }}> KG</span></div>
+            <div style={{ fontSize: 10, color: "#8AABB8", letterSpacing: 1, marginTop: 6 }}>
+              LIFTED ACROSS {workouts.completed} WORKOUT{workouts.completed === 1 ? "" : "S"}
+              {workouts.volumeChangePct !== null && <span style={{ color: workouts.volumeChangePct >= 0 ? NEON : "#FFB547" }}> · {signed(workouts.volumeChangePct)}% VS PREVIOUS WEEK</span>}
+            </div>
           </div>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 10, color: NEON2, letterSpacing: 1, marginBottom: 6 }}>PATTERNS</div>
-            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{cleanAiText(report.patterns) || "Not enough data yet."}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 10, color: "#FF8C00", letterSpacing: 1, marginBottom: 6 }}>DIET SUGGESTIONS</div>
-            <div style={{ fontSize: 12, color: "#C0D4DE", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{cleanAiText(report.diet_suggestions) || "Nothing to flag this week."}</div>
-            <div style={{ fontSize: 9, color: "#6F8792", marginTop: 8 }}>Suggestions only — update your plan in Nutrition if you agree.</div>
-          </div>
+        )}
+      </div>
+
+      {loadError && <div className="t3d-card" role="alert" style={{ color: "#FF8AAD", fontSize: 11 }}>Your report could not be loaded: {loadError}</div>}
+      {!metrics && !loadError && <div className="t3d-card" style={{ textAlign: "center", fontSize: 11, color: "#8AABB8" }}>Loading your week...</div>}
+      {metrics && !metrics.hasData && (
+        <div className="t3d-card" style={{ textAlign: "center", padding: 24, fontSize: 12, color: "#C5D6DC", lineHeight: 1.7 }}>
+          Nothing was tracked this week, so there is no recap to show.<br /><span style={{ color: "#8AABB8", fontSize: 11 }}>Workouts, mornings, habits and nutrition logs all feed into this report.</span>
         </div>
-      ) : (
-        <div style={{ textAlign: "center", padding: "16px 0", fontSize: 11, color: "#E0EAF0" }}>
-          Your report will appear here on {nextReportLabel}.
-        </div>
+      )}
+
+      {metrics?.hasData && (
+        <>
+          <div className="t3d-grid2" style={{ marginBottom: 14 }}>
+            {workouts && (
+              <div className="t3d-reveal" style={reveal(1)}>
+                <ReportTile testId="tile-workouts" label="WORKOUTS COMPLETED" value={workouts.planned ? `${workouts.completed} / ${workouts.planned}` : workouts.completed}
+                  sub={workouts.planned ? (workouts.completed >= workouts.planned ? "Every planned session done" : `${workouts.planned - workouts.completed} planned session${workouts.planned - workouts.completed === 1 ? "" : "s"} missed`) : "No weekly plan to compare against"}
+                  progress={workouts.planned ? workouts.completed / workouts.planned : null} />
+              </div>
+            )}
+            {workouts?.completed > 0 && (
+              <div className="t3d-reveal" style={reveal(2)}>
+                <ReportTile testId="tile-pbs" label="NEW PBS" value={workouts.personalBests.length} color="#FFB547"
+                  sub={workouts.personalBests.length ? `${workouts.minutes} min trained` : `None this week · ${workouts.minutes} min trained`} />
+              </div>
+            )}
+            {workouts?.completed > 0 && (
+              <div className="t3d-reveal" style={reveal(3)}>
+                <ReportTile testId="tile-volume" label="TRAINING VOLUME" value={`${workouts.volume.toLocaleString()}kg`} color={NEON2}
+                  sub={workouts.volumeChangePct !== null ? `${signed(workouts.volumeChangePct)}% vs previous week (${workouts.previousVolume.toLocaleString()}kg)` : "First tracked week — nothing to compare yet"} />
+              </div>
+            )}
+            {habits && habits.completionPct !== null && (
+              <div className="t3d-reveal" style={reveal(4)}>
+                <ReportTile testId="tile-habits" label="HABIT COMPLETION" value={`${habits.completionPct}%`} color={NEON2} progress={habits.completionPct / 100}
+                  sub={`${habits.done} of ${habits.possible} habit-days`} />
+              </div>
+            )}
+            {habits && (
+              <div className="t3d-reveal" style={reveal(5)}>
+                <ReportTile testId="tile-habit-streak" label="HABIT STREAK" value={`🔥 ${habits.currentStreak}d`} color="#FF8C00"
+                  sub={`${habits.currentStreakHabit ? `${habits.currentStreakHabit} · ` : ""}best ever ${habits.bestStreak}d`} />
+              </div>
+            )}
+            {morning && (
+              <div className="t3d-reveal" style={reveal(6)}>
+                <ReportTile testId="tile-mornings" label="MORNING ROUTINES" value={`${morning.completed} / ${morning.days}`} color="#FF8C00" progress={morning.days ? morning.completed / morning.days : 0}
+                  sub={`${morning.averageScore !== null ? `Avg score ${morning.averageScore}/10 · ` : ""}streak now ${morning.currentStreak}d`} />
+              </div>
+            )}
+            {nutrition && (
+              <div className="t3d-reveal" style={reveal(7)}>
+                <ReportTile testId="tile-nutrition" label={nutrition.onTargetDays !== null ? "NUTRITION ON TARGET" : "NUTRITION LOGGED"} color={NEON}
+                  value={`${nutrition.onTargetDays !== null ? nutrition.onTargetDays : nutrition.loggedDays} / ${nutrition.days}`}
+                  progress={nutrition.days ? (nutrition.onTargetDays ?? nutrition.loggedDays) / nutrition.days : 0}
+                  sub={nutrition.averageCalories !== null ? `Avg ${nutrition.averageCalories.toLocaleString()} kcal · ${nutrition.averageProtein}g protein` : "No meals logged this week"} />
+              </div>
+            )}
+            {bodyWeight && (
+              <div className="t3d-reveal" style={reveal(8)}>
+                <ReportTile testId="tile-weight" label="BODY WEIGHT" value={`${signed(bodyWeight.change)}kg`} color="#E0EAF0"
+                  sub={`${bodyWeight.first}kg → ${bodyWeight.last}kg · ${bodyWeight.weighIns} weigh-ins`} />
+              </div>
+            )}
+          </div>
+
+          {workouts?.personalBests.length > 0 && (
+            <div className="t3d-card t3d-reveal" data-testid="recap-pbs" style={{ ...reveal(9), borderColor: "rgba(255,181,71,.45)", background: "linear-gradient(135deg, rgba(255,181,71,.1), rgba(255,181,71,.02))" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#FFB547", letterSpacing: 2, marginBottom: 6 }}>🏆 PERSONAL BESTS</div>
+              {workouts.personalBests.map((pb, index) => (
+                <div key={`${pb.exercise}-${pb.date}-${index}`} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "7px 0", borderTop: `1px solid ${BORDER}` }}>
+                  <strong style={{ color: "#E0EAF0" }}>{pb.exercise}</strong>
+                  <span style={{ color: "#FFB547", whiteSpace: "nowrap" }}>{pb.type === "weight_pb" ? `${pb.weight}kg × ${pb.reps}` : `${pb.reps} reps @ ${pb.weight}kg`} · {pb.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="t3d-card t3d-reveal" data-testid="recap-coach" style={reveal(10)}>
+            <div className="t3d-ctitle">COACH'S TAKE</div>
+            {data.summary ? (
+              <div style={{ display: "grid", gap: 10 }}>
+                {[["BIGGEST WIN", data.summary.biggestWin, "#FFB547"], ["FOCUS FOR NEXT WEEK", data.summary.focus, NEON2], ["COACH'S VERDICT", data.summary.verdict, NEON]].filter(([, text]) => text).map(([label, text, color]) => (
+                  <div key={label} style={{ padding: "12px 14px", borderLeft: `3px solid ${color}`, background: SURFACE2, borderRadius: 6 }}>
+                    <div style={{ fontSize: 9, color, letterSpacing: 2, marginBottom: 6 }}>{label}</div>
+                    <div style={{ fontSize: 12, color: "#D5E0E4", lineHeight: 1.6 }}>{text}</div>
+                  </div>
+                ))}
+              </div>
+            ) : generating ? (
+              <div role="status" style={{ fontSize: 11, color: NEON }}>Coach is reviewing your week...</div>
+            ) : (
+              <div>
+                <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>{week.inProgress ? "The week is not over yet. You can get a coach summary of the week so far." : "Get your Biggest Win, one focus for next week and the coach's verdict."}</p>
+                <button className="t3d-btn" style={{ width: "100%" }} onClick={generateSummary}>GENERATE WEEKLY REPORT</button>
+              </div>
+            )}
+            {summaryError && <p role="alert" style={{ fontSize: 10, color: "#FFB547", marginBottom: 0 }}>{summaryError}</p>}
+          </div>
+        </>
       )}
     </div>
   );
@@ -4700,6 +4884,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
   ].join("\n");
 
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
+  if (view === "weekly") return <WeeklyRecap user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   const firstRunSteps = [
     { label: "Set up your morning", done: todayData.hasRoutine, section: "morning" },
@@ -4805,7 +4990,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       </div>
 
       <ProgressPhotos user={user} />
-      <WeeklyReport user={user} />
+      <WeeklyReport user={user} onOpen={() => setView("weekly")} />
 
       <div className="t3d-card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -4918,6 +5103,75 @@ function ExerciseLineChart({ points }) {
   );
 }
 
+// Read-only view of one planned session: used by plan approval, the plan
+// preview sheet and the Import My Plan review. It never starts or edits anything.
+function PlanSessionCard({ session, description, label }) {
+  const minutes = session.duration_mins || session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0;
+  return (
+    <div style={{ padding: 13, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 7, marginBottom: 10, textAlign: "left" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 7 }}>
+        <strong style={{ color: NEON, fontSize: 12, overflowWrap: "anywhere" }}>{session.name}</strong>
+        <span style={{ color: NEON2, fontSize: 10, whiteSpace: "nowrap" }}>{label || (session.days || []).join(" / ") || "FLEXIBLE"} · {minutes} MIN</span>
+      </div>
+      {description && <div style={{ fontSize: 11, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 9, whiteSpace: "pre-wrap" }}>{description}</div>}
+      {(session.exercises || []).map((exercise, exerciseIndex) => (
+        <div key={`${exercise.name}-${exerciseIndex}`} style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1fr) auto", gap: 7, padding: "6px 0", borderTop: `1px solid ${BORDER}`, fontSize: 10 }}>
+          <span style={{ color: "#6F8792" }}>{exerciseIndex + 1}</span>
+          <span style={{ color: "#D5E0E4", minWidth: 0 }}>
+            {exercise.name}
+            {(exercise.notes || exercise.tempo || exercise.rest_seconds) && (
+              <span style={{ display: "block", color: "#6F8792", fontSize: 9, marginTop: 2, lineHeight: 1.45 }}>
+                {[exercise.tempo && `Tempo ${exercise.tempo}`, exercise.rest_seconds && `Rest ${exercise.rest_seconds}s`, exercise.notes].filter(Boolean).join(" · ")}
+              </span>
+            )}
+          </span>
+          <span style={{ color: "#8AABB8", textAlign: "right" }}>{exercise.sets} sets · {Array.isArray(exercise.reps) ? exercise.reps.join("/") : exercise.reps} reps</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const EyeIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M1.5 12S5.5 4.5 12 4.5 22.5 12 22.5 12 18.5 19.5 12 19.5 1.5 12 1.5 12Z" /><circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
+// Small, secondary "what am I training?" button. Viewing never logs anything.
+function PlanPreviewButton({ label, onClick }) {
+  return (
+    <button type="button" aria-label={label} title={label} onClick={event => { event.stopPropagation(); onClick(); }}
+      style={{ background: "none", border: `1px solid ${BORDER}`, borderRadius: 6, color: "#8AABB8", cursor: "pointer", width: 32, height: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0 }}>
+      <EyeIcon />
+    </button>
+  );
+}
+
+function PlanPreviewSheet({ title, entries, notes, onClose }) {
+  useEffect(() => {
+    const onKey = event => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 120, padding: "16px 12px 0" }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="plan-preview-title" data-testid="plan-preview" onClick={event => event.stopPropagation()}
+        className="t3d-card" style={{ width: "100%", maxWidth: 620, maxHeight: "86dvh", overflowY: "auto", marginBottom: 0, borderBottomLeftRadius: 0, borderBottomRightRadius: 0, paddingTop: 0 }}>
+        <div style={{ position: "sticky", top: 0, background: SURFACE, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "14px 0 10px", zIndex: 1 }}>
+          <div id="plan-preview-title" className="t3d-ctitle" style={{ margin: 0 }}>{title}</div>
+          <button className="t3d-btn t3d-btn-sm" onClick={onClose}>CLOSE ✕</button>
+        </div>
+        {notes && <div style={{ fontSize: 11, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 10, whiteSpace: "pre-wrap" }}>{notes}</div>}
+        {entries.length ? entries.map((entry, index) => (
+          <PlanSessionCard key={`${entry.session.name}-${index}`} session={entry.session} label={entry.label} description={entry.session.notes || entry.session.reasoning} />
+        )) : <div style={{ fontSize: 11, color: "#8AABB8", padding: "8px 0 16px" }}>No sessions are planned.</div>}
+        <div style={{ fontSize: 9, color: "#6F8792", padding: "4px 0 16px" }}>View only. Nothing is started or changed.</div>
+      </div>
+    </div>
+  );
+}
+
 function normalizeFitnessSessions(sessions = []) {
   return sessions.map(session => ({
     ...session,
@@ -4945,6 +5199,14 @@ function Fitness({ user, isActive = true }) {
   const [editDaysModal, setEditDaysModal] = useState(false);
   const [numSessions, setNumSessions] = useState(3);
   const [sessions, setSessions] = useState([]);
+  const [planPreview, setPlanPreview] = useState(null); // read-only plan sheet
+  const [importText, setImportText] = useState("");
+  const [importResult, setImportResult] = useState(null); // interpreted plan awaiting review
+  const [importError, setImportError] = useState("");
+  const [importFileNote, setImportFileNote] = useState("");
+  const [importInterpreting, setImportInterpreting] = useState(false);
+  const [importSaving, setImportSaving] = useState(false);
+  const [importEditing, setImportEditing] = useState(false); // imported plan open in the builder
   const [currentSessionIdx, setCurrentSessionIdx] = useState(0);
   const [history, setHistory] = useState([]);
   const [showEmptyWorkouts, setShowEmptyWorkouts] = useState(false);
@@ -6442,15 +6704,167 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const extra = { programme_started_at: now.toISOString(), week_reviewed_at: null };
     const saved = await saveSplit(approved, extra);
     if (!saved.ok) { window.alert(`Your plan could not be saved: ${saved.error}. Please try again.`); return; }
+    setImportEditing(false);
     setSplit({ sessions: approved, ...extra });
     setView("home");
   };
+
+  // ── IMPORT MY PLAN ────────────────────────────────────────────────────────
+  // Paste or upload -> AI interprets -> review -> the user saves. Nothing is
+  // written until SAVE THIS PLAN (or SAVE SPLIT after editing).
+  const openImport = () => {
+    setImportText(""); setImportResult(null); setImportError(""); setImportFileNote("");
+    setPlanChangeOpen(false);
+    setView("import");
+  };
+  const importedSessions = result => result.sessions.map((session, index) => ({
+    ...session, source: "import", ...(index === 0 && result.notes ? { programme_notes: result.notes } : {}),
+  }));
+  const loadImportFile = async file => {
+    setImportError(""); setImportFileNote("");
+    if (!file) return;
+    if (!isSupportedImportFile(file.name)) {
+      setImportError("That file type can't be read yet. Export a spreadsheet or Google Sheet as CSV, or copy the text from a PDF or Word document and paste it in.");
+      return;
+    }
+    try {
+      setImportText(await file.text());
+      setImportFileNote(`Loaded ${file.name}. Check the text below, then interpret it.`);
+    } catch {
+      setImportError("That file could not be read. Try pasting its contents instead.");
+    }
+  };
+  const interpretImport = async () => {
+    const source = importSourceText(importText);
+    if (!source.text || importInterpreting) return;
+    setImportInterpreting(true);
+    setImportError("");
+    try {
+      const messages = [{ role: "user", content: `Here is the training plan from my coach:\n"""\n${source.text}\n"""` }];
+      let parsed = null;
+      // One retry if the reply cannot be read as the requested JSON.
+      for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+        const res = await fetch("/api/chat", {
+          method: "POST", headers: await chatHeaders(),
+          body: JSON.stringify({ responseTokens: 6000, system: fitnessImportSystemPrompt(), messages }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `the coach service is unavailable (${res.status})`);
+        const reply = data.content?.map(block => block.text || "").join("") || "";
+        const candidate = extractJsonObject(reply);
+        if (candidate && Array.isArray(candidate.sessions)) parsed = candidate;
+        else messages.push({ role: "assistant", content: reply || "(empty reply)" }, { role: "user", content: "That could not be read. Return the whole plan again as one valid JSON object matching the schema, and nothing else." });
+      }
+      if (!parsed) throw new Error("the reply could not be read");
+      const result = normaliseImportedFitnessPlan(parsed);
+      if (!result.sessions.length) throw new Error("no workouts with exercises were found in that text");
+      if (source.truncated) result.flags.unshift({ where: "Plan", issue: "The plan was very long, so only the first part was read." });
+      setImportResult(result);
+    } catch (error) {
+      setImportError(`Your plan could not be interpreted: ${error?.message || "connection problem"}. Nothing has been saved.`);
+    } finally {
+      setImportInterpreting(false);
+    }
+  };
+  const saveImport = async () => {
+    if (!importResult || importSaving) return;
+    setImportSaving(true);
+    setImportError("");
+    const now = new Date();
+    const approved = withPlanApproval(normalizeFitnessSessions(importedSessions(importResult)), now);
+    const saved = await saveSplit(approved, { split_name: importResult.planName || "Imported plan", programme_started_at: now.toISOString(), week_reviewed_at: null });
+    setImportSaving(false);
+    if (!saved.ok) { setImportError(`Your plan could not be saved: ${saved.error}. Your previous plan is unchanged.`); return; }
+    setImportResult(null);
+    setView("home");
+  };
+  const editImport = () => {
+    setSessions(importedSessions(importResult));
+    setSetupStep(1);
+    setCurrentSessionIdx(0);
+    setImportEditing(true);
+    setView("setup");
+  };
+  const cancelImportEdit = () => {
+    setImportEditing(false);
+    setSessions(normalizeFitnessSessions(split?.sessions || []));
+    setView("home");
+  };
+
+  if (view === "import") {
+    if (importResult) return (
+      <div className="t3d-fade" data-testid="import-review">
+        <div className="t3d-card">
+          <div className="t3d-ctitle">CHECK YOUR IMPORTED PLAN</div>
+          <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>This is what TRACK3D understood from your coach&apos;s plan. Nothing is saved until you confirm.</p>
+          {importResult.flags.length > 0 && (
+            <div data-testid="import-flags" style={{ marginBottom: 14, padding: 12, border: "1px solid rgba(255,181,71,.45)", background: "rgba(255,181,71,.06)", borderRadius: 7 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FFB547", letterSpacing: 1.5, marginBottom: 6 }}>PLEASE CHECK · {importResult.flags.length}</div>
+              {importResult.flags.map((item, index) => (
+                <div key={index} style={{ fontSize: 10, color: "#D6E1E5", lineHeight: 1.55, padding: "3px 0" }}><strong style={{ color: "#FFB547" }}>{item.where}:</strong> {item.issue}</div>
+              ))}
+            </div>
+          )}
+          {importResult.planName && <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 8 }}>{importResult.planName}</div>}
+          {importResult.notes && <div style={{ fontSize: 11, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 12, whiteSpace: "pre-wrap" }}><span style={{ color: NEON2, fontSize: 9, letterSpacing: 1 }}>COACH NOTES · </span>{importResult.notes}</div>}
+          {importResult.sessions.map((session, index) => (
+            <PlanSessionCard key={`${session.name}-${index}`} session={session} label={session.days.length ? session.days.join(" / ") : "NO DAY SET"} description={session.notes} />
+          ))}
+          {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this replaces your current plan. Your workout history stays saved.</p>}
+          {importError && <p role="alert" style={{ color: NEON3, fontSize: 11 }}>{importError}</p>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+            <button className="t3d-btn" style={{ flex: "1 1 180px", padding: 12, background: "rgba(0,255,178,.12)", borderColor: NEON }} disabled={importSaving} onClick={saveImport}>{importSaving ? "SAVING..." : "SAVE THIS PLAN ✓"}</button>
+            <button className="t3d-btn" style={{ flex: "1 1 140px", padding: 12, borderColor: BORDER, color: "#E0EAF0" }} disabled={importSaving} onClick={editImport}>EDIT BEFORE SAVING</button>
+          </div>
+          <button type="button" onClick={() => { setImportResult(null); setImportError(""); }} disabled={importSaving}
+            style={{ marginTop: 10, background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", cursor: "pointer", padding: "8px 0" }}>Start again with different text</button>
+        </div>
+      </div>
+    );
+    return (
+      <div className="t3d-fade" data-testid="import-input">
+        <div className="t3d-card">
+          <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")} disabled={importInterpreting}>← BACK</button>
+          <div className="t3d-ctitle">IMPORT MY PLAN</div>
+          <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>
+            Paste the training programme from your coach, in whatever format they sent it. TRACK3D will show you what it understood before anything is saved.
+          </p>
+          {importInterpreting ? (
+            <div role="status" style={{ textAlign: "center", padding: "30px 0", fontSize: 11, color: NEON }}>Reading your plan... This usually takes 10–30 seconds.</div>
+          ) : (
+            <>
+              <textarea className="t3d-input" aria-label="Your coach's plan" rows={12} value={importText} onChange={event => setImportText(event.target.value)}
+                placeholder={"Push A (Monday)\nIncline DB Press - 3 x 8-10\nMachine Chest Press - 3 x 10\nCable Fly - 3 x 12-15, 60s rest\n\nPull A (Tuesday)\n..."}
+                style={{ width: "100%", minHeight: 220, fontSize: 16, lineHeight: 1.5, resize: "vertical", fontFamily: "inherit" }} />
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "10px 0 6px" }}>
+                <label className="t3d-btn t3d-btn-sm" style={{ cursor: "pointer" }}>
+                  UPLOAD .CSV / .TXT
+                  <input type="file" accept=".csv,.txt,.tsv,.md,text/plain,text/csv" style={{ display: "none" }} data-testid="import-file"
+                    onChange={event => { loadImportFile(event.target.files?.[0]); event.target.value = ""; }} />
+                </label>
+                <span style={{ fontSize: 9, color: "#6F8792", lineHeight: 1.5 }}>Excel or Google Sheets: export as CSV. PDF or Word: copy and paste the text.</span>
+              </div>
+              {importFileNote && <p style={{ fontSize: 10, color: NEON, margin: "6px 0" }}>{importFileNote}</p>}
+              {importError && <p role="alert" style={{ color: NEON3, fontSize: 11 }}>{importError}</p>}
+              <button className="t3d-btn" style={{ width: "100%", padding: 12, marginTop: 8 }} disabled={!importText.trim()} onClick={interpretImport}>INTERPRET MY PLAN →</button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // ── MANUAL SETUP ──────────────────────────────────────────────────────────
   if (view === "setup") {
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
+          {importEditing && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 14, padding: "10px 12px", border: "1px solid rgba(0,200,255,.35)", background: "rgba(0,200,255,.06)", borderRadius: 6 }}>
+              <span style={{ fontSize: 10, color: NEON2, lineHeight: 1.5 }}>IMPORTED PLAN · Check each session, then SAVE SPLIT. Nothing is saved yet.</span>
+              <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={cancelImportEdit}>CANCEL IMPORT</button>
+            </div>
+          )}
           {setupStep === 0 && (
             <div>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")}>← BACK</button>
@@ -6818,6 +7232,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           </div>
         )}
 
+        <button type="button" onClick={openImport} style={{ display: "block", background: "none", border: 0, color: "#8AABB8", fontSize: 10, textDecoration: "underline", cursor: "pointer", padding: "4px 0 10px" }}>Have a new plan from your own coach? Import it instead</button>
         <div style={{ display: "flex", gap: 7 }}>
           <input className="t3d-ai-input" placeholder="Tell the coach what you want to change..." value={planChangeInput} onChange={event => setPlanChangeInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanChangeCoach(); } }} />
           <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanChangeCoach()} disabled={planChangeLoading || !planChangeInput.trim()}>{planChangeLoading ? "REVIEWING..." : "SEND"}</button>
@@ -7123,6 +7538,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 onClick={openAiBuilder}>🤖 AI BUILD MY PROGRAMME</button>
               <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 7, lineHeight: 1.5 }}>For beginners or anyone who wants a plan built from a few questions.</div>
             </div>
+            <div style={{ flex: "1 1 200px", maxWidth: 260 }}>
+              <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, width: "100%", borderColor: "rgba(255,181,71,.35)", color: "#FFB547" }} onClick={openImport}>📥 IMPORT MY PLAN</button>
+              <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 7, lineHeight: 1.5 }}>Already have a programme from a coach? Paste it in and check it before saving.</div>
+            </div>
           </div>
           <div style={{ marginTop: 20, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>TRACK3D provides general fitness guidance. Consult a qualified professional before starting any new exercise programme. Not medical advice.</div>
         </div>
@@ -7176,7 +7595,13 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             ) : recommendedSession ? (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8, overflowWrap: "anywhere" }}>{recommendedSession.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                    <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, overflowWrap: "anywhere", minWidth: 0 }}>{recommendedSession.name}</div>
+                    <PlanPreviewButton label={`View ${recommendedSession.name} exercises`} onClick={() => setPlanPreview({
+                      title: missedRecommendation ? "MAKE-UP SESSION" : "TODAY'S WORKOUT",
+                      entries: [{ session: recommendedSession, label: missedRecommendation ? `MISSED ${missedRecommendation.dayLabel.toUpperCase()}` : "TODAY" }],
+                    })} />
+                  </div>
                   <div style={{ fontSize: 11, color: missedRecommendation ? "#FF8C00" : "#8AABB8" }}>
                     {missedRecommendation ? `Make-up session missed on ${missedRecommendation.dayLabel}` : "Scheduled for today"} · {recommendedSession.exercises?.length || 0} exercises
                   </div>
@@ -7273,6 +7698,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
           {discardWorkoutDialog}
           {planChangeDialog}
+          {planPreview && <PlanPreviewSheet {...planPreview} onClose={() => setPlanPreview(null)} />}
 
           {planCoachCard}
 
@@ -7305,8 +7731,17 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>YOUR WEEKLY PLAN</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div className="t3d-ctitle" style={{ margin: 0, whiteSpace: "nowrap" }}>YOUR WEEKLY PLAN</div>
+                <PlanPreviewButton label="View this week's programme" onClick={() => setPlanPreview({
+                  title: "THIS WEEK'S PROGRAMME",
+                  notes: sessions.find(session => session.programme_notes)?.programme_notes,
+                  entries: [...sessions]
+                    .sort((a, b) => Math.min(...(a.days || []).map(day => DAYS.indexOf(day)), 7) - Math.min(...(b.days || []).map(day => DAYS.indexOf(day)), 7))
+                    .map(session => ({ session })),
+                })} />
+              </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={openPlanChangeCoach}>CHANGE PLAN</button>
@@ -7362,22 +7797,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   Approval is optional. It means committing to these sessions for eight weeks, completing them within each rolling eight-day cycle, then reviewing progress, stalls or the need for a deload.
                 </p>
                 {(approvalReview === "all" ? sessions : [sessions[approvalReview]].filter(Boolean)).map((session, sessionIndex) => (
-                  <div key={`${session.name}-${sessionIndex}`} style={{ padding: 13, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 7, marginBottom: 10 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 7 }}>
-                      <strong style={{ color: NEON, fontSize: 12 }}>{session.name}</strong>
-                      <span style={{ color: NEON2, fontSize: 10 }}>{(session.days || []).join(" / ") || "FLEXIBLE"} · {session.duration_mins || session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0} MIN</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: "#B4C5CC", lineHeight: 1.55, marginBottom: 9 }}>
-                      {session.reasoning || "This older plan does not include a saved coach explanation. Ask below about its placement, recovery or exercise choices before approving."}
-                    </div>
-                    {(session.exercises || []).map((exercise, exerciseIndex) => (
-                      <div key={`${exercise.name}-${exerciseIndex}`} style={{ display: "grid", gridTemplateColumns: "24px minmax(0,1fr) auto", gap: 7, padding: "6px 0", borderTop: `1px solid ${BORDER}`, fontSize: 10 }}>
-                        <span style={{ color: "#6F8792" }}>{exerciseIndex + 1}</span>
-                        <span style={{ color: "#D5E0E4" }}>{exercise.name}</span>
-                        <span style={{ color: "#8AABB8" }}>{exercise.sets} sets · {Array.isArray(exercise.reps) ? exercise.reps.join("/") : exercise.reps} reps</span>
-                      </div>
-                    ))}
-                  </div>
+                  <PlanSessionCard key={`${session.name}-${sessionIndex}`} session={session}
+                    description={session.reasoning || session.notes || "This older plan does not include a saved coach explanation. Ask below about its placement, recovery or exercise choices before approving."} />
                 ))}
                 {approvalMessages.length > 0 && <div style={{ maxHeight: 180, overflowY: "auto", margin: "12px 0" }}>
                   {approvalMessages.map((message, index) => <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, whiteSpace: "pre-wrap" }}><div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</div>)}
@@ -8106,13 +8527,7 @@ function Nutrition({ user, userSessions }) {
   const weekLogs = logs.filter(l => { const d = new Date(l.date); const now = new Date(); const ws = new Date(now); ws.setDate(now.getDate()-now.getDay()); return d >= ws; });
   const avgCals = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_calories||0),0)/weekLogs.length) : 0;
   const avgProtein = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_protein||0),0)/weekLogs.length) : 0;
-  const nutritionLogOnTarget = log => {
-    const calorieTarget = Number(plan?.daily_calories) || 0;
-    const proteinTarget = Number(plan?.protein_target) || 0;
-    const caloriesOnTarget = calorieTarget ? Math.abs((Number(log.total_calories) || 0) - calorieTarget) / calorieTarget <= 0.1 : true;
-    const proteinOnTarget = proteinTarget ? (Number(log.total_protein) || 0) >= proteinTarget * 0.9 : true;
-    return caloriesOnTarget && proteinOnTarget;
-  };
+  const nutritionLogOnTarget = log => nutritionDayOnTarget(log, plan);
   const onPlanDays = weekLogs.filter(nutritionLogOnTarget).length;
 
   const streak = (() => {
