@@ -1605,6 +1605,7 @@ function MorningSection({ user }) {
     try { localStorage.setItem("track3d-weight-unit", unit); } catch { /* Unit preference is a convenience only. */ }
   };
   const [routineSavedNotice, setRoutineSavedNotice] = useState(false);
+  const [routineSaveError, setRoutineSaveError] = useState("");
   const setupSnapshotRef = useRef(null);
   const [checkinStep, setCheckinStep] = useState(0);
   const [checkinData, setCheckinData] = useState({});
@@ -1751,15 +1752,25 @@ function MorningSection({ user }) {
     setLoading(false);
   };
 
+  // Returns { ok, error }. Callers must not report "saved" unless ok is true.
   const saveRoutine = async (tasks, groups = dayGroups) => {
-    if (!user) return;
-    await supabase.from("morning_routines").upsert({
-      user_id: user.id,
-      wake_time: wakeTime,
-      tasks: tasks,
-      day_groups: groups,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: "user_id" });
+    if (!user) return { ok: false, error: "not signed in" };
+    try {
+      const { error } = await supabase.from("morning_routines").upsert({
+        user_id: user.id,
+        wake_time: wakeTime,
+        tasks: tasks,
+        day_groups: groups,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+      if (error) throw error;
+      setRoutineSaveError("");
+      return { ok: true };
+    } catch (error) {
+      const message = error?.message || "connection problem";
+      setRoutineSaveError(`Your routine could not be saved: ${message}. Please try again.`);
+      return { ok: false, error: message };
+    }
   };
 
   // Mini-save: while the Edit Routine or Alternating Days screen is open,
@@ -1768,7 +1779,7 @@ function MorningSection({ user }) {
   // mid-edit doesn't lose the changes.
   useEffect(() => {
     if (!user || !["editRoutine", "rotationSetup"].includes(view)) return;
-    saveRoutine(scheduledTasks, dayGroups).catch(() => {});
+    saveRoutine(scheduledTasks, dayGroups);
   }, [scheduledTasks, wakeTime, dayGroups, view, user]);
 
   const saveCheckin = async (data, score, { inProgress = false } = {}) => {
@@ -3122,6 +3133,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   if (view === "editRoutine") {
     return (
       <>
+      {routineSaveError && <div role="alert" style={{ margin: "0 0 14px", padding: "10px 12px", border: "1px solid rgba(255,45,120,.4)", background: "rgba(255,45,120,.07)", borderRadius: 6, color: "#FF8AAD", fontSize: 11, lineHeight: 1.5 }}>{routineSaveError}</div>}
       <MorningRoutineEditor
         wakeTime={wakeTime}
         setWakeTime={setWakeTime}
@@ -3132,8 +3144,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
         onCancel={() => setView("home")}
         onRebuild={() => setConfirmChangeRoutine(true)}
         onSave={async () => {
-          await saveRoutine(scheduledTasks);
+          const saved = await saveRoutine(scheduledTasks);
+          if (!saved.ok) return;
           setView("home");
+          setRoutineSavedNotice(true);
+          setTimeout(() => setRoutineSavedNotice(false), 4000);
         }}
       />
       {changeRoutineDialog}
@@ -3161,6 +3176,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
+          {routineSaveError && <div role="alert" style={{ margin: "0 0 14px", padding: "10px 12px", border: "1px solid rgba(255,45,120,.4)", background: "rgba(255,45,120,.07)", borderRadius: 6, color: "#FF8AAD", fontSize: 11, lineHeight: 1.5 }}>{routineSaveError}</div>}
           <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
             {["WAKE TIME", "TASKS", "REVIEW"].map((s, i) => (
               <div key={i} style={{
@@ -3625,7 +3641,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               onRemoveTask={taskId => setSelectedTasks(current => current.filter(task => (task.id || task.name) !== taskId))}
               onBack={() => setSetupStep(1)}
               onSave={async () => {
-                await saveRoutine(scheduledTasks);
+                const saved = await saveRoutine(scheduledTasks);
+                if (!saved.ok) { window.scrollTo({ top: 0, behavior: "smooth" }); return; }
                 setupSnapshotRef.current = null;
                 setIsSetup(true);
                 setView("home");
@@ -5204,6 +5221,7 @@ function Fitness({ user, isActive = true }) {
   const [importText, setImportText] = useState("");
   const [importResult, setImportResult] = useState(null); // interpreted plan awaiting review
   const [importError, setImportError] = useState("");
+  const [planSaveError, setPlanSaveError] = useState(""); // a plan change that did not save
   const [importFileNote, setImportFileNote] = useState("");
   const [importInterpreting, setImportInterpreting] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
@@ -5765,13 +5783,14 @@ function withPlanApproval(sessions, now = new Date()) {
       ...session,
       approval: { approved: true, approvedAt: now.toISOString(), reviewAfter: reviewDate.toISOString().slice(0, 10), commitmentWeeks: 8, cycleDays: 8 },
     } : session);
-    setSessions(updated);
-    setSplit(previous => ({ ...previous, sessions: updated }));
     // The first approval of any session in a split starts its 1-week review
     // clock; re-approving later (editing an existing, already-running plan)
     // doesn't reset it.
     const extra = !split?.programme_started_at ? { programme_started_at: now.toISOString(), week_reviewed_at: null } : {};
-    await saveSplit(updated, extra);
+    // saveSplit updates the screen only once the database confirms the save.
+    const saved = await saveSplit(updated, extra);
+    setPlanSaveError(saved.ok ? "" : `Approval not saved: ${saved.error}. Your plan has not changed.`);
+    return saved.ok;
   };
 
   const persistCompletionFeedback = async feedback => {
@@ -6544,15 +6563,12 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 // Saving is the approval: no second "review & approve" step.
                 const now = new Date();
                 const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions), now);
-                const programme = { sessions: approvedSessions, split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null };
-                // Upsert so an existing plan row is replaced rather than duplicated.
-                const { error } = await supabase.from("workout_splits").upsert({ user_id: user.id, ...programme }, { onConflict: "user_id" });
-                if (error) throw error;
-                setSessions(approvedSessions);
-                setSplit({ ...programme });
+                // saveSplit reads the row back and only updates the screen once it matches.
+                const saved = await saveSplit(approvedSessions, { split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null });
+                if (!saved.ok) throw new Error(saved.error);
                 setView("home");
-              } catch {
-                setAiPlanError("Your programme could not be saved. Please try again.");
+              } catch (error) {
+                setAiPlanError(`Your programme could not be saved: ${error?.message || "connection problem"}. Please try again.`);
               } finally { setAiPlanSaving(false); }
             }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE PLAN"}</button>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiPlanSaving} onClick={() => setView("home")}>CANCEL</button>
@@ -7345,9 +7361,15 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const moveScheduledWorkout = async (sessionName, sourceDay, targetDay) => {
     const updated = moveWorkoutDay(sessions, sessionName, sourceDay, targetDay);
     if (updated === sessions) return;
-    setSessions(updated);
-    setSplit(previous => ({ ...(previous || {}), sessions: updated }));
-    await saveSplit(updated);
+    const previousSessions = sessions;
+    setSessions(updated); // show the move straight away, undo it if the save fails
+    const saved = await saveSplit(updated);
+    if (!saved.ok) {
+      setSessions(previousSessions);
+      setPlanSaveError(`${sessionName} was not moved: ${saved.error}. Your plan has not changed.`);
+    } else {
+      setPlanSaveError("");
+    }
   };
 
   const finishWorkoutDayDrag = async (targetDay) => {
@@ -7518,7 +7540,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const startWeekReview = async () => {
     const sessionsSince = history.filter(log => programmeStartedAt && new Date(log.created_at) >= programmeStartedAt).length;
     setWeekReviewPrompt(`It's been a week since I started this programme (${sessions.map(s => s.name).join(", ") || "current split"}). I've logged ${sessionsSince} session${sessionsSince === 1 ? "" : "s"} since then. Talk me through how the week's gone - adherence, progression, anything that felt off - and suggest any worthwhile changes.`);
-    await saveSplit(sessions, { week_reviewed_at: new Date().toISOString() });
+    const saved = await saveSplit(sessions, { week_reviewed_at: new Date().toISOString() });
+    if (!saved.ok) setPlanSaveError(`The week review could not be recorded: ${saved.error}. You may be asked again.`);
   };
 
   return (
@@ -7699,6 +7722,12 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
           {discardWorkoutDialog}
           {planChangeDialog}
+          {planSaveError && !editDaysModal && approvalReview === null && (
+            <div role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 16, padding: "10px 12px", border: "1px solid rgba(255,45,120,.4)", background: "rgba(255,45,120,.07)", borderRadius: 6, color: "#FF8AAD", fontSize: 11, lineHeight: 1.5 }}>
+              <span>{planSaveError}</span>
+              <button type="button" aria-label="Dismiss" onClick={() => setPlanSaveError("")} style={{ background: "none", border: 0, color: "#FF8AAD", cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
+            </div>
+          )}
           {planPreview && <PlanPreviewSheet {...planPreview} onClose={() => setPlanPreview(null)} />}
 
           {planCoachCard}
@@ -7808,9 +7837,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   <input className="t3d-ai-input" placeholder="Ask why, question a day, or suggest a change..." value={approvalQuestion} onChange={event => setApprovalQuestion(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askApprovalCoach(); } }} />
                   <button className="t3d-btn t3d-btn-sm" onClick={askApprovalCoach} disabled={approvalLoading || !approvalQuestion.trim()}>{approvalLoading ? "ASKING..." : "ASK"}</button>
                 </div>
+                {planSaveError && <p role="alert" style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "12px 0 0" }}>{planSaveError}</p>}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalReview(null); setEditDaysModal(true); }}>ADJUST PLAN FIRST</button>
-                  <button className="t3d-btn" style={{ flex: 1, borderColor: NEON, background: "rgba(0,255,178,.12)" }} onClick={async () => { await approveProgramme(approvalReview === "all" ? null : approvalReview); setApprovalReview(null); }}>APPROVE {approvalReview === "all" ? "FULL 8-WEEK SPLIT" : "THIS SESSION"}</button>
+                  <button className="t3d-btn" style={{ flex: 1, borderColor: NEON, background: "rgba(0,255,178,.12)" }} onClick={async () => { if (await approveProgramme(approvalReview === "all" ? null : approvalReview)) setApprovalReview(null); }}>APPROVE {approvalReview === "all" ? "FULL 8-WEEK SPLIT" : "THIS SESSION"}</button>
                 </div>
               </div>
             </div>
@@ -7887,11 +7917,13 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={cancelSessionEdits}>CANCEL</button>
                   <button className="t3d-btn" style={{ flex: 1 }} onClick={async () => {
-                    await saveSplit(sessions);
-                    setSplit(prev => ({ ...prev, sessions }));
+                    const saved = await saveSplit(sessions);
+                    if (!saved.ok) { setPlanSaveError(`Your changes were not saved: ${saved.error}. Please try again.`); return; }
+                    setPlanSaveError("");
                     setEditDaysModal(false);
                   }}>SAVE ✓</button>
                 </div>
+                {planSaveError && <p role="alert" style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "10px 0 0" }}>{planSaveError}</p>}
               </div>
             </div>
           )}
