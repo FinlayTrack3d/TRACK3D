@@ -51,8 +51,8 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
       if (url.pathname === '/api/chat') {
         const body = req.postData() || '';
         chatBodies.push(body);
-        if (body.includes('weekly recap')) return route.fulfill({ json: { content: [{ text: JSON.stringify({ biggest_win: 'You hit a Bench Press PB at 82.5kg.', focus: 'Log nutrition on at least five days.', verdict: 'Solid, consistent week. Keep the habit streak going.' }) }] } });
-        if (body.includes('convert a training programme')) return route.fulfill({ json: { content: [{ text: 'Here you go:\n' + JSON.stringify({
+        if (body.includes('"area":"weekly_summary"')) return route.fulfill({ json: { content: [{ text: JSON.stringify({ biggest_win: 'You hit a Bench Press PB at 82.5kg.', focus: 'Log nutrition on at least five days.', verdict: 'Solid, consistent week. Keep the habit streak going.' }) }] } });
+        if (body.includes('"area":"plan_import"')) return route.fulfill({ json: { content: [{ text: 'Here you go:\n' + JSON.stringify({
           plan_name: 'Coach Sam block 1', notes: 'Add a rep each week before adding weight.',
           sessions: [
             { name: 'Push A', days: ['Monday'], notes: null, exercises: [{ name: 'Incline Dumbbell Press', sets: 3, reps: '8-10', rest_seconds: 120, tempo: null, notes: null }, { name: 'Machine Chest Press', sets: 3, reps: '10', rest_seconds: null, tempo: null, notes: null }, { name: 'Cable Fly', sets: null, reps: '12-15', rest_seconds: null, tempo: null, notes: 'Squeeze at the top' }] },
@@ -80,6 +80,10 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
     }
     let rows = table === 'workout_splits' ? (split ? [split] : []) : (tables[table] || []);
     if (table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true') rows = [];
+    // PostgREST or=(in_progress.eq.false,date.lt.X): finished, or from an earlier day.
+    const orFilter = url.searchParams.get('or');
+    const earlierDay = orFilter && /in_progress\.eq\.false,date\.lt\.(\d{4}-\d{2}-\d{2})/.exec(orFilter);
+    if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();
@@ -95,7 +99,7 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
       await card.getByRole('button', { name: 'OPEN WEEKLY REPORT →' }).click();
       await page.getByText('Nothing was tracked this week').waitFor();
       assert.equal(await page.getByText('GENERATE WEEKLY REPORT').count(), 0);
-      assert.equal(chatBodies.filter(b => b.includes('weekly recap')).length, 0, 'no AI call without data');
+      assert.equal(chatBodies.filter(b => b.includes('"area":"weekly_summary"')).length, 0, 'no AI call without data');
       console.log('new user: empty state shown, no AI call');
     } else {
       await card.getByText('2/2').waitFor();
@@ -114,7 +118,7 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
       const coach = page.getByTestId('recap-coach');
       await coach.getByText('You hit a Bench Press PB at 82.5kg.').waitFor({ timeout: 10000 });
       await coach.getByText('FOCUS FOR NEXT WEEK').waitFor();
-      const facts = chatBodies.find(b => b.includes('weekly recap'));
+      const facts = chatBodies.find(b => b.includes('"area":"weekly_summary"'));
       assert(facts.includes('Workouts completed: 2 of 2 planned'), 'AI given real facts');
       const saved = writes.find(w => w.table === 'weekly_reports');
       assert(saved, 'summary saved');
