@@ -1,5 +1,6 @@
 // Browser checks for the AI coach review (sections F-J). Scenarios:
 //  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve, coachstyle, setuplevel,
+//  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
 //  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || '/opt/node-tools/node_modules/playwright');
@@ -18,12 +19,15 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   }, { user, token });
   const today = londonKey();
   const yesterday = shiftKey(today, -1);
+  const bornYearsAgo = years => `${Number(today.slice(0, 4)) - years}-01-01`;
   const meals = [{ name: 'Breakfast', calories: 600, protein: 40, carbs: 60, fats: 20 }, { name: 'Lunch', calories: 700, protein: 45, carbs: 80, fats: 20 }, { name: 'Dinner', calories: 800, protein: 50, carbs: 90, fats: 25 }, ...(scenario === 'reviewskip' ? [{ name: 'Snack', calories: 250, protein: 20, carbs: 20, fats: 8 }] : [])];
   const tables = {
     nutrition_plans: scenario === 'nutritionai' ? [] : [{ user_id: user.id, daily_calories: 2100, protein_target: 135, carbs_target: 230, fats_target: 65, meals, rest_day_meals: [], meal_library: [], weekly_meal_plan: {},
       goal: scenario === 'nutritionlegacy' ? 'Cut (lose fat)' : ['nutritionedit', 'nutritionnocolumn'].includes(scenario) ? 'Lose fat' : 'maintain',
       ...(['nutritionedit', 'nutritionnocolumn'].includes(scenario) ? { setup: { mode: 'guided', weight: 82, height: 180, age: 34, sex: 'Male', activityLevel: 'Lightly active', goal: 'Lose fat', mealsPerDay: 3, wakeTime: '06:15', answers: { allergies: 'peanuts', diet_type: 'No restrictions' } } } : {}) }],
     ...(scenario === 'nutritionlegacy' ? { morning_checkins: [{ date: yesterday, score: 7, data: { weight: '79.5' } }] } : {}),
+    user_profiles: scenario === 'profileprefill' ? [{ user_id: user.id, height_cm: '175.0', date_of_birth: bornYearsAgo(40), sex: 'prefer_not_to_say' }]
+      : ['profilepartial', 'profiletodo', 'profiletodofail'].includes(scenario) ? [{ user_id: user.id, height_cm: scenario === 'profilepartial' ? '182.0' : '170.0', date_of_birth: null, sex: null }] : [],
     ...(scenario === 'nutritionai' ? { morning_routines: [{ user_id: user.id, wake_time: '05:30', tasks: [] }] } : {}),
     nutrition_logs: [
       { id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null },
@@ -85,6 +89,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     if (req.method() !== 'GET') {
       writes.push({ table, method: req.method(), body: req.postData(), url: req.url() });
       if (table === 'weekly_reports' && scenario === 'weeklysavefail') return route.fulfill({ status: 404, json: { code: 'PGRST205', message: "Could not find the table 'public.weekly_reports' in the schema cache" } });
+      if (table === 'user_profiles' && scenario === 'profiletodofail') return route.fulfill({ status: 404, json: { code: 'PGRST205', message: "Could not find the table 'public.user_profiles' in the schema cache" } });
       if (table === 'nutrition_plans' && scenario === 'nutritionnocolumn' && /"setup"/.test(req.postData() || '')) return route.fulfill({ status: 400, json: { code: 'PGRST204', message: "Could not find the 'setup' column of 'nutrition_plans' in the schema cache" } });
       return route.fulfill({ status: 201, json: single ? {} : [] });
     }
@@ -108,9 +113,71 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: /NUTRITION$/ }).last().click();
   };
   const planWrite = () => { const w = writes.filter(w => w.table === 'nutrition_plans' && w.method !== 'GET' && JSON.parse(w.body).daily_calories).at(-1); return w && JSON.parse(w.body); };
-  if (scenario === 'nutritionnocolumn') {
+  if (scenario === 'profiletodo' || scenario === 'profiletodofail') {
+    const todo = page.getByTestId('profile-todo');
+    await todo.getByText('Complete your profile').waitFor();
+    await todo.getByRole('button', { name: 'START →' }).click();
+    const form = page.getByTestId('profile-form');
+    assert.equal(await form.getByLabel('Height (cm)').inputValue(), '170', 'what the profile has is filled in');
+    const save = form.getByRole('button', { name: 'SAVE PROFILE' });
+    assert.equal(await save.isDisabled(), true);
+    await form.getByLabel('Date of birth').fill(bornYearsAgo(29));
+    await form.getByRole('button', { name: 'PREFER NOT TO SAY' }).click();
+    await form.getByText(/average of the male and female results/).waitFor();
+    if (process.env.SHOT) { await page.waitForTimeout(600); await page.screenshot({ path: 'prof-todo.png' }); }
+    await save.click();
+    if (scenario === 'profiletodofail') {
+      await form.getByText(/the database needs the latest update/).waitFor();
+      assert.equal(await page.getByTestId('profile-form').count(), 1, 'form stays open');
+    } else {
+      await page.getByTestId('profile-form').waitFor({ state: 'detached' });
+      const body = JSON.parse(writes.filter(w => w.table === 'user_profiles').at(-1).body);
+      assert.equal(body.user_id, user.id);
+      assert.equal(body.height_cm, 170);
+      assert.equal(body.date_of_birth, bornYearsAgo(29));
+      assert.equal(body.sex, 'prefer_not_to_say');
+      assert.match(writes.filter(w => w.table === 'user_profiles').at(-1).url, /on_conflict=user_id/);
+      await todo.getByText('(done)').waitFor({ state: 'attached' });
+    }
+  } else if (scenario === 'profileprefill' || scenario === 'profilepartial') {
     await openNutrition();
     await page.getByRole('button', { name: 'EDIT PLAN' }).click();
+    await page.getByRole('button', { name: /STEP-BY-STEP SETUP/ }).click();
+    await page.getByLabel('WEIGHT (kg)').fill('70');
+    const summary = page.getByTestId('profile-summary');
+    if (scenario === 'profileprefill') {
+      assert.equal((await summary.textContent()).replace(/\s+/g, ' ').trim(), `From your profile: 175 cm · born 1 Jan ${bornYearsAgo(40).slice(0, 4)} (age 40) · Prefer not to say – edit`);
+      assert.equal(await page.getByLabel('HEIGHT (cm)').count(), 0, 'not asked again');
+      assert.equal(await page.getByLabel('DATE OF BIRTH').count(), 0);
+      assert.equal(await page.getByRole('button', { name: 'PREFER NOT TO SAY' }).count(), 0);
+      await page.getByTestId('sex-average-note').waitFor();
+      if (process.env.SHOT) await page.screenshot({ path: 'prof-prefill.png', fullPage: true });
+      await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).click();
+      await page.getByText(/Based on 70 kg, 175 cm, age 40, sex not given \(average of male and female\)/).waitFor();
+      await page.waitForTimeout(300);
+      assert.equal(writes.filter(w => w.table === 'user_profiles').length, 0, 'nothing changed, nothing saved');
+      await page.getByRole('button', { name: '← BACK' }).click();
+      await summary.getByRole('button', { name: 'edit' }).click();
+      assert.equal(await page.getByLabel('HEIGHT (cm)').inputValue(), '175');
+      assert.equal(await page.getByLabel('DATE OF BIRTH').inputValue(), bornYearsAgo(40));
+      assert.equal(await page.getByRole('button', { name: 'PREFER NOT TO SAY' }).count(), 1);
+    } else {
+      assert.equal((await summary.textContent()).replace(/\s+/g, ' ').trim(), 'From your profile: 182 cm – edit');
+      assert.equal(await page.getByLabel('HEIGHT (cm)').count(), 0);
+      await page.getByLabel('DATE OF BIRTH').fill(bornYearsAgo(25));
+      await page.getByRole('button', { name: 'MALE', exact: true }).click();
+      await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).click();
+      await page.getByText(/Based on 70 kg, 182 cm, age 25, male/).waitFor();
+      await page.waitForTimeout(300);
+      const body = JSON.parse(writes.filter(w => w.table === 'user_profiles').at(-1).body);
+      assert.equal(body.height_cm, undefined, 'height unchanged, not re-sent');
+      assert.equal(body.date_of_birth, bornYearsAgo(25));
+      assert.equal(body.sex, 'male');
+    }
+  } else if (scenario === 'nutritionnocolumn') {
+    await openNutrition();
+    await page.getByRole('button', { name: 'EDIT PLAN' }).click();
+    await page.getByLabel('DATE OF BIRTH').fill(bornYearsAgo(34));
     await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).click();
     await page.getByRole('button', { name: 'NEXT: BUILD MEALS →' }).click();
     await page.getByRole('button', { name: 'REVIEW →' }).click();
@@ -125,10 +192,16 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await openNutrition();
     await page.getByRole('button', { name: 'EDIT PLAN' }).click();
     assert.equal(await page.getByLabel('WEIGHT (kg)').inputValue(), '82');
-    assert.equal(await page.getByLabel('HEIGHT (cm)').inputValue(), '180');
-    assert.equal(await page.getByLabel('AGE').inputValue(), '34');
+    assert.equal(await page.getByLabel('HEIGHT (cm)').inputValue(), '180', 'height from the last setup');
+    // The old setup stored an age, not a date of birth, so only that is asked.
+    assert.equal(await page.getByLabel('DATE OF BIRTH').inputValue(), '');
+    assert.equal(await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).isDisabled(), true);
+    await page.getByLabel('DATE OF BIRTH').fill(bornYearsAgo(34));
     await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).click();
-    await page.getByText(/Based on 82 kg, 180 cm, age 34 · Lose fat · Lightly active/).waitFor();
+    await page.getByText(/Based on 82 kg, 180 cm, age 34, male · Lose fat · Lightly active/).waitFor();
+    // What was entered is saved back to the profile.
+    const profileSave = writes.filter(w => w.table === 'user_profiles').map(w => JSON.parse(w.body)).at(-1);
+    assert.deepEqual({ ...profileSave, updated_at: undefined }, { user_id: user.id, height_cm: 180, date_of_birth: bornYearsAgo(34), sex: 'male', updated_at: undefined });
     await page.getByRole('button', { name: 'NEXT: BUILD MEALS →' }).click();
     assert.equal(await page.getByLabel('Wake-up time').inputValue(), '06:15');
     assert.equal(await page.getByLabel('Allergies or intolerances').inputValue(), 'peanuts');
@@ -150,21 +223,21 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByText('Weight from your last morning check-in.').waitFor();
     assert.equal(await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).isDisabled(), true, 'needs height, age, sex');
     await page.getByLabel('HEIGHT (cm)').fill('175');
-    await page.getByLabel('AGE').fill('40');
+    await page.getByLabel('DATE OF BIRTH').fill(bornYearsAgo(40));
     await page.getByRole('button', { name: 'FEMALE' }).click();
     if (process.env.SHOT) await page.screenshot({ path: 'nut-goals.png', fullPage: true });
     const activity = await page.getByTestId('activity-option').first().textContent();
     assert.match(activity, /Desk job/, 'activity levels are described');
     assert.match(activity, /≈ [\d,]+ kcal/, 'each level shows its calories');
     await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).click();
-    await page.getByText(/Based on 79.5 kg, 175 cm, age 40 · Lose fat/).waitFor();
+    await page.getByText(/Based on 79.5 kg, 175 cm, age 40, female · Lose fat/).waitFor();
   } else if (scenario === 'nutritionai') {
     await openNutrition();
     await page.getByRole('button', { name: 'SET UP MY NUTRITION' }).click();
     await page.getByRole('button', { name: /STEP-BY-STEP SETUP/ }).click();
     await page.getByLabel('WEIGHT (kg)').fill('80');
     await page.getByLabel('HEIGHT (cm)').fill('180');
-    await page.getByLabel('AGE').fill('30');
+    await page.getByLabel('DATE OF BIRTH').fill(bornYearsAgo(30));
     await page.getByRole('button', { name: 'MALE', exact: true }).click();
     await page.getByRole('button', { name: /^LEAN BULK/ }).click();
     await page.getByRole('button', { name: '3', exact: true }).click();

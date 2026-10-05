@@ -17,6 +17,7 @@ import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/wor
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
+import { PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
 import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel } from "../lib/nutrition-setup";
 import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, unloggedFoodFromLog, mealPlanTargetCheck, nextReviewStep, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
@@ -4915,6 +4916,61 @@ function WeeklyRecap({ user, onBack }) {
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
+
+// ─── Profile form (dashboard "Complete your profile" to-do) ──────────────────
+// Height, date of birth and sex in one short form. Date of birth is saved
+// rather than age, so age stays right. Only what is filled in is saved.
+function ProfileForm({ user, profile, today, onSaved, onCancel }) {
+  const [heightCm, setHeightCm] = useState(profile?.heightCm ? String(profile.heightCm) : "");
+  const [dateOfBirth, setDateOfBirth] = useState(profile?.dateOfBirth || "");
+  const [sex, setSex] = useState(sexLabel(profile?.sex));
+  const [status, setStatus] = useState("");
+  const [saving, setSaving] = useState(false);
+  const problem = profileProblem({ heightCm, dateOfBirth, sex }, today);
+  const touched = Boolean(heightCm || dateOfBirth || sex);
+  const save = async () => {
+    if (problem || saving) return;
+    setSaving(true);
+    setStatus("");
+    const values = profileUpdate({ heightCm, dateOfBirth, sex });
+    const { error } = await supabase.from("user_profiles").upsert({ user_id: user.id, ...values, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    setSaving(false);
+    if (error) {
+      console.error("Profile save error:", error.message);
+      setStatus(profileSaveError(error));
+      return;
+    }
+    onSaved(normaliseProfile(values));
+  };
+  return (
+    <div data-testid="profile-form" style={{ padding: "12px 0 4px" }}>
+      <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>Used to work out your calorie targets. Only you can see it.</div>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)", gap: 8, marginBottom: 10 }}>
+        <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>HEIGHT (cm)
+          <input className="t3d-input" type="number" inputMode="decimal" aria-label="Height (cm)" placeholder="e.g. 178" value={heightCm} onChange={event => setHeightCm(event.target.value)} style={{ marginTop: 5 }} />
+        </label>
+        <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>DATE OF BIRTH
+          <input className="t3d-input" type="date" aria-label="Date of birth" min="1900-01-01" max={today} value={dateOfBirth} onChange={event => setDateOfBirth(event.target.value)} style={{ marginTop: 5 }} />
+        </label>
+      </div>
+      <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>SEX</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+        {PROFILE_SEX.map(option => (
+          <button key={option.id} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={sex === option.label} onClick={() => setSex(option.label)}
+            style={{ flex: 1, fontSize: 9, whiteSpace: "normal", background: sex === option.label ? "rgba(0,255,178,.12)" : "transparent", borderColor: sex === option.label ? NEON : BORDER, color: sex === option.label ? NEON : "#8AABB8" }}>{option.label.toUpperCase()}</button>
+        ))}
+      </div>
+      {sex === "Prefer not to say" && <div style={{ fontSize: 10, color: "#8AABB8", marginBottom: 6 }}>{PREFER_NOT_TO_SAY_NOTE}</div>}
+      {touched && problem && <div style={{ fontSize: 10, color: "#FFB547", margin: "6px 0" }}>{problem}</div>}
+      {status && <div role="alert" style={{ fontSize: 10, color: "#FFB547", margin: "6px 0" }}>{status}</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={onCancel}>CANCEL</button>
+        <button className="t3d-btn" style={{ flex: 1, padding: 10 }} disabled={Boolean(problem) || saving} onClick={save}>{saving ? "SAVING..." : "SAVE PROFILE"}</button>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ habits, setHabits, user, onNavigate }) {
   const done = habits.filter(h => h.done).length;
   const [eodDone, setEodDone] = useState(false);
@@ -4929,6 +4985,14 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
   const homeTimeZone = resolveHomeTimeZone(user);
   const homeDate = getZonedDateInfo(new Date(), homeTimeZone);
   const today = homeDate.dateKey;
+  // Height, date of birth and sex for the "Complete your profile" to-do.
+  const [profile, setProfile] = useState(null);
+  const [profileFormOpen, setProfileFormOpen] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    supabase.from("user_profiles").select("height_cm,date_of_birth,sex").eq("user_id", user.id).maybeSingle()
+      .then(({ data }) => setProfile(normaliseProfile(data)));
+  }, [user]);
 
   // Load today's Top Goals, then mini-save any add/edit/tick as it happens.
   useEffect(() => {
@@ -5037,23 +5101,29 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
   if (view === "weekly") return <WeeklyRecap user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   const firstRunSteps = [
+    { label: "Complete your profile", done: isProfileComplete(profile), profile: true },
     { label: "Set up your morning", done: todayData.hasRoutine, section: "morning" },
     { label: "Build your training plan", done: todayData.hasPlan, section: "fitness" },
     { label: "Set your calorie target", done: Boolean(calorieGoal), section: "nutrition" },
   ];
   return (
     <div className="t3d-fade">
-      {todayData.loaded && firstRunSteps.some(step => !step.done) && (
+      {todayData.loaded && profile && firstRunSteps.some(step => !step.done) && (
         <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
           <div className="t3d-ctitle">GET STARTED</div>
           <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {firstRunSteps.map((step, index) => (
-              <li key={step.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: index < firstRunSteps.length - 1 ? `1px solid ${BORDER}` : "none" }}>
+              <li key={step.label} data-testid={step.profile ? "profile-todo" : undefined} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, padding: "8px 0", borderBottom: index < firstRunSteps.length - 1 ? `1px solid ${BORDER}` : "none" }}>
                 <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, border: `1px solid ${step.done ? NEON : "#31434F"}`, color: step.done ? "#06100D" : "#8AABB8", background: step.done ? NEON : "transparent" }}>{step.done ? "✓" : index + 1}</span>
                 <span style={{ flex: 1, fontSize: 12, color: step.done ? "#6F8792" : "#E0EAF0", textDecoration: step.done ? "line-through" : "none" }}>
                   {step.label}{step.done ? <span className="t3d-sr-only"> (done)</span> : null}
                 </span>
-                {!step.done && <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={() => onNavigate(step.section)}>START →</button>}
+                {!step.done && !(step.profile && profileFormOpen) && <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={() => (step.profile ? setProfileFormOpen(true) : onNavigate(step.section))}>START →</button>}
+                {step.profile && profileFormOpen && !step.done && (
+                  <div style={{ flexBasis: "100%" }}>
+                    <ProfileForm user={user} profile={profile} today={today} onCancel={() => setProfileFormOpen(false)} onSaved={saved => { setProfile(current => ({ ...current, ...Object.fromEntries(Object.entries(saved).filter(([, value]) => value)) })); setProfileFormOpen(false); }} />
+                  </div>
+                )}
               </li>
             ))}
           </ol>
@@ -8415,7 +8485,12 @@ function Nutrition({ user, userSessions }) {
   const [goal, setGoal] = useState("Maintain");
   const [activityLevel, setActivityLevel] = useState("Moderately active");
   const [height, setHeight] = useState("");
-  const [age, setAge] = useState("");
+  const [dateOfBirth, setDateOfBirth] = useState("");
+  // The user's profile (height, date of birth, sex) fills in the setup; what
+  // is entered there is saved back to it.
+  const [profile, setProfile] = useState(null);
+  const [editProfileFields, setEditProfileFields] = useState(false);
+  const [profileSaveNote, setProfileSaveNote] = useState("");
   const [sex, setSex] = useState("");
   const [wakeTime, setWakeTime] = useState("");
   const [routineWakeTime, setRoutineWakeTime] = useState("");
@@ -8493,10 +8568,12 @@ function Nutrition({ user, userSessions }) {
         setWeeklyMealPlan(planData.weekly_meal_plan || {});
       }
       // Wake-up time for meal times, and the last weigh-in to start the weight field.
-      const [{ data: routineRow }, { data: weighIns }] = await Promise.all([
+      const [{ data: routineRow }, { data: weighIns }, { data: profileRow }] = await Promise.all([
         supabase.from("morning_routines").select("wake_time").eq("user_id", user.id).maybeSingle(),
         supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(14),
+        supabase.from("user_profiles").select("height_cm,date_of_birth,sex").eq("user_id", user.id).maybeSingle(),
       ]);
+      setProfile(normaliseProfile(profileRow));
       setRoutineWakeTime(routineRow?.wake_time || "");
       const weighed = (weighIns || []).find(row => Number(row.data?.weight) > 0);
       setLatestWeight(weighed ? String(weighed.data.weight) : "");
@@ -8531,7 +8608,7 @@ function Nutrition({ user, userSessions }) {
       mode: setupMode,
       weight: Number(bodyWeight) || null,
       height: Number(height) || null,
-      age: Number(age) || null,
+      dateOfBirth: dateOfBirth || null,
       sex: sex || null,
       activityLevel,
       goal,
@@ -8585,9 +8662,12 @@ function Nutrition({ user, userSessions }) {
     setSetupMode(plan ? saved.mode || null : null);
     setUseCustomTargets(saved.mode === "custom");
     setBodyWeight(String(saved.weight || latestWeight || ""));
-    setHeight(String(saved.height || ""));
-    setAge(String(saved.age || ""));
-    setSex(saved.sex || "");
+    // Profile first, then what this setup saved last time.
+    setHeight(String(profile?.heightCm || saved.height || ""));
+    setDateOfBirth(profile?.dateOfBirth || saved.dateOfBirth || "");
+    setSex(sexLabel(profile?.sex) || saved.sex || "");
+    setEditProfileFields(false);
+    setProfileSaveNote("");
     setGoal(normaliseNutritionGoal(saved.goal || plan?.goal) || "Maintain");
     setActivityLevel(ACTIVITY_LEVELS.some(level => level.id === saved.activityLevel) ? saved.activityLevel : suggestActivityLevel(trainingDaysCount));
     setAiNutritionAnswers(saved.answers || {});
@@ -8986,7 +9066,33 @@ function Nutrition({ user, userSessions }) {
     const allergyList = parseAllergies(aiNutritionAnswers.allergies);
     const currentConflicts = mealAllergyConflicts(currentMeals, allergyList);
     const reviewConflicts = mealAllergyConflicts([...preparedPlanMeals, ...preparedRestDayMeals], allergyList);
+    const age = ageFromDateOfBirth(dateOfBirth, today);
     const stats = { weight: bodyWeight, height, age, sex, activityLevel, goal };
+    // Fields the profile already holds are shown as one line with EDIT;
+    // only missing ones are asked for.
+    const fromProfile = {
+      height: !editProfileFields && Boolean(profile?.heightCm) && String(profile.heightCm) === String(height),
+      dateOfBirth: !editProfileFields && Boolean(profile?.dateOfBirth) && profile.dateOfBirth === dateOfBirth,
+      sex: !editProfileFields && Boolean(profile?.sex) && sexLabel(profile.sex) === sex,
+    };
+    const profileSummary = [
+      fromProfile.height && `${height} cm`,
+      fromProfile.dateOfBirth && `born ${formatDateOfBirth(dateOfBirth)} (age ${age})`,
+      fromProfile.sex && sex,
+    ].filter(Boolean).join(" · ");
+    const sexText = sex === "Prefer not to say" ? "sex not given (average of male and female)" : sex.toLowerCase();
+    const saveProfileFromSetup = async () => {
+      const changes = profileChanges(profile || {}, { heightCm: height, dateOfBirth, sex });
+      if (!Object.keys(changes).length) return;
+      const { error } = await supabase.from("user_profiles").upsert({ user_id: user.id, ...changes, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+      if (error) {
+        console.error("Profile save error:", error.message);
+        setProfileSaveNote(`${profileSaveError(error)} These details are still used for this plan.`);
+        return;
+      }
+      setProfile(current => ({ ...current, ...normaliseProfile({ height_cm: height, date_of_birth: dateOfBirth, sex: changes.sex || current?.sex }) }));
+      setProfileSaveNote("");
+    };
     const statsProblem = setupStatsProblem(stats);
     const wakeSlots = mealTimeSlots(wakeTime, mealsPerDay);
     const changeWakeTime = value => {
@@ -9028,22 +9134,33 @@ function Nutrition({ user, userSessions }) {
             <div>
               <div className="t3d-ctitle">YOUR GOALS & STATS</div>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setSetupMode(null)}>← CHANGE SETUP METHOD</button>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8, marginBottom: 6 }}>
-                {[["WEIGHT (kg)", bodyWeight, setBodyWeight, "e.g. 80"], ["HEIGHT (cm)", height, setHeight, "e.g. 178"], ["AGE", age, setAge, "e.g. 30"]].map(([label, value, setter, placeholder]) => (
-                  <label key={label} style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>{label}
-                    <input className="t3d-input" type="number" inputMode="decimal" aria-label={label} placeholder={placeholder} value={value} onChange={e => setter(e.target.value)} style={{ marginTop: 5 }} />
-                  </label>
-                ))}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))", gap: 8, marginBottom: 6 }}>
+                <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>WEIGHT (kg)
+                  <input className="t3d-input" type="number" inputMode="decimal" aria-label="WEIGHT (kg)" placeholder="e.g. 80" value={bodyWeight} onChange={e => setBodyWeight(e.target.value)} style={{ marginTop: 5 }} />
+                </label>
+                {!fromProfile.height && <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>HEIGHT (cm)
+                  <input className="t3d-input" type="number" inputMode="decimal" aria-label="HEIGHT (cm)" placeholder="e.g. 178" value={height} onChange={e => setHeight(e.target.value)} style={{ marginTop: 5 }} />
+                </label>}
+                {!fromProfile.dateOfBirth && <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, gridColumn: "span 2" }}>DATE OF BIRTH
+                  <input className="t3d-input" type="date" aria-label="DATE OF BIRTH" min="1900-01-01" max={today} value={dateOfBirth} onChange={e => setDateOfBirth(e.target.value)} style={{ marginTop: 5 }} />
+                </label>}
               </div>
               {latestWeight && String(bodyWeight) === latestWeight && !plan?.setup?.weight && <div style={{ fontSize: 9, color: "#8AABB8", marginBottom: 8 }}>Weight from your last morning check-in.</div>}
-              <div style={{ margin: "10px 0 14px" }}>
+              {profileSummary && (
+                <div data-testid="profile-summary" style={{ fontSize: 9, color: "#8AABB8", margin: "4px 0 8px", lineHeight: 1.6 }}>
+                  From your profile: {profileSummary} –{" "}
+                  <button type="button" onClick={() => setEditProfileFields(true)} style={{ background: "none", border: "none", padding: 0, color: NEON, fontSize: 9, textDecoration: "underline", cursor: "pointer" }}>edit</button>
+                </div>
+              )}
+              {!fromProfile.sex && <div style={{ margin: "10px 0 14px" }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>SEX <span style={{ color: "#8AABB8", letterSpacing: 0 }}>· used in the calorie sum</span></div>
                 <div style={{ display: "flex", gap: 6 }}>
                   {SEX_OPTIONS.map(option => (
                     <button key={option} type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, fontSize: 9, whiteSpace: "normal", ...optionStyle(sex === option) }} onClick={() => setSex(option)}>{option.toUpperCase()}</button>
                   ))}
                 </div>
-              </div>
+              </div>}
+              {sex === "Prefer not to say" && <div data-testid="sex-average-note" style={{ fontSize: 10, color: "#8AABB8", margin: "-6px 0 14px", lineHeight: 1.5 }}>{PREFER_NOT_TO_SAY_NOTE}</div>}
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>GOAL</div>
                 {NUTRITION_GOALS.map(option => (
@@ -9078,7 +9195,7 @@ function Nutrition({ user, userSessions }) {
               </div>
               {statsProblem && (bodyWeight || height || age) && <div data-testid="stats-problem" style={{ fontSize: 10, color: "#FFB547", marginBottom: 8 }}>{statsProblem}</div>}
               <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={Boolean(statsProblem)}
-                onClick={() => { setCalculatedMacros(calculateNutritionTargets(stats)); setUseCustomTargets(false); setSetupStep(1); }}>
+                onClick={() => { setCalculatedMacros(calculateNutritionTargets(stats)); setUseCustomTargets(false); setSetupStep(1); saveProfileFromSetup(); }}>
                 CALCULATE MY TARGETS →
               </button>
             </div>
@@ -9139,7 +9256,8 @@ function Nutrition({ user, userSessions }) {
                     ))}
                   </div>
                 )}
-                {setupMode === "guided" && calculatedMacros.tdee && <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 8, lineHeight: 1.5 }}>Based on {bodyWeight} kg, {height} cm, age {age} · {goal} · {activityLevel}. Maintenance ≈ {calculatedMacros.tdee.toLocaleString()} kcal{calculatedMacros.adjustment ? `, ${calculatedMacros.adjustment > 0 ? "+" : "−"}${Math.abs(calculatedMacros.adjustment)} kcal for your goal` : ""}. A starting point: adjust after 2–3 weeks of weigh-ins.</div>}
+                {setupMode === "guided" && calculatedMacros.tdee && <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 8, lineHeight: 1.5 }}>Based on {bodyWeight} kg, {height} cm, age {age}, {sexText} · {goal} · {activityLevel}. Maintenance ≈ {calculatedMacros.tdee.toLocaleString()} kcal{calculatedMacros.adjustment ? `, ${calculatedMacros.adjustment > 0 ? "+" : "−"}${Math.abs(calculatedMacros.adjustment)} kcal for your goal` : ""}. A starting point: adjust after 2–3 weeks of weigh-ins.</div>}
+                {setupMode === "guided" && profileSaveNote && <div role="alert" style={{ fontSize: 9, color: "#FFB547", marginTop: 6 }}>{profileSaveNote}</div>}
               </div>
 
               <div style={{ marginBottom: 16 }}>
