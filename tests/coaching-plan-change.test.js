@@ -11,12 +11,12 @@ const plan = [{
   ],
 }];
 
-test("targeted prescription changes preserve the exercise and invalidate plan approval", () => {
+test("targeted prescription changes preserve the exercise and keep the approved plan", () => {
   const updated = applyPlanChangeProposal(plan, [{ kind: "update_prescription", sessionName: "Push", exerciseName: "Bench Press", sets: 4, reps: "6-8" }]);
   assert.equal(updated[0].exercises[0].name, "Bench Press");
   assert.equal(updated[0].exercises[0].sets, 4);
   assert.deepEqual(updated[0].exercises[0].reps, ["6-8", "6-8", "6-8", "6-8"]);
-  assert.equal(updated[0].approval, null);
+  assert.deepEqual(updated[0].approval, { approved: true });
   assert.equal(plan[0].exercises[0].sets, 3);
 });
 
@@ -37,5 +37,14 @@ test("the coach can move a session without rebuilding its exercises", () => {
   const updated = applyPlanChangeProposal(plan, [{ kind: "update_session_days", sessionName: "Push", days: ["TUE", "SAT"], reason: "Availability changed" }]);
   assert.deepEqual(updated[0].days, ["TUE", "SAT"]);
   assert.deepEqual(updated[0].exercises, plan[0].exercises);
-  assert.equal(updated[0].approval, null);
+  assert.deepEqual(updated[0].approval, { approved: true });
+});
+
+test("plan change requests are recognised so they go through approve-and-save", async () => {
+  const { isPlanChangeRequest } = await import("../lib/coaching/plan-change.js");
+  assert.equal(isPlanChangeRequest("Change one exercise from 4 sets to 3"), true);
+  assert.equal(isPlanChangeRequest("Can I swap an exercise?"), true);
+  assert.equal(isPlanChangeRequest("Move Pull A to Thursday"), true);
+  assert.equal(isPlanChangeRequest("What should I train today?"), false);
+  assert.equal(isPlanChangeRequest("How should I progress this week?"), false);
 });

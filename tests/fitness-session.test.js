@@ -58,3 +58,9 @@ test("coach workout summaries list every set against its target and group by ses
   assert.doesNotMatch(pullASection, /Pull B/);
   assert.equal(recentWorkoutsForCoach([]), "No completed workouts yet.");
 });
+
+test("saved plans are compared without depending on jsonb key order", async () => {
+  const { sameJson } = await import("../lib/fitness-session.js");
+  assert.equal(sameJson([{ name: "Push", days: ["MON"], exercises: [{ sets: 3, name: "Bench" }] }], [{ exercises: [{ name: "Bench", sets: 3 }], days: ["MON"], name: "Push", note: undefined }]), true);
+  assert.equal(sameJson([{ name: "Push", days: ["MON"] }], [{ name: "Push", days: ["TUE"] }]), false);
+});

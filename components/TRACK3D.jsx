@@ -7,9 +7,11 @@ import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
-import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
+import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
+import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
+import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
+import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
@@ -179,7 +181,9 @@ const css = `
   .t3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #00FFB2; box-shadow: 0 0 8px #00FFB2; animation: t3dpulse 2s infinite; }
   @keyframes t3dpulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   @keyframes t3dfade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
-  .t3d-fade { animation: t3dfade .35s ease forwards; }
+  /* No "forwards" fill: a held transform makes fixed popups position against
+     the section instead of the screen, so they opened off-screen when scrolled. */
+  .t3d-fade { animation: t3dfade .35s ease; }
   .t3d-grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid12 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; margin-bottom: 16px; }
@@ -235,10 +239,12 @@ const css = `
   .t3d-ai-tag { font-family: 'Orbitron', monospace; font-size: 8px; letter-spacing: 2px; margin-bottom: 5px; }
   .t3d-ai-input { flex: 1; background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 12px; outline: none; transition: border-color .18s; }
   .t3d-ai-input:focus { border-color: rgba(0,255,178,.35); }
+  /* iOS zooms into inputs under 16px; keep coach inputs at 16px on phones. */
+  @media (max-width: 768px) { .t3d-ai-input { font-size: 16px; } }
   .t3d-ai-input::placeholder { color: #607784; }
   .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
   .t3d-compact-coach .t3d-ai-msg { padding: 8px 10px; margin-bottom: 6px; line-height: 1.6; font-size: 12px; }
-  .t3d-rough-checkin { max-height: calc(100dvh - 145px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: 8px; }
+  .t3d-rough-checkin { padding-bottom: 8px; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
   .t3d-input { background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 13px; line-height: 1.4; outline: none; transition: border-color .18s; width: 100%; }
@@ -250,7 +256,8 @@ const css = `
   .t3d-tick-btn:hover { background: rgba(0,255,178,.2); transform: scale(1.05); }
   .t3d-cross-btn { background: rgba(255,45,120,.1); border: 2px solid #FF2D78; color: #FF2D78; padding: 16px 32px; font-family: 'Orbitron', monospace; font-size: 20px; border-radius: 8px; cursor: pointer; transition: all .2s; margin: 8px; }
   .t3d-cross-btn:hover { background: rgba(255,45,120,.2); transform: scale(1.05); }
-  .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; font-size: 10px; letter-spacing: 1px; cursor: pointer; border: 1px solid #1A2530; background: #111921; color: #4A6070; margin: 4px; transition: all .18s; }
+  .t3d-task-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 8px 14px; border-radius: 20px; font-family: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer; border: 1px solid #31434F; background: #111921; color: #C5D6DC; margin: 4px; transition: all .18s; }
+  .t3d-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .t3d-task-chip.selected { border-color: #00FFB2; background: rgba(0,255,178,.08); color: #00FFB2; }
   .t3d-task-chip:hover { border-color: #E0EAF0; color: #8AABB8; }
   .t3d-progress-dots { display: flex; gap: 6px; justify-content: center; margin-bottom: 24px; }
@@ -260,11 +267,90 @@ const css = `
 `;
 
 // ─── Score Ring ───────────────────────────────────────────────────────────────
-function ScoreRing({ score, size = 108 }) {
+// Decorative task icon with a trailing space; "▸" (stored on older custom
+// tasks) looked tappable, so it is not shown.
+const taskIcon = task => task?.icon && task.icon !== "▸" ? `${task.icon} ` : "";
+
+// Check-in data keys that are flags or timing, not tasks.
+const HIDDEN_CHECKIN_KEYS = new Set(["wakeTiming", "routineTiming", "inProgress", "roughCheckin", "routineSkipped", "skipReason", "recordedAt", "loggedAfter", "checkin", "photos"]);
+
+// Thumbnails for a check-in's stored progress photos (placeholders such as
+// "skipped" or "deferred" are not files).
+function CheckinPhotoThumbs({ photos }) {
+  const paths = Object.entries(photos || {}).filter(([, value]) => typeof value === "string" && value.includes("/"));
+  const pathKey = paths.map(([, path]) => path).join("|");
+  const [urls, setUrls] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    paths.forEach(([angle, path]) => {
+      supabase.storage.from("checkin-photos").createSignedUrl(path, 3600)
+        .then(({ data }) => { if (!cancelled && data?.signedUrl) setUrls(current => ({ ...current, [angle]: data.signedUrl })); })
+        .catch(() => {});
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathKey]);
+  if (!paths.length) return <div style={{ fontSize: 10, color: "#6F8792" }}>No progress photos saved for this day.</div>;
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      {paths.map(([angle]) => (
+        <figure key={angle} style={{ margin: 0, textAlign: "center" }}>
+          {urls[angle]
+            ? <img src={urls[angle]} alt={`${angle} progress photo`} style={{ width: 72, height: 90, objectFit: "cover", borderRadius: 6, border: `1px solid ${BORDER}` }} />
+            : <div style={{ width: 72, height: 90, borderRadius: 6, border: `1px solid ${BORDER}`, background: SURFACE2 }} />}
+          <figcaption style={{ fontSize: 8, color: "#8AABB8", marginTop: 3 }}>{angle.toUpperCase()}</figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
+// Weight is stored in kg; stone and pounds are converted on entry.
+const KG_PER_LB = 0.45359237;
+function WeightEntry({ kgValue, onKgChange, unit, onUnitChange }) {
+  const totalLb = Number(kgValue) > 0 ? Number(kgValue) / KG_PER_LB : 0;
+  const [stone, setStone] = useState(totalLb ? String(Math.floor(totalLb / 14)) : "");
+  const [pounds, setPounds] = useState(totalLb ? String(Math.round((totalLb % 14) * 10) / 10) : "");
+  const updateImperial = (nextStone, nextPounds) => {
+    setStone(nextStone);
+    setPounds(nextPounds);
+    const lb = (Number(nextStone) || 0) * 14 + (Number(nextPounds) || 0);
+    onKgChange(lb > 0 ? String(Math.round(lb * KG_PER_LB * 10) / 10) : "");
+  };
+  const unitButton = (value, label) => (
+    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={unit === value} onClick={() => onUnitChange(value)}
+      style={{ flex: 1, minHeight: 40, borderColor: unit === value ? NEON : BORDER, color: unit === value ? NEON : "#8AABB8" }}>{label}</button>
+  );
+  return (
+    <div style={{ width: "100%" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>{unitButton("kg", "KG")}{unitButton("st", "STONE & LB")}</div>
+      {unit === "st" ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input className="t3d-input" type="number" inputMode="numeric" aria-label="Stone" placeholder="st" value={stone}
+            onChange={e => updateImperial(e.target.value, pounds)} style={{ textAlign: "center", fontSize: 22, padding: 14 }} />
+          <span style={{ color: "#E0EAF0", fontSize: 13 }}>st</span>
+          <input className="t3d-input" type="number" inputMode="decimal" aria-label="Pounds" placeholder="lb" value={pounds}
+            onChange={e => updateImperial(stone, e.target.value)} style={{ textAlign: "center", fontSize: 22, padding: 14 }} />
+          <span style={{ color: "#E0EAF0", fontSize: 13 }}>lb</span>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input className="t3d-input" type="number" inputMode="decimal" aria-label="Weight in kg" placeholder="Enter kg..." value={kgValue}
+            onChange={e => onKgChange(e.target.value)} style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
+          <span style={{ color: "#E0EAF0", fontSize: 14 }}>kg</span>
+        </div>
+      )}
+      {unit === "st" && kgValue && <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 6, textAlign: "center" }}>Saved as {kgValue} kg</div>}
+    </div>
+  );
+}
+
+function ScoreRing({ score, size = 108, max = 100 }) {
   const r = size / 2 - 10;
   const circ = 2 * Math.PI * r;
-  const offset = circ * (1 - score / 100);
-  const color = score >= 70 ? NEON : score >= 40 ? "#FF8C00" : NEON3;
+  const fraction = max ? score / max : 0;
+  const offset = circ * (1 - fraction);
+  const color = fraction >= 0.7 ? NEON : fraction >= 0.4 ? "#FF8C00" : NEON3;
   return (
     <div style={{ position: "relative", width: size, height: size, margin: "0 auto" }}>
       <svg width={size} height={size} style={{ transform: "rotate(-90deg)", display: "block" }}>
@@ -276,7 +362,7 @@ function ScoreRing({ score, size = 108 }) {
       </svg>
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 26, fontWeight: 700, lineHeight: 1, color }}>{score}</div>
-        <div style={{ fontSize: 9, letterSpacing: 1, color: "#8AABB8", marginTop: 5 }}>OUT OF 100</div>
+        <div style={{ fontSize: 9, letterSpacing: 1, color: "#8AABB8", marginTop: 5 }}>OUT OF {max}</div>
       </div>
     </div>
   );
@@ -329,6 +415,8 @@ ${dayContext || "- Nothing logged yet today"}`;
 
   const send = async (msg, { hidden = false } = {}) => {
     if (!msg.trim() || loading) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     setLoading(true);
     const updated = [...messages, { role: "user", content: msg, ...(hidden ? { hidden: true } : {}) }];
     setMessages(updated);
@@ -381,9 +469,27 @@ ${dayContext || "- Nothing logged yet today"}`;
     if (user) await supabase.from("coach_profiles").upsert({ user_id: user.id, personality: nextPersonality, updated_at: new Date().toISOString() });
   };
 
+  // Apply a coach change and report only what the app confirms happened.
+  const runAction = async (action, permanent) => {
+    let result;
+    try { result = await onAction(action, permanent); } catch (error) { result = { ok: false, message: `Not saved: ${error?.message || "something went wrong"}.` }; }
+    setMessages(previous => [...previous, { role: "assistant", content: result?.message || (result?.ok ? "Done." : "Nothing was changed.") }]);
+    setTimeout(scroll, 50);
+  };
+
   const decideStructuredAction = async (action, decision) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
+    // Apply (and for permanent changes, save) first; only mark the action
+    // applied once that has succeeded.
+    if (decision !== "reject") {
+      const result = await onStructuredAction?.(action);
+      if (result && !result.ok) {
+        setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
+        return;
+      }
+      if (result?.message) setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
+    }
     const response = await fetch("/api/coach-action", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
@@ -391,7 +497,6 @@ ${dayContext || "- Nothing logged yet today"}`;
     });
     if (!response.ok) return;
     setActions(current => current.map(item => item.id === action.id ? { ...item, status: decision === "reject" ? "rejected" : "applied" } : item));
-    if (decision !== "reject") onStructuredAction?.(action);
   };
 
   // A caller (e.g. the 1-week review banner) can hand this coach a message to
@@ -432,13 +537,17 @@ ${dayContext || "- Nothing logged yet today"}`;
               // Bigger, structured changes (a whole session/programme rewrite) travel as
               // JSON in a fenced block rather than the pipe-delimited marker above, which
               // can't safely hold arbitrary JSON (it contains "|" and "]" characters).
-              const jsonActionMatch = m.role === "assistant" ? m.content.match(/\[ACTION_JSON:(replace_session)\]([\s\S]*?)\[\/ACTION_JSON\]/i) : null;
-              let jsonActionPayload = null;
-              if (jsonActionMatch) { try { jsonActionPayload = JSON.parse(jsonActionMatch[2]); } catch { jsonActionPayload = null; } }
-              const visibleContent = cleanAiText(m.content
+              // Accept the block even when the closing tag is missing or the JSON is in a code fence.
+              const jsonActionMatch = m.role === "assistant" ? m.content.match(/\[ACTION_JSON:(replace_session)\]([\s\S]*?)(?:\[\/ACTION_JSON\]|\[MEMORY\]|$)/i) : null;
+              const jsonActionPayload = jsonActionMatch ? extractJsonObject(jsonActionMatch[2]) : null;
+              const strippedContent = m.content
                 .replace(/\[ACTION:[^\]]+\]/gi, "")
-                .replace(/\[ACTION_JSON:[^\]]+\][\s\S]*?\[\/ACTION_JSON\]/gi, "")
-                .replace(/\[MEMORY\][\s\S]*?\[\/MEMORY\]/gi, ""));
+                .replace(/\[ACTION_JSON:[^\]]+\][\s\S]*?(?:\[\/ACTION_JSON\]|(?=\[MEMORY\])|$)/gi, "")
+                .replace(/\[MEMORY\][\s\S]*?(?:\[\/MEMORY\]|$)/gi, "");
+              // Raw JSON is never shown in the chat; say plainly when a change could not be read.
+              const hadRawJson = /```json[\s\S]*?```/i.test(strippedContent) || (Boolean(jsonActionMatch) && !Array.isArray(jsonActionPayload?.exercises));
+              const visibleContent = cleanAiText(strippedContent.replace(/```json[\s\S]*?(?:```|$)/gi, "").trim())
+                + (hadRawJson && m.role === "assistant" ? "\n\n(The coach sent a change the app could not read, so nothing was changed. Ask again if you want it.)" : "");
               return (
               <div key={i} className="t3d-ai-msg" style={{
                 background: m.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2,
@@ -451,19 +560,19 @@ ${dayContext || "- Nothing logged yet today"}`;
                 {actionMatch && onAction && (
                   <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
                     {actionMatch[1] === "log_set" ? (
-                      <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false); setMessages(previous => [...previous, { role: "assistant", content: "Set logged." }]); }}>LOG THIS SET</button>
+                      <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false)}>LOG THIS SET</button>
                     ) : (
                       <>
-                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout only." }]); }}>THIS WORKOUT</button>
-                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, true); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout and future sessions." }]); }}>MAKE PERMANENT</button>
+                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false)}>THIS WORKOUT</button>
+                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, true)}>MAKE PERMANENT</button>
                       </>
                     )}
                   </div>
                 )}
-                {jsonActionPayload && onAction && (
+                {Array.isArray(jsonActionPayload?.exercises) && onAction && (
                   <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
-                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, false); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout only." }]); }}>THIS WORKOUT</button>
-                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, true); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout and future sessions." }]); }}>MAKE PERMANENT</button>
+                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, false)}>THIS WORKOUT</button>
+                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, true)}>MAKE PERMANENT</button>
                   </div>
                 )}
               </div>
@@ -504,6 +613,9 @@ ${dayContext || "- Nothing logged yet today"}`;
     </div>
   );
 }
+
+// Task durations are whole minutes between 1 and 180.
+const clampTaskMinutes = value => Math.min(180, Math.max(1, Math.round(Number(value)) || 1));
 
 // ─── Routine coach: describe the applied schedule ─────────────────────────────
 // After a coach change is applied and times are recalculated, ask the coach to
@@ -556,20 +668,38 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
   const draggable = scheduledTasks.filter(t => t.id !== "checkin");
   const locked = scheduledTasks.find(t => t.id === "checkin") || LOCKED_LAST;
 
-  const handleDragStart = (i) => setDragIdx(i);
-  const handleDragOver = (e, i) => {
-    e.preventDefault();
-    if (aiLoading || dragIdx === null || dragIdx === i) return;
+  const moveTask = (from, to) => {
+    if (aiLoading || from === to || to < 0 || to >= draggable.length) return;
     const newList = [...draggable];
-    const [moved] = newList.splice(dragIdx, 1);
-    newList.splice(i, 0, moved);
+    const [moved] = newList.splice(from, 1);
+    newList.splice(to, 0, moved);
     setScheduledTasks(recalcTimes([...newList, locked]));
-    setDragIdx(i);
   };
-  const handleDragEnd = () => setDragIdx(null);
+  // Pointer Events (same approach as the routine editor) so dragging works
+  // with touch as well as a mouse.
+  const handlePointerDown = (e, i) => {
+    if (aiLoading) return;
+    e.preventDefault();
+    setDragIdx(i);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const handlePointerMove = (e) => {
+    if (dragIdx === null) return;
+    e.preventDefault();
+    const rowEl = document.elementFromPoint(e.clientX, e.clientY)?.closest?.("[data-review-index]");
+    if (!rowEl) return;
+    const target = Number(rowEl.dataset.reviewIndex);
+    if (!Number.isNaN(target) && target !== dragIdx) {
+      moveTask(dragIdx, target);
+      setDragIdx(target);
+    }
+  };
+  const handlePointerUp = () => setDragIdx(null);
 
   const optimiseWithAI = async (feedback = "") => {
     if (aiRequestActive.current) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const message = feedback.trim() || "Optimise my routine now using what you know. Apply the best task order and briefly explain the main change. Do not wait for me to answer questions.";
     const updated = [...aiConversation, { role: "user", content: message, hidden: !feedback.trim() }];
     aiRequestActive.current = true;
@@ -652,21 +782,27 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
   };
   return (
     <div>
-      <div className="t3d-ctitle">DRAG TO REORDER YOUR ROUTINE</div>
+      <div className="t3d-ctitle">REVIEW AND REORDER YOUR ROUTINE</div>
       <div style={{ marginBottom: 12, fontSize: 10, color: "#E0EAF0", letterSpacing: 1 }}>
-        Hold and drag using the lines to reorder. Check-in is locked last.
+        Drag the ≡ handle or use the arrows to reorder. Check-in is locked last.
       </div>
       <div style={{ marginBottom: 8 }}>
         {draggable.map((t, i) => (
-          <div key={t.id || i} draggable={!aiLoading}
-            onDragStart={() => handleDragStart(i)}
-            onDragOver={(e) => handleDragOver(e, i)}
-            onDragEnd={handleDragEnd}
-            style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 10px", borderBottom: "1px solid #1A2530", cursor: "grab", borderRadius: 4, background: dragIdx === i ? "rgba(0,255,178,.04)" : "transparent" }}>
-            <div style={{ color: "#2A3A48", fontSize: 18, userSelect: "none" }}>≡</div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 45 }}>{t.scheduledTime}</div>
-            <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}</div>
-            <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
+          <div key={t.id || i} data-review-index={i}
+            style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px", borderBottom: "1px solid #1A2530", borderRadius: 4, background: dragIdx === i ? "rgba(0,255,178,.06)" : "transparent" }}>
+            <div aria-label={`Drag to move ${t.name}`}
+              onPointerDown={e => handlePointerDown(e, i)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              style={{ width: 40, minHeight: 44, display: "flex", alignItems: "center", justifyContent: "center", color: "#8AABB8", fontSize: 22, cursor: aiLoading ? "default" : "grab", touchAction: "none", userSelect: "none" }}>≡</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 42 }}>{t.scheduledTime}</div>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12, overflowWrap: "anywhere" }}>{t.name}</div>
+            <div style={{ fontSize: 10, color: "#E0EAF0", whiteSpace: "nowrap" }}>{t.duration} min</div>
+            <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Move ${t.name} up`} disabled={aiLoading || i === 0}
+              onClick={() => moveTask(i, i - 1)} style={{ minWidth: 40, minHeight: 40, padding: 4 }}>↑</button>
+            <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Move ${t.name} down`} disabled={aiLoading || i === draggable.length - 1}
+              onClick={() => moveTask(i, i + 1)} style={{ minWidth: 40, minHeight: 40, padding: 4 }}>↓</button>
           </div>
         ))}
       </div>
@@ -684,7 +820,7 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
       <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
         <div className="t3d-ai-tag" style={{ color: NEON }}>AI COACH</div>
         <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
-          Optimise now. Add feedback to make it fit your life.
+          The coach can reorder, retime or suggest removing tasks. Tell it what you need, or leave the box empty to let it optimise.
         </p>
         <div role="log" aria-label="Routine planning conversation" aria-live="polite"
           style={{ maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
@@ -716,20 +852,18 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
           Anything to adjust?
           <textarea className="t3d-input" rows={2} value={aiFeedback} disabled={aiLoading}
             style={{ marginTop: 8, resize: "vertical" }}
-            placeholder="e.g. I need breakfast before the school run."
+            placeholder="e.g. Fit it into 75 minutes, or I need breakfast before the school run."
             onChange={event => setAiFeedback(event.target.value)} />
         </label>
         {aiError && <p role="alert" style={{ fontSize: 11, color: NEON3 }}>{aiError}</p>}
-        <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} disabled={aiLoading || !aiFeedback.trim()}
-          onClick={() => optimiseWithAI(aiFeedback)}>SEND TO COACH</button>
-      </div>      <div style={{ display: "flex", gap: 8 }}>
-        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={onBack} disabled={aiLoading}>← TASKS</button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1.5, borderColor: "rgba(255,140,0,.4)", color: "#FF8C00", background: "rgba(255,140,0,.07)" }} onClick={() => optimiseWithAI(aiFeedback)} disabled={aiLoading}>
-          {aiLoading ? "THINKING..." : "✨ OPTIMISE WITH AI"}
-        </button>
-        <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave} disabled={aiLoading}>
+        <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10, minHeight: 40 }} disabled={aiLoading}
+          onClick={() => optimiseWithAI(aiFeedback)}>{aiLoading ? "THINKING..." : "ASK COACH"}</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <button className="t3d-btn" style={{ width: "100%", padding: 14, background: "rgba(0,255,178,.12)", borderColor: "rgba(0,255,178,.5)" }} onClick={onSave} disabled={aiLoading}>
           LOCK IT IN →
         </button>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ width: "100%", minHeight: 40 }} onClick={onBack} disabled={aiLoading}>← BACK TO TASKS</button>
       </div>
     </div>
   );
@@ -790,7 +924,7 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
               ...task,
               [field]:
                 field === "duration"
-                  ? value === "" ? "" : Number(value)
+                  ? value === "" ? "" : clampTaskMinutes(value)
                   : value
             }
           : task
@@ -855,9 +989,9 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
     const newTask = {
       id: `custom-${Date.now()}`,
       name: newTaskName.trim(),
-      duration: Number(newTaskDuration) || 10,
+      duration: clampTaskMinutes(newTaskDuration || 10),
       type: "tick",
-      icon: "▸"
+      icon: ""
     };
 
     const list = checkin
@@ -942,6 +1076,8 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
   // this lets the coach both restructure and retime the routine at once.
   const optimiseWithAI = async (feedback = "") => {
     if (aiRequestActive.current) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const message = feedback.trim() || "Look at my current routine and suggest a better order or timing. Explain the main change.";
     const updated = [...aiConversation, { role: "user", content: message, hidden: !feedback.trim() }];
     const editable = scheduledTasks.filter(t => t.id !== "checkin");
@@ -1095,23 +1231,6 @@ Current tasks: ${JSON.stringify(tasks)}.`,
           YOUR ROUTINE
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "24px 1fr 100px 80px 40px",
-            gap: 8,
-            alignItems: "center",
-            marginBottom: 6,
-            padding: "0 0 6px"
-          }}
-        >
-          <div />
-          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TASK</div>
-          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>TIME</div>
-          <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1 }}>MINUTES</div>
-          <div />
-        </div>
-
         <div style={{ marginBottom: 24 }}>
           {scheduledTasks.map((task, i) => {
             const locked = task.id === "checkin";
@@ -1122,7 +1241,7 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                 data-row-index={i}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "24px 1fr 100px 80px 40px",
+                  gridTemplateColumns: "32px 1fr 1fr 44px",
                   gap: 8,
                   alignItems: "center",
                   padding: "10px 0",
@@ -1136,10 +1255,16 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                   onPointerCancel={handlePointerUp}
+                  aria-label={locked ? undefined : `Drag to move ${task.name}`}
                   style={{
+                    gridRow: "1 / span 2",
                     cursor: locked ? "default" : "grab",
-                    color: "#4A6070",
-                    fontSize: 18,
+                    color: "#8AABB8",
+                    fontSize: 20,
+                    minHeight: 44,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                     touchAction: "none",
                     userSelect: "none"
                   }}
@@ -1147,70 +1272,60 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   {locked ? "🔒" : "≡"}
                 </div>
 
-                <div style={{ minWidth: 0 }}>
+                {/* Name gets its own full-width line so it is readable on a phone. */}
+                <div style={{ gridColumn: "2 / 4", minWidth: 0 }}>
                   <input
                     className="t3d-input"
+                    aria-label="Task name"
                     value={task.name}
                     disabled={locked}
                     onChange={e => updateTask(i, "name", e.target.value)}
-                    style={{ padding: "9px 10px" }}
+                    style={{ padding: "9px 10px", width: "100%" }}
                   />
-                  {!locked && task.routineDay && task.routineDay !== "daily" && (
+                  {!locked && dayGroups.length > 1 && task.routineDay && task.routineDay !== "daily" && (
                     <div style={{ fontSize: 8, color: "#8AABB8", marginTop: 4, letterSpacing: 1 }}>
                       {(dayGroups.find(g => g.id === task.routineDay)?.name || task.routineDay).toUpperCase()} ONLY
                     </div>
                   )}
                 </div>
 
-                <input
-                  type="time"
-                  className="t3d-input"
-                  value={task.scheduledTime || ""}
-                  onChange={e => updateTask(i, "scheduledTime", e.target.value)}
-                  style={{
-                    padding: "9px 6px",
-                    colorScheme: "dark"
-                  }}
-                />
-
-                <div style={{ position: "relative" }}>
-                  <input
-                    type="number"
-                    min="1"
-                    className="t3d-input"
-                    value={task.duration ?? ""}
-                    onChange={e => updateTask(i, "duration", e.target.value)}
-                    style={{
-                      padding: "9px 30px 9px 6px",
-                      textAlign: "center"
-                    }}
-                  />
-                  <span
-                    style={{
-                      position: "absolute",
-                      right: 8,
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      fontSize: 8,
-                      color: "#4A6070",
-                      pointerEvents: "none"
-                    }}
-                  >
-                    min
-                  </span>
-                </div>
-
                 {!locked ? (
                   <button
                     className="t3d-btn t3d-btn-sm t3d-btn-red"
+                    aria-label={`Remove ${task.name}`}
                     onClick={() => deleteTask(i)}
-                    style={{ padding: 8 }}
+                    style={{ minWidth: 44, minHeight: 44, padding: 8, gridRow: "1 / span 2", gridColumn: 4 }}
                   >
                     ×
                   </button>
                 ) : (
-                  <div />
+                  <div style={{ gridRow: "1 / span 2", gridColumn: 4 }} />
                 )}
+
+                <label style={{ gridColumn: 2, fontSize: 8, color: "#6F8792", letterSpacing: 1 }}>
+                  TIME
+                  <input
+                    type="time"
+                    className="t3d-input"
+                    value={task.scheduledTime || ""}
+                    onChange={e => updateTask(i, "scheduledTime", e.target.value)}
+                    style={{ padding: "9px 6px", colorScheme: "dark", marginTop: 3 }}
+                  />
+                </label>
+
+                <label style={{ gridColumn: 3, fontSize: 8, color: "#6F8792", letterSpacing: 1 }}>
+                  MINUTES
+                  <input
+                    type="number"
+                    min="1"
+                    max="180"
+                    inputMode="numeric"
+                    className="t3d-input"
+                    value={task.duration ?? ""}
+                    onChange={e => updateTask(i, "duration", e.target.value)}
+                    style={{ padding: "9px 6px", textAlign: "center", marginTop: 3 }}
+                  />
+                </label>
               </div>
             );
           })}
@@ -1241,6 +1356,8 @@ Current tasks: ${JSON.stringify(tasks)}.`,
               <input
                 type="number"
                 min="1"
+                max="180"
+                aria-label="Minutes"
                 className="t3d-input"
                 value={newTaskDuration}
                 onChange={e => setNewTaskDuration(e.target.value)}
@@ -1308,7 +1425,19 @@ Current tasks: ${JSON.stringify(tasks)}.`,
 // A dedicated, simpler screen for turning alternating days on/off, naming
 // each rotation day, and choosing which tasks run on which day - replacing
 // the per-task dropdown that used to be buried in Edit Routine.
-function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setScheduledTasks, onDone }) {
+function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setScheduledTasks, trainingDays = [], onDone }) {
+  const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+  const toggleWeekday = (groupId, day) => setDayGroups(groups => groups.map(group => {
+    if (group.id !== groupId) return { ...group, weekdays: (group.weekdays || []).filter(item => item !== day) };
+    const weekdays = group.weekdays || [];
+    return { ...group, weekdays: weekdays.includes(day) ? weekdays.filter(item => item !== day) : WEEKDAYS.filter(item => item === day || weekdays.includes(item)) };
+  }));
+  // First day follows the training plan's session days; the second takes the rest.
+  const matchTrainingPlan = () => setDayGroups(groups => groups.map((group, index) => (
+    index === 0 ? { ...group, weekdays: WEEKDAYS.filter(day => trainingDays.includes(day)) }
+      : index === 1 ? { ...group, weekdays: WEEKDAYS.filter(day => !trainingDays.includes(day)) }
+        : { ...group, weekdays: [] }
+  )));
   const enabled = dayGroups.length > 1;
   const editableTasks = scheduledTasks.filter(t => t.id !== "checkin");
 
@@ -1353,17 +1482,33 @@ function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setSched
             <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 10 }}>YOUR ROTATION</div>
             <div style={{ marginBottom: 20 }}>
               {dayGroups.map((group, index) => (
-                <div key={group.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <div style={{ fontSize: 9, color: "#4A6070", width: 16 }}>{index + 1}</div>
-                  <input className="t3d-input" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="e.g. Training Day" style={{ flex: 1 }} />
-                  {dayGroups.length > 2 && (
-                    <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => removeGroup(group.id)}>×</button>
-                  )}
+                <div key={group.id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div style={{ fontSize: 9, color: "#4A6070", width: 16 }}>{index + 1}</div>
+                    <input className="t3d-input" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="e.g. Training Day" style={{ flex: 1 }} />
+                    {dayGroups.length > 2 && (
+                      <button className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label={`Remove ${group.name}`} style={{ minWidth: 44, minHeight: 44 }} onClick={() => removeGroup(group.id)}>×</button>
+                    )}
+                  </div>
+                  <div role="group" aria-label={`Weekdays for ${group.name}`} style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 24 }}>
+                    {WEEKDAYS.map(day => {
+                      const selected = group.weekdays?.includes(day);
+                      return (
+                        <button key={day} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={Boolean(selected)} onClick={() => toggleWeekday(group.id, day)}
+                          style={{ minWidth: 40, minHeight: 40, padding: "4px 6px", borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" }}>{day}</button>
+                      );
+                    })}
+                  </div>
                 </div>
               ))}
+              {trainingDays.length > 0 && (
+                <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44, marginRight: 8 }} onClick={matchTrainingPlan}>
+                  MATCH MY TRAINING PLAN ({trainingDays.join(", ")})
+                </button>
+              )}
               <button className="t3d-btn t3d-btn-sm" onClick={addGroup}>+ ADD ANOTHER DAY</button>
               <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 10, lineHeight: 1.5 }}>
-                Your rotation repeats in this order, day after day (e.g. with 2 days: {dayGroups.map(g => g.name).join(", ")}, {dayGroups.map(g => g.name).join(", ")}, ...).
+                Pick weekdays to tie a day to them (for example your training days). Days with no weekdays picked rotate in order, day after day ({dayGroups.map(g => g.name).join(", ")}, ...).
               </div>
             </div>
 
@@ -1371,7 +1516,7 @@ function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setSched
             <div style={{ marginBottom: 24 }}>
               {editableTasks.map(task => (
                 <div key={task.id || task.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
-                  <div style={{ fontSize: 12, flex: 1, minWidth: 0 }}>{task.icon || "▸"} {task.name}</div>
+                  <div style={{ fontSize: 12, flex: 1, minWidth: 0 }}>{taskIcon(task)}{task.name}</div>
                   <select className="t3d-input" value={task.routineDay || "daily"} onChange={e => assignTask(task.id || task.name, e.target.value)} style={{ maxWidth: 170, fontSize: 10, padding: "6px 8px" }}>
                     <option value="daily">EVERY DAY</option>
                     {dayGroups.map(group => (
@@ -1420,6 +1565,8 @@ function MorningSection({ user }) {
   const today = useZonedDateKey(homeTimeZone);
   const previousTodayRef = useRef(today);
   const [view, setView] = useState("home");
+  // Each screen change starts at the top, not wherever the last screen was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [setupStep, setSetupStep] = useState(0);
   const [wakeTime, setWakeTime] = useState("06:00");
   const [selectedTasks, setSelectedTasks] = useState([]);
@@ -1428,7 +1575,25 @@ function MorningSection({ user }) {
   const [scheduledTasks, setScheduledTasks] = useState([]);
   const [setupReviewVisited, setSetupReviewVisited] = useState(false);
   const DEFAULT_DAY_GROUPS = [{ id: "A", name: "Day A" }, { id: "B", name: "Day B" }];
-  const [dayGroups, setDayGroups] = useState(DEFAULT_DAY_GROUPS);
+  // Empty means alternating days are off.
+  const [dayGroups, setDayGroups] = useState([]);
+  const [confirmChangeRoutine, setConfirmChangeRoutine] = useState(false);
+  const [editingDate, setEditingDate] = useState(null);
+  const [trainingDays, setTrainingDays] = useState([]);
+  const [openHistoryDate, setOpenHistoryDate] = useState(null);
+  const [pendingLiveStart, setPendingLiveStart] = useState(null);
+  // "end" | "delete" | { deleteDate } while a confirmation is open.
+  const [morningConfirm, setMorningConfirm] = useState(null);
+  const [morningActionError, setMorningActionError] = useState("");
+  const [weightUnit, setWeightUnit] = useState(() => {
+    try { return localStorage.getItem("track3d-weight-unit") === "st" ? "st" : "kg"; } catch { return "kg"; }
+  });
+  const chooseWeightUnit = unit => {
+    setWeightUnit(unit);
+    try { localStorage.setItem("track3d-weight-unit", unit); } catch { /* Unit preference is a convenience only. */ }
+  };
+  const [routineSavedNotice, setRoutineSavedNotice] = useState(false);
+  const setupSnapshotRef = useRef(null);
   const [checkinStep, setCheckinStep] = useState(0);
   const [checkinData, setCheckinData] = useState({});
   const [tempInput, setTempInput] = useState("");
@@ -1458,13 +1623,17 @@ function MorningSection({ user }) {
   const [liveStartedAt, setLiveStartedAt] = useState(null);
   const [liveInputActive, setLiveInputActive] = useState(false);
 
+  // Set once the complete screen has saved the morning; the draft is then
+  // cleared so the "active morning routine" banner goes away on its own.
+  const [finalisedDraft, setFinalisedDraft] = useState(null);
   const morningDraft = useMemo(() => (
-    ["liveMorning", "checkin", "wakeCheckin"].includes(view) ? {
+    ["liveMorning", "checkin", "wakeCheckin"].includes(view)
+      && !(view === "checkin" && finalisedDraft && checkinStep >= finalisedDraft.step && JSON.stringify(checkinData) === finalisedDraft.key) ? {
       view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
       liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive,
     } : null
   ), [view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
-    liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive]);
+    liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive, finalisedDraft]);
   useSessionDraft(user?.id, `morning-${today}`, morningDraft, draft => {
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(draft.view)) return;
     setCheckinStep(draft.checkinStep || 0);
@@ -1485,7 +1654,7 @@ function MorningSection({ user }) {
   const fileRef = useRef(null);
 
   const NON_NEGS = [
-    { id: "sleep", name: "Work out sleep duration", type: "sleep", icon: "😴", duration: 1 },
+    { id: "sleep", name: "Log last night's sleep", type: "sleep", icon: "😴", duration: 1 },
     { id: "weight", name: "Check body weight", type: "number", unit: "kg", icon: "⚖️", duration: 2 },
     { id: "photos", name: "Take progress photos", type: "photos3", icon: "📸", duration: 3 },
   ];
@@ -1530,10 +1699,15 @@ function MorningSection({ user }) {
 
       if (routineData) {
         setWakeTime(routineData.wake_time || "06:00");
-        setScheduledTasks(routineData.tasks || []);
-        setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : DEFAULT_DAY_GROUPS);
+        // Older routines stored the sleep step as "Work out sleep duration".
+        setScheduledTasks((routineData.tasks || []).map(task => task.id === "sleep" && task.name === "Work out sleep duration" ? { ...task, name: "Log last night's sleep" } : task));
+        setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : []);
         setIsSetup(true);
       }
+
+      // Training plan days, so alternating days can follow the plan.
+      const { data: planData } = await supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle();
+      setTrainingDays([...new Set((planData?.sessions || []).flatMap(session => session.days || []).map(day => String(day).toUpperCase()))]);
 
       // Load checkins
       const { data: checkinHistory } = await supabase
@@ -1598,7 +1772,7 @@ function MorningSection({ user }) {
     if (!user || loading || !checkinData || Object.keys(checkinData).length === 0) return;
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(view)) return;
     // The complete screen writes the final row itself; do not race it.
-    if (view === "checkin" && checkinStep >= allSteps.length) return;
+    if (view === "checkin" && checkinStep >= checkinDoneIndex) return;
     const todayRow = history.find(entry => entry.date === today);
     if (todayRow && !todayRow.data?.inProgress) return;
     saveCheckin(checkinData, morningScore(checkinData), { inProgress: true }).catch(() => {});
@@ -1642,7 +1816,7 @@ function MorningSection({ user }) {
               ...task,
               [field]:
                 field === "duration"
-                  ? value === "" ? "" : Number(value)
+                  ? value === "" ? "" : clampTaskMinutes(value)
                   : value
             }
           : task
@@ -1658,9 +1832,9 @@ function MorningSection({ user }) {
       {
         id: `custom-${Date.now()}`,
         name: customTask.trim(),
-        duration: Number(customTaskDuration) || 10,
+        duration: clampTaskMinutes(customTaskDuration || 10),
         type: "tick",
-        icon: "▸"
+        icon: ""
       }
     ]);
 
@@ -1738,16 +1912,37 @@ function MorningSection({ user }) {
       }));
 
     setSelectedTasks(existingHabits);
+    setupSnapshotRef.current = { scheduledTasks, wakeTime, returnView: view };
+    setConfirmChangeRoutine(false);
     setSetupStep(0);
     setView("setup");
   };
 
+  // Leave the setup wizard without changing the saved routine.
+  const cancelRoutineSetup = () => {
+    const snapshot = setupSnapshotRef.current;
+    if (snapshot) {
+      setScheduledTasks(snapshot.scheduledTasks);
+      setWakeTime(snapshot.wakeTime);
+    }
+    setupSnapshotRef.current = null;
+    setView(snapshot?.returnView === "editRoutine" ? "editRoutine" : "home");
+  };
+
   const rotationGroups = dayGroups.length >= 2 ? dayGroups : DEFAULT_DAY_GROUPS;
   const epochDay = Math.floor(Date.parse(`${today}T00:00:00Z`) / 86400000);
-  const rotationGroup = rotationGroups[((epochDay % rotationGroups.length) + rotationGroups.length) % rotationGroups.length];
-  const rotationDay = rotationGroup.id;
+  const todayDayCode = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][new Date(`${today}T12:00:00Z`).getUTCDay()];
+  // Days tied to weekdays win; days without weekdays rotate by date as before.
+  const weekdayGroup = rotationGroups.find(group => group.weekdays?.includes(todayDayCode));
+  const rotatingGroups = rotationGroups.filter(group => !group.weekdays?.length);
+  const rotationGroup = weekdayGroup
+    || (rotatingGroups.length ? rotatingGroups[((epochDay % rotatingGroups.length) + rotatingGroups.length) % rotatingGroups.length] : null);
+  const rotationDay = rotationGroup?.id || null;
   const dayGroupName = id => rotationGroups.find(g => g.id === id)?.name || `Day ${id}`;
-  const activeScheduledTasks = scheduledTasks.filter(task => !task.routineDay || task.routineDay === "daily" || task.routineDay === rotationDay || task.id === "checkin");
+  const alternatingOn = dayGroups.length >= 2;
+  const activeScheduledTasks = alternatingOn
+    ? scheduledTasks.filter(task => !task.routineDay || task.routineDay === "daily" || task.routineDay === rotationDay || task.id === "checkin")
+    : scheduledTasks;
   const allSteps = scheduledTasks.length > 0 ? activeScheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
 
   const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
@@ -1759,6 +1954,10 @@ function MorningSection({ user }) {
   });
 
   const currentStep = allSteps[checkinStep];
+  // The final "TRACK3D Morning Check-in" step is the check-in itself, so it is
+  // never asked: reaching it completes the check-in.
+  const lockedCheckinIndex = allSteps.findIndex(step => step.id === "checkin");
+  const checkinDoneIndex = lockedCheckinIndex >= 0 && lockedCheckinIndex === allSteps.length - 1 ? lockedCheckinIndex : allSteps.length;
 
   // Check-in answers are keyed by step id (custom tasks use "custom-<timestamp>"),
   // so always show and send the task's name instead of its key.
@@ -1789,15 +1988,16 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   // Finalise the check-in as soon as the complete screen is reached, so
   // leaving by any route (not just "Back to Morning") records it as done.
-  const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= allSteps.length;
+  const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= checkinDoneIndex;
   const finalisedCheckinRef = useRef(null);
   const finaliseCheckin = async () => {
+    const draftKey = { key: JSON.stringify(checkinData), step: checkinStep };
     const score = morningScore(checkinData);
     const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     setSavingCheckin(true);
     setSubmissionError("");
-    const finalData = { ...checkinData, routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
+    const finalData = { ...checkinData, ...(lockedCheckinIndex >= 0 ? { checkin: true } : {}), routineTiming: { plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes, completedAt: new Date().toISOString() } };
     if (finalData.photos) {
       const uploaded = {};
       for (const angle of PHOTO_ANGLES) {
@@ -1817,6 +2017,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     }
     setCompletedToday(true);
     setSkippedToday(false);
+    setFinalisedDraft(draftKey);
     setHistory(entries => [
       { ...(entries.find(entry => entry.date === today) || {}), user_id: user.id, date: today, score, data: finalData },
       ...entries.filter(entry => entry.date !== today),
@@ -1834,30 +2035,22 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     finaliseCheckin();
   }, [checkinComplete, checkinData, user, loading, savingCheckin, view]);
   const isRoughCheckin = view === "roughCheckin";
+  const isLogCheckin = view === "logCheckin";
 
-  const startNormalMorningCheckin = () => {
-    setShowMissedRoutineChoice(false);
-    setSkipMorningError("");
-    setCheckinStep(0);
-    setCheckinData({});
-    setTempInput("");
-    setPhotoAngleIdx(0);
-    setPhotoFiles({ front: null, side: null, back: null });
-    setPhotoPreviews({ front: null, side: null, back: null });
-    setLiveInputActive(false);
-    setLiveDeadline(null);
-    setView("wakeCheckin");
-  };
-
-  const startRoughMorningCheckin = () => {
+  // One scrolling form for logging a morning afterwards, a rough check-in,
+  // redoing without the timer, and editing today's or a past entry.
+  const openCheckinForm = (mode, { date = today, data = {} } = {}) => {
     setShowMissedRoutineChoice(false);
     setSkipMorningError("");
     setSubmissionError("");
-    setEditSubmissionData({});
+    setEditingDate(date);
+    setEditSubmissionData(data);
     setPhotoFiles({ front: null, side: null, back: null });
     setPhotoPreviews({ front: null, side: null, back: null });
-    setView("roughCheckin");
+    setView(mode === "rough" ? "roughCheckin" : mode === "edit" ? "editSubmission" : "logCheckin");
   };
+  const startNormalMorningCheckin = () => openCheckinForm("log");
+  const startRoughMorningCheckin = () => openCheckinForm("rough");
 
   const markMorningNotToday = async () => {
     if (savingSkippedMorning) return;
@@ -1934,13 +2127,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
       setTempInput("");
       setPhotoAngleIdx(0);
-      setPhotoFiles({ front: null, side: null, back: null });
-      setPhotoPreviews({ front: null, side: null, back: null });
       setView("checkin");
       return;
     }
 
     setLiveTaskIndex(nextIndex);
+    setTempInput("");
+    setPhotoAngleIdx(0);
     startLiveTimer(liveRoutineSteps[nextIndex]);
   };
 
@@ -2007,7 +2200,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       if (step.type === "number" && val && val !== "") points++;
       else if (step.type === "sleep" && val && val !== "") points++;
       else if (step.type === "photos3" && val && Object.values(val).some(v => v && v !== "skipped")) points++;
-      else if (step.type === "tick" && val === true) points++;
+      else if (step.type === "tick" && (val === true || step.id === "checkin")) points++;
     });
     return Math.round((points / total) * 10);
   };
@@ -2022,6 +2215,282 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const entry = history.find(h => h.date === dateStr && !h.data?.inProgress);
     return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
   });
+
+  // Inputs for sleep, number and photo steps. Shared by the check-in steps and
+  // the live morning task card so input steps are answered in one place.
+  const renderStepInputs = (step, onDone) => (
+    <>
+            {step.type === "number" && (
+        <form style={{ width: "100%", maxWidth: 280 }} onSubmit={event => {
+          event.preventDefault();
+          if (!tempInput) return;
+          setCheckinData(d => ({ ...d, [step.id]: tempInput }));
+          setTempInput("");
+          onDone();
+        }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+            {step.id === "weight" ? (
+              <WeightEntry kgValue={tempInput} onKgChange={setTempInput} unit={weightUnit} onUnitChange={chooseWeightUnit} />
+            ) : (
+              <>
+                <input className="t3d-input" type="number" inputMode="decimal" placeholder={`Enter ${step.unit}...`}
+                  value={tempInput} onChange={e => setTempInput(e.target.value)}
+                  style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
+                <span style={{ color: "#E0EAF0", fontSize: 14 }}>{step.unit}</span>
+              </>
+            )}
+          </div>
+          <button type="submit" className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}>
+            CONFIRM →
+          </button>
+          {step.id === "weight" && (
+            <button
+              type="button"
+              onClick={() => {
+                setCheckinData(d => ({ ...d, [step.id]: "" }));
+                setTempInput("");
+                onDone();
+              }}
+              style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
+            >
+              I&apos;M NOT SURE — SKIP
+            </button>
+          )}
+        </form>
+      )}
+
+      {step.type === "sleep" && (
+        <form style={{ width: "100%", maxWidth: 280 }} onSubmit={event => {
+          event.preventDefault();
+          if (!tempInput) return;
+          setCheckinData(d => ({ ...d, [step.id]: tempInput }));
+          setTempInput("");
+          onDone();
+        }}>
+          <input className="t3d-input" aria-label="Hours slept" placeholder="e.g. 7h 30m" value={tempInput} enterKeyHint="done"
+            onChange={e => setTempInput(e.target.value)}
+            style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
+          <button type="submit" className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}>
+            CONFIRM →
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCheckinData(d => ({ ...d, [step.id]: "" }));
+              setTempInput("");
+              onDone();
+            }}
+            style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
+          >
+            I&apos;M NOT SURE — SKIP
+          </button>
+        </form>
+      )}
+
+      {step.type === "photos3" && (() => {
+        const angle = PHOTO_ANGLES[photoAngleIdx];
+        const isLast = photoAngleIdx === PHOTO_ANGLES.length - 1;
+
+        const finishPhotos = (filesOverride) => {
+          const files = filesOverride || photoFiles;
+
+          setCheckinData(d => ({
+            ...d,
+            photos: {
+              front: files.front ? "captured" : "skipped",
+              side: files.side ? "captured" : "skipped",
+              back: files.back ? "captured" : "skipped",
+            },
+          }));
+
+          onDone();
+        };
+        return (
+          <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
+            <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 2, marginBottom: 12 }}>
+              PHOTO {photoAngleIdx + 1} OF 3 — {angle.toUpperCase()} ON
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+              onChange={e => {
+                const f = e.target.files[0];
+                if (!f) return;
+                setPhotoFiles(p => ({ ...p, [angle]: f }));
+                setPhotoPreviews(p => ({ ...p, [angle]: URL.createObjectURL(f) }));
+              }} />
+            {photoPreviews[angle] ? (
+              <div>
+                <img src={photoPreviews[angle]} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt={angle} />
+                <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
+                  onClick={() => isLast ? finishPhotos() : setPhotoAngleIdx(i => i + 1)}>
+                  {isLast ? "CONFIRM →" : "NEXT ANGLE →"}
+                </button>
+              </div>
+            ) : (
+              <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
+                📸 UPLOAD {angle.toUpperCase()} PHOTO
+              </button>
+            )}
+            <div style={{ fontSize: 10, color: "#E0EAF0", margin: "16px 0 6px", lineHeight: 1.5 }}>
+              You can skip photos or leave them until the final review.
+            </div>
+            <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 7 }}
+              onClick={() => {
+                setCheckinData(data => ({ ...data, photos: Object.fromEntries(PHOTO_ANGLES.map(item => [item, photoFiles[item] ? "captured" : "deferred"])) }));
+                onDone();
+              }}>
+              ADD PHOTOS AT THE END
+            </button>
+            <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", opacity: 0.6 }}
+              onClick={() => finishPhotos()}>
+              SKIP REMAINING PHOTOS
+            </button>
+          </div>
+        );
+      })()}
+
+    </>
+  );
+
+  // Starting the guided morning records the wake-up time, so check first when
+  // it is far from the planned wake-up (e.g. starting it late in the evening).
+  const confirmLiveStart = start => {
+    const [plannedH, plannedM] = wakeTime.split(":").map(Number);
+    const [nowH, nowM] = getZonedDateInfo(new Date(), homeTimeZone).time.split(":").map(Number);
+    const gap = Math.abs(((nowH * 60 + nowM) - (plannedH * 60 + plannedM) + 2160) % 1440 - 720);
+    if (gap > 180) setPendingLiveStart(() => start);
+    else start();
+  };
+  const liveStartDialog = pendingLiveStart ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+      <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="live-start-title" style={{ width: "100%", maxWidth: 360, borderColor: "#FFB547", textAlign: "center" }}>
+        <div id="live-start-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>START YOUR MORNING ROUTINE NOW?</div>
+        <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>
+          {(() => {
+            // One string: the compiler dropped the space after {time} when the text followed an expression.
+            const now = getZonedDateInfo(new Date(), homeTimeZone).time;
+            return `It is ${now} and your planned wake-up is ${wakeTime}. Starting now records ${now} as today's wake-up time. If you already did your morning, log it instead.`;
+          })()}
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button className="t3d-btn" style={{ minHeight: 44 }} onClick={() => { const start = pendingLiveStart; setPendingLiveStart(null); start(); }}>YES, START NOW</button>
+          <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => { setPendingLiveStart(null); startNormalMorningCheckin(); }}>LOG A MORNING I&apos;VE DONE</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 44 }} onClick={() => setPendingLiveStart(null)}>CANCEL</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  // Finish now with whatever has been answered; unanswered tasks count as not done.
+  const endMorningNow = () => {
+    if (view === "liveMorning") {
+      setLiveDeadline(null);
+      setCheckinData(previous => ({ ...previous, routineTiming: captureLiveRoutineTiming() }));
+    }
+    setReviewingMissed(false);
+    setLiveInputActive(false);
+    setTempInput("");
+    setCheckinStep(checkinDoneIndex);
+    setView("checkin");
+  };
+  const resetMorningSession = () => {
+    setCheckinData({});
+    setCheckinStep(0);
+    setTempInput("");
+    setPhotoAngleIdx(0);
+    setPhotoFiles({ front: null, side: null, back: null });
+    setPhotoPreviews({ front: null, side: null, back: null });
+    setLiveTaskIndex(0);
+    setLiveDeadline(null);
+    setLiveStartedAt(null);
+    setLiveInputActive(false);
+    setReviewingMissed(false);
+  };
+  // Discard the current session. Only an unfinished saved row is deleted; a
+  // finished morning (for example during "Do again") is left as it was.
+  const deleteMorningSession = async () => {
+    setMorningActionError("");
+    const todayRow = history.find(entry => entry.date === today);
+    if (todayRow?.data?.inProgress) {
+      const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", today);
+      if (error) { setMorningActionError(`Could not delete this session: ${error.message}`); return; }
+    }
+    resetMorningSession();
+    setMorningConfirm(null);
+    setView("home");
+    await loadData();
+  };
+  const deleteHistoryEntry = async date => {
+    setMorningActionError("");
+    const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", date);
+    if (error) { setMorningActionError(`Could not delete this day: ${error.message}`); return; }
+    setMorningConfirm(null);
+    setOpenHistoryDate(null);
+    if (date === today) resetMorningSession();
+    await loadData();
+  };
+  const morningConfirmDialog = morningConfirm ? (() => {
+    const deleteDate = morningConfirm.deleteDate;
+    const redoing = !deleteDate && history.some(entry => entry.date === today && !entry.data?.inProgress);
+    const title = morningConfirm === "end" ? "END MORNING NOW?" : deleteDate ? "DELETE THIS DAY?" : "DELETE THIS SESSION?";
+    const body = morningConfirm === "end"
+      ? "Your morning is saved with what you have done so far. Tasks you have not answered count as not done."
+      : deleteDate
+        ? "This permanently removes this day's check-in from your history."
+        : redoing
+          ? "This stops the redo. Your earlier check-in for today stays saved."
+          : "This removes today's unfinished morning. You can start again afterwards.";
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+        <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="morning-confirm-title" style={{ width: "100%", maxWidth: 360, borderColor: morningConfirm === "end" ? NEON : NEON3, textAlign: "center" }}>
+          <div id="morning-confirm-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: morningConfirm === "end" ? NEON : NEON3, letterSpacing: 2, marginBottom: 12 }}>{title}</div>
+          <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>{body}</p>
+          {morningActionError && <p role="alert" style={{ fontSize: 11, color: NEON3 }}>{morningActionError}</p>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => { setMorningConfirm(null); setMorningActionError(""); }}>CANCEL</button>
+            <button className={`t3d-btn t3d-btn-sm ${morningConfirm === "end" ? "" : "t3d-btn-red"}`} style={{ flex: 1, minHeight: 44 }}
+              onClick={() => morningConfirm === "end" ? (setMorningConfirm(null), endMorningNow()) : deleteDate ? deleteHistoryEntry(deleteDate) : deleteMorningSession()}>
+              {morningConfirm === "end" ? "END AND SAVE" : "DELETE"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  })() : null;
+  const sessionControls = (canGoBack, onBack) => (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} disabled={!canGoBack} onClick={onBack}>← BACK</button>
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setMorningConfirm("end")}>END MORNING</button>
+      </div>
+      <button type="button" onClick={() => setMorningConfirm("delete")}
+        style={{ display: "block", margin: "10px auto 0", background: "none", border: 0, color: NEON3, cursor: "pointer", fontSize: 10, minHeight: 32, textDecoration: "underline" }}>
+        Delete this session
+      </button>
+      {typeof morningConfirm === "string" && morningConfirmDialog}
+    </div>
+  );
+
+  const scoreExplanation = (
+    <details style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, margin: "8px auto", maxWidth: 430, textAlign: "left" }}>
+      <summary style={{ cursor: "pointer", minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>How is the score worked out?</summary>
+      Each task in your routine is worth an equal share of 10 points. A task counts when you tick it, log your sleep or weight, or add at least one progress photo. The check-in itself always counts. For example, with 10 tasks, skipping photos gives 9/10.
+    </details>
+  );
+
+  const changeRoutineDialog = confirmChangeRoutine ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+      <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="change-routine-title" style={{ width: "100%", maxWidth: 360, borderColor: NEON3, textAlign: "center" }}>
+        <div id="change-routine-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>START YOUR ROUTINE AGAIN?</div>
+        <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>
+          This rebuilds your routine from the wake-up step. Your current routine stays saved until you lock in the new one, and you can cancel at any step. To change a few tasks, use Edit Routine instead.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setConfirmChangeRoutine(false)}>KEEP CURRENT</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1, minHeight: 44 }} onClick={startRoutineSetup}>START AGAIN</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   if (loading) return (
     <div className="t3d-fade">
@@ -2065,9 +2534,14 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     );
   }
   // Correct a saved check-in or capture a lighter, all-at-once rough check-in.
-  if (view === "editSubmission" || isRoughCheckin) {
+  if (view === "editSubmission" || isRoughCheckin || isLogCheckin) {
+    const formDate = editingDate || today;
+    const isPastEntry = formDate !== today;
+    const formSteps = allSteps.filter(step => step.id !== "checkin");
+    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const toggleStyle = selected => ({ flex: 1, minHeight: 44, borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" });
     return (
-      <div className={`t3d-fade ${isRoughCheckin ? "t3d-rough-checkin" : ""}`}>
+      <div className={`t3d-fade ${isRoughCheckin || isLogCheckin ? "t3d-rough-checkin" : ""}`}>
         <form className="t3d-card" onSubmit={async event => {
           event.preventDefault();
           if (savingCheckin) return;
@@ -2077,22 +2551,27 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             const updatedData = {
               ...editSubmissionData,
               ...(isRoughCheckin ? { routineSkipped: false, roughCheckin: true } : {}),
+              ...(isLogCheckin ? { routineSkipped: false, loggedAfter: true } : {}),
+              ...(lockedCheckinIndex >= 0 ? { checkin: true } : {}),
             };
+            // Saving the form finishes the entry, including an unfinished one from History.
+            delete updatedData.inProgress;
             const updatedPhotos = { front: "skipped", side: "skipped", back: "skipped", ...editSubmissionData.photos };
             for (const angle of PHOTO_ANGLES) {
               const file = photoFiles[angle];
               if (!file) continue;
               const extension = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
-              const path = `${user.id}/${today}/${angle}.${extension}`;
+              const path = `${user.id}/${formDate}/${angle}.${extension}`;
               const { error: uploadError } = await supabase.storage.from("checkin-photos").upload(path, file, { upsert: true, contentType: file.type || undefined });
               if (uploadError) throw uploadError;
               updatedPhotos[angle] = path;
             }
             if (editSubmissionData.photos || PHOTO_ANGLES.some(angle => photoFiles[angle])) {
               updatedData.photos = updatedPhotos;
-            }            const { error } = await supabase.from("morning_checkins").upsert({
+            }
+            const { error } = await supabase.from("morning_checkins").upsert({
               user_id: user.id,
-              date: today,
+              date: formDate,
               score: morningScore(updatedData),
               data: updatedData,
             }, { onConflict: "user_id,date" });
@@ -2105,11 +2584,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             setSavingCheckin(false);
           }
         }}>
-          <div className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : "EDIT TODAY'S SUBMISSION"}</div>
+          <div className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : isLogCheckin ? "LOG THIS MORNING" : isPastEntry ? `EDIT ${new Date(`${formDate}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }).toUpperCase()}` : "EDIT TODAY'S SUBMISSION"}</div>
           <p style={{ fontSize: 12, color: "#8AABB8" }}>
             {isRoughCheckin
               ? "Add whatever you remember. It does not need to be perfect, and you can leave anything blank."
-              : "Correct your answers to reflect what actually happened this morning."}
+              : isLogCheckin
+                ? "Fill in what you did this morning, then save."
+                : "Correct your answers to reflect what actually happened."}
           </p>
           <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
             Actual wake-up time
@@ -2121,14 +2602,30 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 planned: data.wakeTiming?.planned || wakeTime,
                 source: "manual",
               } }))} />
-          </label>          {allSteps.map(step => {
+          </label>
+          <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
+            Routine time (minutes)
+            <input className="t3d-input" type="number" inputMode="numeric" min="1" max="600" style={{ marginTop: 8 }}
+              placeholder={plannedRoutineMinutes ? `Planned: ${plannedRoutineMinutes} min` : "Minutes"}
+              value={editSubmissionData.routineTiming?.actualMinutes ?? ""}
+              onChange={event => setEditSubmissionData(data => ({ ...data, routineTiming: {
+                ...data.routineTiming,
+                plannedMinutes: data.routineTiming?.plannedMinutes || plannedRoutineMinutes,
+                actualMinutes: event.target.value === "" ? null : Math.max(1, Math.round(Number(event.target.value)) || 1),
+              } }))} />
+          </label>
+          <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44, width: "100%", marginBottom: 4 }}
+            onClick={() => setEditSubmissionData(data => ({ ...data, ...Object.fromEntries(formSteps.filter(step => step.type === "tick").map(step => [step.id || step.name, true])) }))}>
+            ✓ MARK ALL DONE
+          </button>
+          {formSteps.map(step => {
             const key = step.id || step.name;
             const value = editSubmissionData[key];
             return (
               <div key={key} style={{ padding: "14px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <label style={{ display: "block", fontSize: 12 }}>
-                  {step.icon || "▸"} {step.name}
-                  {["sleep", "number"].includes(step.type) && (
+                  {taskIcon(step)}{step.name}
+                  {["sleep", "number"].includes(step.type) && step.id !== "weight" && (
                     <input className="t3d-input" style={{ marginTop: 8 }}
                       type={step.type === "number" ? "number" : "text"}
                       step={step.type === "number" ? "any" : undefined}
@@ -2136,14 +2633,21 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       value={typeof value === "string" || typeof value === "number" ? value : ""}
                       onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value }))} />
                   )}
-                  {step.type === "tick" && (
-                    <select className="t3d-input" style={{ marginTop: 8 }} value={value === true ? "yes" : "no"}
-                      onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value === "yes" }))}>
-                      <option value="yes">Completed</option>
-                      <option value="no">Not completed</option>
-                    </select>
-                  )}
                 </label>
+                {step.id === "weight" && (
+                  <div style={{ marginTop: 8 }}>
+                    <WeightEntry kgValue={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+                      onKgChange={kg => setEditSubmissionData(data => ({ ...data, [key]: kg }))} unit={weightUnit} onUnitChange={chooseWeightUnit} />
+                  </div>
+                )}
+                {step.type === "tick" && (
+                  <div role="group" aria-label={step.name} style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value === true} style={toggleStyle(value === true)}
+                      onClick={() => setEditSubmissionData(data => ({ ...data, [key]: true }))}>✓ DONE</button>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value !== true} style={{ ...toggleStyle(value !== true), ...(value !== true ? { borderColor: NEON3, color: NEON3, background: "rgba(255,45,120,.08)" } : {}) }}
+                      onClick={() => setEditSubmissionData(data => ({ ...data, [key]: false }))}>✗ NOT DONE</button>
+                  </div>
+                )}
                 {step.type === "photos3" && (
                   <div style={{ fontSize: 11, color: "#8AABB8", marginTop: 8 }}>
                     {PHOTO_ANGLES.map(angle => (
@@ -2182,7 +2686,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           })}
           {submissionError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{submissionError}</p>}
           <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : "SAVE CHANGES"}</button>
+            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : isLogCheckin ? "SAVE MORNING" : "SAVE CHANGES"}</button>
             <button className="t3d-btn t3d-btn-red" type="button" disabled={savingCheckin} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </form>
@@ -2227,7 +2731,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 <>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>{skippedToday ? "↗" : "✅"}</div>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 2, marginBottom: 8 }}>
-                    {skippedToday ? "RESET FOR TOMORROW" : "MORNING COMPLETE"}
+                    {skippedToday ? "RESET FOR TOMORROW" : (() => {
+                      const todayData = history.find(h => h.date === today)?.data;
+                      return todayData?.roughCheckin || todayData?.loggedAfter ? "MORNING LOGGED" : "MORNING COMPLETE";
+                    })()}
                   </div>
                   {skippedToday ? (
                     <>
@@ -2243,12 +2750,53 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>
                         Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
                       </div>
+                      {scoreExplanation}
                       <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
                         {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
                       </p>
                       <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7, marginTop: -6 }}>
                         {routineTimingSummary(history.find(h => h.date === today)?.data?.routineTiming)}
                       </p>
+                  <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
+                    <button type="button" onClick={() => { setCompletedAction(null); openCheckinForm("edit", { data: { ...(history.find(entry => entry.date === today)?.data || {}) } }); }}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", minHeight: 44, padding: "8px 10px", cursor: "pointer" }}>
+                      Edit submission
+                    </button>
+                    <button type="button" onClick={() => setCompletedAction(action => action === "redo" ? null : "redo")}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", minHeight: 44, padding: "8px 10px", cursor: "pointer" }}>
+                      Do again
+                    </button>
+                  </div>
+                  {completedAction === "redo" && (
+                    <div style={{ marginTop: 10, padding: 14, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
+                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6, margin: "0 0 10px" }}>
+                        Choose Redo with guided timer or Redo without timer. Today&apos;s check-in stays saved until you finish the new one.
+                      </p>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" type="button" style={{ minHeight: 44 }} onClick={() => confirmLiveStart(() => {
+                          setCompletedAction(null);
+                          setSubmissionError("");
+                          setCheckinData({});
+                          setCheckinStep(0);
+                          setTempInput("");
+                          setPhotoAngleIdx(0);
+                          setPhotoFiles({ front: null, side: null, back: null });
+                          setPhotoPreviews({ front: null, side: null, back: null });
+                          setLiveInputActive(false);
+                          setLiveTaskIndex(0);
+                          startLiveTimer(liveRoutineSteps[0]);
+                          setLiveStartedAt(Date.now());
+                          recordLiveWakeTime();
+                          setView("liveMorning");
+                        })}>REDO WITH GUIDED TIMER</button>
+                        <button className="t3d-btn t3d-btn-sm" type="button" style={{ minHeight: 44 }} onClick={() => {
+                          setCompletedAction(null);
+                          openCheckinForm("log");
+                        }}>REDO WITHOUT TIMER</button>
+                        <button className="t3d-btn t3d-btn-sm t3d-btn-red" type="button" style={{ minHeight: 44 }} onClick={() => setCompletedAction(null)}>CANCEL</button>
+                      </div>
+                    </div>
+                  )}
                       {(() => {
                         const todayEntry = history.find(h => h.date === today);
                         if (!todayEntry?.data) return null;
@@ -2265,72 +2813,26 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                           </div>
                         );
                       })()}
-                  <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
-                    <button type="button" onClick={() => setCompletedAction("edit")}
-                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
-                      Edit submission
-                    </button>
-                    <button type="button" onClick={() => setCompletedAction("redo")}
-                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
-                      Do again
-                    </button>
-                  </div>
-                  {completedAction && (
-                    <div role="alert" style={{ marginTop: 14, padding: 18, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
-                      <div style={{ color: "#FFB547", fontSize: 12, fontWeight: 700 }}>⚠ Keep your progress honest</div>
-                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.7 }}>
-                        Mistakes happen, and it is okay to correct them. Being honest about your morning helps you reflect, learn, and keep moving forward.
-                        {completedAction === "redo" ? " Choose Live Morning or Normal Check-in to start again. Your current submission will only be replaced when you save the new one." : " Only change your answers to reflect what actually happened."}
-                      </p>
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
-                          const action = completedAction;
-                          setCompletedAction(null);
-                          setSubmissionError("");
-                          if (action === "edit") {
-                            setEditSubmissionData({ ...(history.find(entry => entry.date === today)?.data || {}) });
-                            setPhotoFiles({ front: null, side: null, back: null });
-                            setPhotoPreviews({ front: null, side: null, back: null });
-                            setView("editSubmission");
-                          } else {
-                            setCheckinData({});
-                            setCheckinStep(0);
-                            setTempInput("");
-                            setPhotoAngleIdx(0);
-                            setPhotoFiles({ front: null, side: null, back: null });
-                            setPhotoPreviews({ front: null, side: null, back: null });
-                            setLiveInputActive(false);
-                            setLiveTaskIndex(0);
-                            startLiveTimer(liveRoutineSteps[0]);
-                            setLiveStartedAt(Date.now());
-                        recordLiveWakeTime();
-                            setView("liveMorning");
-                          }
-                        }}>{completedAction === "edit" ? "CONTINUE TO EDIT" : "REDO WITH GUIDED TIMER"}</button>
-                        {completedAction === "redo" && (
-                          <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
-                            setCompletedAction(null);
-                            setSubmissionError("");
-                            setCheckinData({});
-                            setCheckinStep(0);
-                            setTempInput("");
-                            setPhotoAngleIdx(0);
-                            setPhotoFiles({ front: null, side: null, back: null });
-                            setPhotoPreviews({ front: null, side: null, back: null });
-                            setLiveInputActive(false);
-                            setLiveDeadline(null);
-                            setLiveStartedAt(null);
-                            setView("wakeCheckin");
-                          }}>REDO WITHOUT TIMER</button>
-                        )}                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => setCompletedAction(null)}>CANCEL</button>
-                      </div>
-                    </div>
-                  )}
                     </>
                   )}
                 </>
               ) : (
                 <>
+                  {(() => {
+                    const unfinished = history.find(entry => entry.date === today && entry.data?.inProgress);
+                    if (!unfinished) return null;
+                    return (
+                      <div style={{ marginBottom: 18, padding: 14, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
+                        <div style={{ color: "#FFB547", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>STARTED · NOT FINISHED</div>
+                        <p style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6, margin: "6px 0 10px" }}>You started this morning but it was not finished. Finish it now, or delete it and start again.</p>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => openCheckinForm("log", { data: { ...unfinished.data } })}>FINISH NOW</button>
+                          <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 44 }} onClick={() => setMorningConfirm("delete")}>DELETE SESSION</button>
+                        </div>
+                        {morningConfirm === "delete" && morningConfirmDialog}
+                      </div>
+                    );
+                  })()}
                   <div style={{
                     fontSize: 12,
                     color: "#E0EAF0",
@@ -2363,14 +2865,14 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                         fontSize: 13,
                         letterSpacing: 2
                       }}
-                      onClick={() => {
+                      onClick={() => confirmLiveStart(() => {
                         setLiveTaskIndex(0);
                         startLiveTimer(liveRoutineSteps[0]);
                         setLiveInputActive(false);
                         setLiveStartedAt(Date.now());
                         recordLiveWakeTime();
                         setView("liveMorning");
-                      }}
+                      })}
                     >
                       ▶ START MY MORNING NOW
                       <span style={{ display: "block", fontFamily: "'Inter',sans-serif", fontSize: 10, letterSpacing: 0, fontWeight: 400, marginTop: 6, color: "#C0D4DE" }}>Guides you through each task with a timer</span>
@@ -2432,13 +2934,21 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               )}
             </div>
 
+            {changeRoutineDialog}
+            {liveStartDialog}
+            {routineSavedNotice && (
+              <div role="status" style={{ marginBottom: 16, padding: "12px 14px", border: `1px solid ${NEON}`, background: "rgba(0,255,178,.08)", borderRadius: 7, color: NEON, fontSize: 12 }}>
+                ✓ Routine saved
+              </div>
+            )}
             {/* Today's schedule */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE · {dayGroupName(rotationDay).toUpperCase()}</div>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE{alternatingOn && rotationDay ? ` · ${dayGroupName(rotationDay).toUpperCase()}` : ""}</div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
   <button
     className="t3d-btn t3d-btn-sm"
+    style={{ minHeight: 44 }}
     onClick={() => setView("editRoutine")}
   >
     EDIT ROUTINE
@@ -2446,6 +2956,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   <button
     className="t3d-btn t3d-btn-sm"
+    style={{ minHeight: 44 }}
     onClick={() => setView("rotationSetup")}
   >
     ALTERNATING DAYS
@@ -2453,7 +2964,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   <button
     className="t3d-btn t3d-btn-sm t3d-btn-red"
-    onClick={startRoutineSetup}
+    style={{ minHeight: 44 }}
+    onClick={() => setConfirmChangeRoutine(true)}
   >
     CHANGE ROUTINE
   </button>
@@ -2462,7 +2974,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               {activeScheduledTasks.map((t, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, width: 45 }}>{t.scheduledTime}</div>
-                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}{t.routineDay && t.routineDay !== "daily" ? ` · ${dayGroupName(t.routineDay).toUpperCase()}` : ""}</div>
+                  <div style={{ flex: 1, fontSize: 12 }}>{taskIcon(t)}{t.name}{alternatingOn && t.routineDay && t.routineDay !== "daily" ? ` · ${dayGroupName(t.routineDay).toUpperCase()}` : ""}</div>
                   <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
                 </div>
               ))}
@@ -2507,31 +3019,60 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   {history.length === 0 ? (
                     <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No history yet — complete your first morning check-in!</div>
                   ) : (
-                    history.map((entry, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
-                        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#E0EAF0", width: 80 }}>
-                          {new Date(entry.date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                    history.map(entry => {
+                      const data = entry.data || {};
+                      const unfinished = Boolean(data.inProgress);
+                      const isOpen = openHistoryDate === entry.date;
+                      const taskEntries = Object.entries(data).filter(([key]) => !HIDDEN_CHECKIN_KEYS.has(key));
+                      return (
+                        <div key={entry.date} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                          <button type="button" aria-expanded={isOpen} onClick={() => setOpenHistoryDate(isOpen ? null : entry.date)}
+                            style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", minHeight: 44, padding: "10px 0", background: "none", border: 0, color: "inherit", cursor: "pointer", textAlign: "left" }}>
+                            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#E0EAF0", width: 80 }}>
+                              {new Date(`${entry.date}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" })}
+                            </div>
+                            <div style={{ flex: 1, fontSize: 10, color: "#8AABB8" }}>
+                              {data.routineSkipped ? "Skipped" : unfinished ? "Started · not finished" : data.roughCheckin ? "Rough check-in" : data.loggedAfter ? "Logged afterwards" : "Completed"}
+                            </div>
+                            <div style={{
+                              fontFamily: "'Orbitron',monospace", fontSize: 13, fontWeight: 700,
+                              color: unfinished || data.routineSkipped ? "#6F8792" : entry.score >= 7 ? NEON : entry.score >= 4 ? "#FF8C00" : NEON3
+                            }}>{unfinished || data.routineSkipped ? "—" : `${entry.score}/10`}</div>
+                            <span aria-hidden="true" style={{ color: "#8AABB8", transform: isOpen ? "rotate(180deg)" : "none" }}>▾</span>
+                          </button>
+                          {isOpen && (
+                            <div style={{ padding: "0 0 14px", fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>
+                              <div>{wakeTimingSummary(data.wakeTiming)}</div>
+                              <div>{routineTimingSummary(data.routineTiming)}</div>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", margin: "8px 0" }}>
+                                {taskEntries.map(([k, v]) => (
+                                  <span key={k} style={{
+                                    fontSize: 9, padding: "2px 6px", borderRadius: 10,
+                                    background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
+                                    color: v === true ? NEON : v === false ? NEON3 : NEON2,
+                                    border: `1px solid ${v === true ? "rgba(0,255,178,.2)" : v === false ? "rgba(255,45,120,.2)" : "rgba(0,200,255,.2)"}`,
+                                  }}>
+                                    {morningStepName(k)}: {v === true ? "✓" : v === false ? "✗" : k === "weight" && v ? `${v} kg` : String(v || "—")}
+                                  </span>
+                                ))}
+                              </div>
+                              <CheckinPhotoThumbs photos={data.photos} />
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                                <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }}
+                                  onClick={() => openCheckinForm("edit", { date: entry.date, data: { ...data } })}>
+                                  {unfinished ? "FINISH THIS CHECK-IN" : "EDIT THIS DAY"}
+                                </button>
+                                <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 44 }}
+                                  onClick={() => setMorningConfirm({ deleteDate: entry.date })}>
+                                  DELETE THIS DAY
+                                </button>
+                              </div>
+                              {morningConfirm?.deleteDate === entry.date && morningConfirmDialog}
+                            </div>
+                          )}
                         </div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {entry.data && Object.entries(entry.data).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
-                              <span key={k} style={{
-                                fontSize: 9, padding: "2px 6px", borderRadius: 10,
-                                background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
-                                color: v === true ? NEON : v === false ? NEON3 : NEON2,
-                                border: `1px solid ${v === true ? "rgba(0,255,178,.2)" : v === false ? "rgba(255,45,120,.2)" : "rgba(0,200,255,.2)"}`,
-                              }}>
-                                {morningStepName(k)}: {v === true ? "✓" : v === false ? "✗" : String(v).slice(0,8)}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                        <div style={{
-                          fontFamily: "'Orbitron',monospace", fontSize: 13, fontWeight: 700,
-                          color: entry.score >= 7 ? NEON : entry.score >= 4 ? "#FF8C00" : NEON3
-                        }}>{entry.score}/10</div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               )}
@@ -2545,20 +3086,23 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   // EDIT ROUTINE view
   if (view === "editRoutine") {
     return (
+      <>
       <MorningRoutineEditor
         wakeTime={wakeTime}
         setWakeTime={setWakeTime}
         scheduledTasks={scheduledTasks}
         setScheduledTasks={setScheduledTasks}
-        dayGroups={rotationGroups}
+        dayGroups={dayGroups}
         onOpenRotationSetup={() => setView("rotationSetup")}
         onCancel={() => setView("home")}
-        onRebuild={startRoutineSetup}
+        onRebuild={() => setConfirmChangeRoutine(true)}
         onSave={async () => {
           await saveRoutine(scheduledTasks);
           setView("home");
         }}
       />
+      {changeRoutineDialog}
+      </>
     );
   }
 
@@ -2571,6 +3115,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
         setDayGroups={setDayGroups}
         scheduledTasks={scheduledTasks}
         setScheduledTasks={setScheduledTasks}
+        trainingDays={trainingDays}
         onDone={() => setView("editRoutine")}
       />
     );
@@ -2593,6 +3138,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             ))}
           </div>
 
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -12, marginBottom: 12 }}>
+            <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 40 }} onClick={cancelRoutineSetup}>CANCEL</button>
+          </div>
           {setupStep === 0 && (
             <div>
               <div className="t3d-ctitle">WHAT TIME DO YOU WANT TO WAKE UP?</div>
@@ -2661,7 +3209,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       fontSize: 11,
                       color: "#E0EAF0"
                     }}>
-                      ▸ {task.name}
+                      {taskIcon(task)}{task.name}
                     </div>
 
                     <input
@@ -2789,8 +3337,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
                 <div>
                   {SUGGESTED_TASKS.map((t, i) => (
-                    <span
+                    <button
+                      type="button"
                       key={i}
+                      aria-pressed={Boolean(selectedTasks.find(s => s.name === t.name))}
                       className={`t3d-task-chip ${
                         selectedTasks.find(s => s.name === t.name)
                           ? "selected"
@@ -2800,9 +3350,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     >
                       {selectedTasks.find(s => s.name === t.name)
                         ? "✓ "
-                        : ""}
+                        : "+ "}
                       {t.name} ({t.duration}m)
-                    </span>
+                    </button>
                   ))}
                 </div>
               </div>
@@ -2853,6 +3403,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     <input
                       type="number"
                       min="1"
+                      max="180"
+                      aria-label="Minutes"
                       className="t3d-input"
                       value={customTaskDuration}
                       onChange={e =>
@@ -2924,7 +3476,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       fontSize: 10,
                       color: "#E0EAF0"
                     }}>
-                      ▸ {task.name}
+                      {taskIcon(task)}{task.name}
                     </div>
 
                     <div style={{
@@ -2936,12 +3488,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
                     <button
                       className="t3d-btn t3d-btn-sm t3d-btn-red"
+                      aria-label={`Remove ${task.name}`}
                       onClick={() =>
                         setSelectedTasks(prev =>
                           prev.filter((_, index) => index !== i)
                         )
                       }
-                      style={{ padding: "4px 8px" }}
+                      style={{ minWidth: 40, minHeight: 40, padding: "4px 8px", fontSize: 14 }}
                     >
                       ×
                     </button>
@@ -2980,6 +3533,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     </div>
                   </div>
                 ))}
+                <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.6, marginTop: 8 }}>
+                  🔒 Sleep, weight, photos and the check-in are in every routine: they are what TRACK3D uses to track your progress and score your morning.
+                </div>
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
@@ -3035,8 +3591,12 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               onBack={() => setSetupStep(1)}
               onSave={async () => {
                 await saveRoutine(scheduledTasks);
+                setupSnapshotRef.current = null;
                 setIsSetup(true);
                 setView("home");
+                window.scrollTo({ top: 0, behavior: "smooth" });
+                setRoutineSavedNotice(true);
+                setTimeout(() => setRoutineSavedNotice(false), 4000);
               }}
             />
             </div>
@@ -3104,24 +3664,6 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       currentLiveTask.type
     );
 
-    const openCurrentInput = () => {
-      const stepIndex = allSteps.findIndex(
-        step =>
-          (step.id || step.name) === currentKey
-      );
-
-      if (stepIndex === -1) return;
-
-      setLiveInputActive(true);
-
-      setCheckinStep(stepIndex);
-      setTempInput("");
-      setPhotoAngleIdx(0);
-      setPhotoFiles({ front: null, side: null, back: null });
-      setPhotoPreviews({ front: null, side: null, back: null });
-      setView("checkin");
-    };
-
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
@@ -3179,7 +3721,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               fontSize: 34,
               marginBottom: 10
             }}>
-              {currentLiveTask.icon || "▸"}
+              {taskIcon(currentLiveTask)}
             </div>
 
             <div style={{
@@ -3197,6 +3739,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             }}>
               Planned: {currentLiveTask.duration} min
             </div>
+            {needsInput && (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: 16 }}>
+                {renderStepInputs(currentLiveTask, moveToNextLiveTask)}
+              </div>
+            )}
           </div>
 
           {liveRoutineSteps[liveTaskIndex + 1] && (
@@ -3220,8 +3767,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 fontSize: 11,
                 color: "#E0EAF0"
               }}>
-                {liveRoutineSteps[liveTaskIndex + 1].icon || "▸"}{" "}
-                {liveRoutineSteps[liveTaskIndex + 1].name}
+                {taskIcon(liveRoutineSteps[liveTaskIndex + 1])}                {liveRoutineSteps[liveTaskIndex + 1].name}
                 {" · "}
                 {liveRoutineSteps[liveTaskIndex + 1].duration} min
               </div>
@@ -3266,20 +3812,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             gap: 8,
             flexWrap: "wrap"
           }}>
-            {needsInput ? (
-              <button
-                className="t3d-btn"
-                style={{
-                  flex: 1,
-                  padding: 13,
-                  background: "rgba(0,255,178,.12)",
-                  borderColor: "rgba(0,255,178,.5)"
-                }}
-                onClick={openCurrentInput}
-              >
-                COMPLETE THIS STEP →
-              </button>
-            ) : (
+            {needsInput ? null : (
               <button
                 className="t3d-btn"
                 style={{
@@ -3294,158 +3827,51 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </button>
             )}
 
-            <button
-              className="t3d-btn t3d-btn-red"
-              style={{
-                padding: "13px 18px"
-              }}
-              onClick={skipLiveTask}
-            >
-              SKIP
-            </button>
+            {/* Input steps already have their own skip on the task card. */}
+            {!needsInput && (
+              <button
+                className="t3d-btn t3d-btn-red"
+                style={{
+                  padding: "13px 18px"
+                }}
+                onClick={skipLiveTask}
+              >
+                SKIP
+              </button>
+            )}
           </div>
+          {sessionControls(liveTaskIndex > 0, () => {
+            const previousIndex = liveTaskIndex - 1;
+            setTempInput("");
+            setPhotoAngleIdx(0);
+            setLiveTaskIndex(previousIndex);
+            startLiveTimer(liveRoutineSteps[previousIndex]);
+          })}
         </div>
       </div>
     );
   }
 
   // CHECK-IN view
-  if (view === "checkin" && currentStep) {
+  if (view === "checkin" && currentStep && checkinStep < checkinDoneIndex) {
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
           <div className="t3d-progress-dots">
-            {allSteps.map((_, i) => (
+            {allSteps.slice(0, checkinDoneIndex).map((_, i) => (
               <div key={i} className={`t3d-dot-step ${i === checkinStep ? "active" : i < checkinStep ? "done" : ""}`} />
             ))}
           </div>
           <div style={{ textAlign: "center", marginBottom: 8, fontSize: 10, color: "#E0EAF0", letterSpacing: 2 }}>
-            STEP {checkinStep + 1} OF {allSteps.length}
+            STEP {checkinStep + 1} OF {checkinDoneIndex}
           </div>
           <div className="t3d-checkin-step">
-            <div style={{ fontSize: 40, marginBottom: 16 }}>{currentStep.icon || "▸"}</div>
+            {taskIcon(currentStep) && <div aria-hidden="true" style={{ fontSize: 40, marginBottom: 16 }}>{taskIcon(currentStep)}</div>}
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 2, color: "#E0EAF0", marginBottom: 8 }}>
               {currentStep.name}
             </div>
 
-            {currentStep.type === "number" && (
-              <div style={{ width: "100%", maxWidth: 280 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
-                  <input className="t3d-input" type="number" placeholder={`Enter ${currentStep.unit}...`}
-                    value={tempInput} onChange={e => setTempInput(e.target.value)}
-                    style={{ textAlign: "center", fontSize: 24, padding: 16 }} />
-                  <span style={{ color: "#E0EAF0", fontSize: 14 }}>{currentStep.unit}</span>
-                </div>
-                <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => {
-  setCheckinData(d => ({
-    ...d,
-    [currentStep.id]: tempInput
-  }));
-  setTempInput("");
-  finishLiveInputStep();
-}}>
-                  CONFIRM →
-                </button>
-                {currentStep.id === "weight" && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCheckinData(d => ({ ...d, [currentStep.id]: "" }));
-                      setTempInput("");
-                      finishLiveInputStep();
-                    }}
-                    style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
-                  >
-                    I&apos;M NOT SURE — SKIP
-                  </button>
-                )}
-              </div>
-            )}
-
-            {currentStep.type === "sleep" && (
-              <div style={{ width: "100%", maxWidth: 280 }}>
-                <input className="t3d-input" placeholder="e.g. 7h 30m" value={tempInput}
-                  onChange={e => setTempInput(e.target.value)}
-                  style={{ textAlign: "center", fontSize: 20, padding: 16, marginBottom: 16 }} />
-                <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!tempInput}
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id]: tempInput })); setTempInput(""); finishLiveInputStep(); }}>
-                  CONFIRM →
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCheckinData(d => ({ ...d, [currentStep.id]: "" }));
-                    setTempInput("");
-                    finishLiveInputStep();
-                  }}
-                  style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 10, marginTop: 8, padding: 5, textDecoration: "underline" }}
-                >
-                  I&apos;M NOT SURE — SKIP
-                </button>
-              </div>
-            )}
-
-            {currentStep.type === "photos3" && (() => {
-              const angle = PHOTO_ANGLES[photoAngleIdx];
-              const isLast = photoAngleIdx === PHOTO_ANGLES.length - 1;
-
-              const finishPhotos = (filesOverride) => {
-                const files = filesOverride || photoFiles;
-
-                setCheckinData(d => ({
-                  ...d,
-                  photos: {
-                    front: files.front ? "captured" : "skipped",
-                    side: files.side ? "captured" : "skipped",
-                    back: files.back ? "captured" : "skipped",
-                  },
-                }));
-
-                finishLiveInputStep();
-              };
-              return (
-                <div style={{ width: "100%", maxWidth: 280, textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 2, marginBottom: 12 }}>
-                    PHOTO {photoAngleIdx + 1} OF 3 — {angle.toUpperCase()} ON
-                  </div>
-                  <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
-                    onChange={e => {
-                      const f = e.target.files[0];
-                      if (!f) return;
-                      setPhotoFiles(p => ({ ...p, [angle]: f }));
-                      setPhotoPreviews(p => ({ ...p, [angle]: URL.createObjectURL(f) }));
-                    }} />
-                  {photoPreviews[angle] ? (
-                    <div>
-                      <img src={photoPreviews[angle]} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 8, border: `2px solid ${NEON}`, marginBottom: 16 }} alt={angle} />
-                      <button className="t3d-btn" style={{ width: "100%", padding: 14 }}
-                        onClick={() => isLast ? finishPhotos() : setPhotoAngleIdx(i => i + 1)}>
-                        {isLast ? "CONFIRM →" : "NEXT ANGLE →"}
-                      </button>
-                    </div>
-                  ) : (
-                    <button className="t3d-btn" style={{ width: "100%", padding: 14, marginBottom: 12 }} onClick={() => fileRef.current?.click()}>
-                      📸 UPLOAD {angle.toUpperCase()} PHOTO
-                    </button>
-                  )}
-                  <div style={{ fontSize: 10, color: "#E0EAF0", margin: "16px 0 6px", lineHeight: 1.5 }}>
-                    You can skip photos or leave them until the final review.
-                  </div>
-                  <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 7 }}
-                    onClick={() => {
-                      setCheckinData(data => ({ ...data, photos: Object.fromEntries(PHOTO_ANGLES.map(item => [item, photoFiles[item] ? "captured" : "deferred"])) }));
-                      finishLiveInputStep();
-                    }}>
-                    ADD PHOTOS AT THE END
-                  </button>
-                  <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", opacity: 0.6 }}
-                    onClick={() => finishPhotos()}>
-                    SKIP REMAINING PHOTOS
-                  </button>
-                </div>
-              );
-            })()}
+            {renderStepInputs(currentStep, finishLiveInputStep)}
 
             {currentStep.type === "tick" && (
               <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
@@ -3460,6 +3886,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </div>
             )}
           </div>
+          {sessionControls(checkinStep > 0, () => { setTempInput(""); setPhotoAngleIdx(0); setReviewingMissed(false); setCheckinStep(step => Math.max(0, step - 1)); })}
           <button
             type="button"
             onClick={() => setView("home")}
@@ -3473,10 +3900,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   }
 
   // COMPLETE view
-  if (view === "checkin" && checkinStep >= allSteps.length) {
+  if (view === "checkin" && checkinStep >= checkinDoneIndex) {
     const score = morningScore(checkinData);
     const quote = MORNING_QUOTES[Math.floor(Math.random() * MORNING_QUOTES.length)];
-    const editableSteps = allSteps.map((step, index) => ({ step, index }));
+    const editableSteps = allSteps.map((step, index) => ({ step, index })).filter(({ step }) => step.id !== "checkin");
     const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     const routineTimingText = routineTimingSummary({ plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes });
@@ -3487,11 +3914,12 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           <div style={{ fontSize: 48, marginBottom: 16 }}>🌟</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, letterSpacing: 3, color: NEON, marginBottom: 8 }}>MORNING COMPLETE</div>
           <div style={{ margin: "24px auto" }}>
-            <ScoreRing score={score * 10} size={120} />
+            <ScoreRing score={score} max={10} size={120} />
           </div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>
-            MORNING SCORE: {score}/10
+            MORNING SCORE
           </div>
+          {scoreExplanation}
           <p style={{ fontSize: 12, color: NEON2, lineHeight: 1.7 }}>
             {wakeTimingSummary(checkinData.wakeTiming)}
           </p>
@@ -3516,7 +3944,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </div>
           </details>
           <div style={{ marginBottom: 24 }}>
-            {Object.entries(checkinData).filter(([key]) => !["wakeTiming", "routineTiming"].includes(key)).map(([k, v]) => (
+            {Object.entries(checkinData).filter(([key]) => !HIDDEN_CHECKIN_KEYS.has(key) || key === "photos").map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                 <span style={{ color: "#4A6070" }}>{morningStepName(k)}</span>
                 <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
@@ -4197,19 +4625,26 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
-      supabase.from("workout_logs").select("session_name,date,in_progress").eq("user_id", user.id).eq("date", today),
-    ]).then(([morning, nutrition, nutritionPlan, split, workouts]) => setTodayData({
+      supabase.from("workout_logs").select("session_name,date,in_progress,total_volume,duration_mins").eq("user_id", user.id).eq("date", today),
+      supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
+    ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
+      loaded: true,
+      hasRoutine: Boolean(routine.data),
+      hasPlan: Boolean(split.data?.sessions?.length),
       morning: morning.data || null,
       nutrition: nutrition.data || null,
       nutritionPlan: nutritionPlan.data || null,
       sessions: split.data?.sessions || [],
-      workouts: (workouts.data || []).filter(log => !log.in_progress),
+      // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
+      workouts: (workouts.data || []).filter(log => !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
       activeWorkout: (workouts.data || []).find(log => log.in_progress) || null,
     }));
   }, [user, today]);
 
   const todaySession = todayData.sessions.find(session => (session.days || []).some(day => String(day).toUpperCase().startsWith(homeDate.dayCode)));
-  const fitnessDone = Boolean(todaySession && todayData.workouts.some(log => log.session_name?.toLowerCase() === todaySession.name?.toLowerCase()));
+  // Any workout completed today counts, even if the plan (and its session
+  // names) changed after it was done.
+  const fitnessDone = Boolean(todaySession && todayData.workouts.length > 0);
   const activeWorkout = todayData.activeWorkout;
   const completedWorkoutNames = [...new Set(todayData.workouts.map(log => log.session_name).filter(Boolean))];
   const morningInProgress = Boolean(todayData.morning?.data?.inProgress);
@@ -4232,8 +4667,29 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
 
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
+  const firstRunSteps = [
+    { label: "Set up your morning", done: todayData.hasRoutine, section: "morning" },
+    { label: "Build your training plan", done: todayData.hasPlan, section: "fitness" },
+    { label: "Set your calorie target", done: Boolean(calorieGoal), section: "nutrition" },
+  ];
   return (
     <div className="t3d-fade">
+      {todayData.loaded && firstRunSteps.some(step => !step.done) && (
+        <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
+          <div className="t3d-ctitle">GET STARTED</div>
+          <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {firstRunSteps.map((step, index) => (
+              <li key={step.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: index < firstRunSteps.length - 1 ? `1px solid ${BORDER}` : "none" }}>
+                <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, border: `1px solid ${step.done ? NEON : "#31434F"}`, color: step.done ? "#06100D" : "#8AABB8", background: step.done ? NEON : "transparent" }}>{step.done ? "✓" : index + 1}</span>
+                <span style={{ flex: 1, fontSize: 12, color: step.done ? "#6F8792" : "#E0EAF0", textDecoration: step.done ? "line-through" : "none" }}>
+                  {step.label}{step.done ? <span className="t3d-sr-only"> (done)</span> : null}
+                </span>
+                {!step.done && <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={() => onNavigate(step.section)}>START →</button>}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14, marginBottom: 16 }}>
         <div className="t3d-card">
           <div className="t3d-ctitle">DAILY SCORE</div>
@@ -4245,7 +4701,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
           <div className="t3d-ctitle">MORNING ROUTINE</div>
           <div style={{ fontSize: 46, color: morningDone && !morningSkipped ? NEON : morningInProgress ? "#FFB547" : BORDER, lineHeight: 1 }}>{morningDone && !morningSkipped ? "✓" : morningInProgress ? "…" : "○"}</div>
           <div className="t3d-slabel" style={{ marginTop: 10 }}>{morningSkipped ? "SKIPPED TODAY" : morningDone ? `DONE · SCORE ${todayData.morning?.score || 0}/10` : morningInProgress ? "STARTED · NOT FINISHED" : "NOT DONE YET"}</div>
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : morningInProgress ? "GO TO MORNING →" : "START MORNING →"}</button>
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : morningInProgress ? "GO TO MORNING →" : todayData.loaded && !todayData.hasRoutine ? "SET UP MY MORNING →" : "START MORNING →"}</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">FITNESS TODAY</div>
@@ -4258,8 +4714,9 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
           </> : completedWorkoutNames.length ? <>
             <div style={{ fontSize: 22, color: NEON, fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>✓ {completedWorkoutNames.join(" + ")}</div>
             <div className="t3d-slabel" style={{ marginTop: 10 }}>COMPLETED TODAY</div>
-          </> : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? "START WORKOUT →" : "OPEN FITNESS"}</button>
+          </> : todayData.loaded && !todayData.hasPlan ? <div style={{ color: "#8AABB8", fontSize: 12 }}>No training plan yet.</div>
+            : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
+          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? "START WORKOUT →" : todayData.loaded && !todayData.hasPlan ? "BUILD MY PLAN →" : "OPEN FITNESS"}</button>
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">CALORIES</div>
@@ -4446,6 +4903,8 @@ function Fitness({ user, isActive = true }) {
   const zonedToday = useZonedDateKey(homeTimeZone);
   const homeDate = { ...getZonedDateInfo(new Date(), homeTimeZone), dateKey: zonedToday };
   const [view, setView] = useState("home");
+  // Each screen change starts at the top, not wherever the last screen was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [split, setSplit] = useState(null);
   const [loading, setLoading] = useState(true);
   const [setupStep, setSetupStep] = useState(0);
@@ -4464,6 +4923,12 @@ function Fitness({ user, isActive = true }) {
   const [aiAnswers, setAiAnswers] = useState({});
   const [aiStep, setAiStep] = useState(0);
   const [aiBuilding, setAiBuilding] = useState(false);
+  const [aiBuildStage, setAiBuildStage] = useState(0);
+  // Question ids still to ask (null = all); set when answers are pre-filled from a coach chat.
+  const [aiQuestionIds, setAiQuestionIds] = useState(null);
+  const [aiChatContext, setAiChatContext] = useState("");
+  const [planRebuildPreparing, setPlanRebuildPreparing] = useState(false);
+  const [aiPrefillNote, setAiPrefillNote] = useState("");
   const [aiPlan, setAiPlan] = useState(null);
   const [aiPlanError, setAiPlanError] = useState("");
   const [aiPlanSaving, setAiPlanSaving] = useState(false);
@@ -4477,8 +4942,11 @@ function Fitness({ user, isActive = true }) {
   const [planChangeRecommendation, setPlanChangeRecommendation] = useState(null);
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
+  const [endWorkoutConfirm, setEndWorkoutConfirm] = useState(null);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
-  const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], tempo: "" });
+  const [newEx, setNewEx] = useState({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" });
+  const [editingExerciseIdx, setEditingExerciseIdx] = useState(null);
+  const [emptySessionsWarning, setEmptySessionsWarning] = useState(false);
   const [viewingSession, setViewingSession] = useState(null); // log entry shown in the history popup
   const [viewingExercise, setViewingExercise] = useState(null); // exercise name shown as a graph within the popup
   const [editingHistorySession, setEditingHistorySession] = useState(false);
@@ -4582,18 +5050,49 @@ function Fitness({ user, isActive = true }) {
 
 const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
+// A plan the user saves (AI-built after review, or built by hand) is approved
+// on save, with the same 8-week commitment as approving it later.
+function withPlanApproval(sessions, now = new Date()) {
+  const reviewDate = new Date(now);
+  reviewDate.setDate(reviewDate.getDate() + 56);
+  return sessions.map(session => ({
+    ...session,
+    approval: { approved: true, approvedAt: now.toISOString(), reviewAfter: reviewDate.toISOString().slice(0, 10), commitmentWeeks: 8, cycleDays: 8 },
+  }));
+}
+
   const AI_QUESTIONS = [
-    { id: "goal", q: "What are we working towards?", type: "choice", options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
+    { id: "goal", q: "What are we working towards? Pick up to two.", type: "choice", multi: 2, options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
     { id: "experience", q: "Where are you starting from?", type: "choice", options: ["New to training", "Training for a few months", "1–3 years of training", "3+ years of training"], custom: true },
     { id: "days_per_week", q: "How many days can you realistically train?", type: "choice", options: ["1 day", "2 days", "3 days", "4 days", "5 days", "6 days", "7 days"] },
-    { id: "preferred_days", q: "Which days work best for you?", type: "text", placeholder: "e.g. Monday, Wednesday and Saturday — or flexible" },
+    { id: "preferred_days", q: "Which days work best for you?", type: "days" },
     { id: "session_length", q: "How much time do you have for training?", type: "availability" },
     { id: "equipment", q: "What equipment can you use?", type: "choice", options: ["Full gym", "Home gym with weights", "Dumbbells only", "Bodyweight only"], custom: true },
     { id: "split", q: "Do you have a preferred training split?", type: "choice", options: ["Let the coach choose", "Full body", "Upper / lower", "Push / pull / legs"], custom: true },
-    { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference" },
+    { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference", skipLabel: "Not sure – let the coach choose" },
     { id: "priorities", q: "What would you like to focus on?", type: "text", placeholder: "Muscle groups, skills or performance goals — or balanced progress" },
     { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments — or none" },
   ];
+
+  // Answers are strings, except goal (up to two options plus goal_custom) and preferred_days (day codes or FLEXIBLE).
+  const aiAnswerText = (question, answers = aiAnswers) => {
+    const value = answers[question.id];
+    if (question.id === "goal") return [...(Array.isArray(value) ? value : value ? [value] : []), answers.goal_custom].filter(item => String(item || "").trim()).join(" and ");
+    if (question.type === "days") return Array.isArray(value) ? (value.includes("FLEXIBLE") ? "Flexible" : value.join(", ")) : String(value || "");
+    return String(value || "");
+  };
+  const aiAskedQuestions = aiQuestionIds ? AI_QUESTIONS.filter(question => aiQuestionIds.includes(question.id)) : AI_QUESTIONS;
+  const AI_BUILD_STAGES = ["Reading your answers", "Choosing your training days", "Selecting exercises for your equipment", "Setting sets, reps and tempo", "Checking each session fits your time"];
+
+  useEffect(() => {
+    if (!aiBuilding) return;
+    const timer = setInterval(() => setAiBuildStage(stage => Math.min(stage + 1, AI_BUILD_STAGES.length - 1)), 6000);
+    return () => clearInterval(timer);
+  }, [aiBuilding]);
+
+  const openAiBuilder = () => {
+    setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
+  };
 
   useEffect(() => { if (!user) return; loadData(); }, [user, today]);
 
@@ -4665,29 +5164,32 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setLoading(false);
   };
 
+  // Returns { ok, error }. Callers must not report a change unless ok is true.
   const saveSplit = async (sessionsData, extra = {}) => {
-    if (!user) return;
+    if (!user) return { ok: false, error: "not signed in" };
     try {
       const normalizedSessions = normalizeFitnessSessions(sessionsData);
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
 
       // Upsert so a stale lookup can never turn a save into a duplicate insert.
+      // Read the row back so a save only counts once the database has it.
       const result = await supabase.from("workout_splits").upsert({
         user_id: user.id,
         sessions: normalizedSessions,
         ...(existing ? {} : { split_name: "My Split" }),
         ...extra,
-      }, { onConflict: "user_id" });
+      }, { onConflict: "user_id" }).select("sessions").single();
 
-      if (result.error) {
-        console.error("saveSplit error:", result.error);
-      } else {
-        setSessions(normalizedSessions);
-        setSplit(previous => ({ ...(previous || {}), sessions: normalizedSessions, ...extra }));
-        console.log("Split saved!");
+      if (result.error || !sameJson(result.data?.sessions, normalizedSessions)) {
+        console.error("saveSplit error:", result.error || "saved plan did not match");
+        return { ok: false, error: result.error?.message || "the saved plan could not be confirmed" };
       }
+      setSessions(normalizedSessions);
+      setSplit(previous => ({ ...(previous || {}), sessions: normalizedSessions, ...extra }));
+      return { ok: true };
     } catch (e) {
       console.error("saveSplit exception:", e);
+      return { ok: false, error: e?.message || "connection problem" };
     }
   };
 
@@ -4858,10 +5360,10 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     return adjusted;
   };
 
-  const startWorkout = async session => {
-    const minuteLimit = parseInt(availableMinutes, 10);
+  const startWorkout = async (session, options = { minutes: availableMinutes, context: gymContext, name: gymName }) => {
+    const minuteLimit = parseInt(options.minutes, 10);
     const sessionToStart = fitSessionToMinutes(normalizeFitnessSessions([session])[0], minuteLimit);
-    sessionToStart.gymContext = { type: gymContext, name: gymName.trim() };
+    sessionToStart.gymContext = { type: options.context, name: String(options.name || "").trim() };
     const startedAt = Date.now();
     if (workoutLogIdRef.current && workoutInProgress) {
       await supabase.from("workout_logs").update({ in_progress: false }).eq("id", workoutLogIdRef.current).eq("user_id", user.id);
@@ -4911,7 +5413,15 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     setView("workout");
   };
 
+  // Start straight away with the full session at the usual gym; the
+  // time/gym options are behind a small link (openWorkoutOptions).
   const requestStartWorkout = session => {
+    setAvailableMinutes("");
+    setGymContext("usual");
+    setGymName("");
+    startWorkout(session, { minutes: "", context: "usual", name: "" });
+  };
+  const openWorkoutOptions = session => {
     setPendingSession(session);
     setAvailableMinutes("");
     setGymContext("usual");
@@ -4992,6 +5502,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
   const askCompletionFollowUp = async () => {
     const question = completionQuestion.trim();
     if (!question || completionReplyLoading || !completionFeedback) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const updated = [...completionFollowUps, { role: "user", content: question }];
     setCompletionFollowUps(updated);
     setCompletionQuestion("");
@@ -5082,7 +5594,8 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision };
     const newCompleted = { ...completedSets, [eIdx]: [...(completedSets[eIdx] || []), newSet] };
     setCompletedSets(newCompleted);
-    setCurrentInputs(prev => ({ ...prev, [eIdx]: { weight: "", reps: "" } }));
+    // Keep the last weight for the next set; only reps are re-entered.
+    setCurrentInputs(prev => ({ ...prev, [eIdx]: { weight, reps: "" } }));
 
     const totalSets = activeSession.exercises[eIdx]?.sets || 0;
 
@@ -5102,42 +5615,58 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
     }
   };
 
-  const buildAIPlan = async () => {
+  const buildAIPlan = async (answers = aiAnswers, chatContext = aiChatContext) => {
     if (aiBuilding) return;
     setAiPlanError("");
+    setAiBuildStage(0);
     setAiBuilding(true);
-    const context = Object.entries(aiAnswers).map(([k, v]) => {
-      const q = AI_QUESTIONS.find(q => q.id === k);
-      return `${q?.q}: ${v}`;
-    }).join("\n");
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          responseTokens: 6000,
-          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
+    const context = AI_QUESTIONS.map(question => `${question.q}: ${aiAnswerText(question, answers) || "not answered"}`).join("\n")
+      + (chatContext ? `\n\nEarlier conversation with the coach (respect anything relevant, such as injuries or preferences):\n${chatContext}` : "");
+    const budgetText = String(answers.session_length || "");
+    const budgetFor = session => requestedBudget(budgetText, session.days || []);
+    const validProgramme = parsed => Array.isArray(parsed?.sessions) && parsed.sessions.length > 0 &&
+      parsed.sessions.length === parseInt(answers.days_per_week, 10) &&
+      !parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
+        session.days.some(day => !DAYS.includes(day)) ||
+        !Array.isArray(session.exercises) || !session.exercises.length ||
+        session.exercises.some(exercise => !exercise.name || !Number.isInteger(exercise.sets) ||
+          exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
+          exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
+          typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)));
+    const system = `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
+TIME LIMIT: Every session must fit the user's stated time for its day. The app times a session like this, and so must you: 5 minutes general warm-up; for each exercise, warmup_sets ramp-up sets (default 2) of about 8 reps × the tempo total in seconds plus 60 seconds each; each working set lasts the top of its rep range × the tempo total in seconds; rest_seconds between working sets (default 120, minimum 60); 90 seconds to change exercise. duration_mins must be that total, and must not exceed the user's limit. If it would, use fewer exercises or sets, shorter rest or fewer ramp-up sets.
 SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
 Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "duration_mins": 60, "reasoning": "short explanation", "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
-          messages: [{ role: "user", content: `Build me a training programme:\n${context}` }],
-        }),
-      });
-      if (!res.ok) throw new Error("Could not build programme");
-      const data = await res.json();
-      const text = data.content?.map(b => b.text || "").join("") || "";
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      if (!Array.isArray(parsed.sessions) || !parsed.sessions.length ||
-          parsed.sessions.length !== parseInt(aiAnswers.days_per_week, 10) ||
-          parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
-            session.days.some(day => !DAYS.includes(day)) ||
-            !Array.isArray(session.exercises) || !session.exercises.length ||
-            session.exercises.some(exercise => !exercise.name || !Number.isInteger(exercise.sets) ||
-              exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
-              exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
-              typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)))) {
-        throw new Error("Incomplete programme");
+{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "duration_mins": 60, "reasoning": "short explanation", "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "rest_seconds": 90, "warmup_sets": 1, "notes": "string"}]}], "notes": "string"}`;
+    try {
+      // Up to two attempts: retry once if the reply cannot be read as a
+      // complete programme, or if a session runs over the stated time.
+      const messages = [{ role: "user", content: `Build me a training programme:\n${context}` }];
+      let plan = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetch("/api/chat", {
+          method: "POST", headers: await chatHeaders(),
+          body: JSON.stringify({ responseTokens: 6000, system, messages }),
+        });
+        if (!res.ok) throw new Error("Could not build programme");
+        const data = await res.json();
+        const text = data.content?.map(b => b.text || "").join("") || "";
+        let parsed = null;
+        try { parsed = JSON.parse(text.replace(/```json|```/g, "").trim()); } catch { parsed = null; }
+        if (!validProgramme(parsed)) {
+          messages.push({ role: "assistant", content: text || "(empty reply)" }, { role: "user", content: `Your reply could not be used: it must be one complete, valid JSON object matching the schema, with exactly ${parseInt(answers.days_per_week, 10)} sessions and one rep range per set. Return the whole programme again as JSON only.` });
+          continue;
+        }
+        plan = parsed;
+        const overruns = parsed.sessions
+          .map(session => ({ session, budget: budgetFor(session), minutes: estimateSession(session).minutes }))
+          .filter(item => item.budget && item.minutes > item.budget);
+        if (!overruns.length) break;
+        messages.push({ role: "assistant", content: text }, { role: "user", content: `These sessions run over my time limit by the app's timing: ${overruns.map(item => `${item.session.name} ${item.minutes} min (limit ${item.budget})`).join("; ")}. Return the whole programme again as JSON only, with every session within its limit.` });
       }
-      setAiPlan(parsed);
+      if (!plan) throw new Error("Incomplete programme");
+      // Whatever the model returned, never show a session longer than the stated limit.
+      setAiPlan({ ...plan, sessions: plan.sessions.map(session => fitSessionToBudget(session, budgetFor(session))) });
     } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
     setAiBuilding(false);
   };
@@ -5148,42 +5677,44 @@ Respond ONLY with valid JSON:
     </div></div>
   );
 
+  // Returns { ok, message } describing what really happened. A permanent
+  // change only reports success once saveSplit has confirmed it.
   const applyWorkoutCoachAction = async (action, permanent) => {
+    const notSaved = error => ({ ok: false, message: `Not saved: ${error}. Your plan has not changed.` });
     // Logging a set is a direct, immediate edit to the active workout only -
     // there's no "future sessions" version of a set that already happened.
     if (action.type === "log_set") {
       const match = String(action.value || "").match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
-      if (!match || !activeSession) return;
+      if (!match || !activeSession) return { ok: false, message: "Nothing was logged: the set could not be read." };
       const [, reps, weight] = match;
       const eIdx = activeSession.exercises.findIndex(exercise => exercise.name.toLowerCase() === action.exercise.toLowerCase());
-      if (eIdx === -1) return;
+      if (eIdx === -1) return { ok: false, message: `Nothing was logged: ${action.exercise} is not in this workout.` };
       const sIdx = getCurrentSetIdx(eIdx);
       const totalSets = activeSession.exercises[eIdx]?.sets || 0;
       const newSet = { weight, reps, setNum: sIdx + 1 };
       setCompletedSets(previous => ({ ...previous, [eIdx]: [...(previous[eIdx] || []), newSet] }));
       if (sIdx + 1 < totalSets) setSetProgress(previous => ({ ...previous, [eIdx]: sIdx + 1 }));
-      return;
+      return { ok: true, message: "Set logged." };
     }
     // A whole session rewrite (restructuring the day, swapping several
     // exercises at once) arrives as JSON rather than a single exercise tweak.
     if (action.type === "replace_session") {
       const payload = action.payload || {};
       const targetName = payload.sessionName || activeSession?.name;
-      if (!targetName || !Array.isArray(payload.exercises)) return;
+      if (!targetName || !Array.isArray(payload.exercises) || !payload.exercises.length) return { ok: false, message: "Nothing was changed: the coach's session could not be read." };
       const [normalized] = normalizeFitnessSessions([{ name: targetName, exercises: payload.exercises }]);
-      if (activeSession && activeSession.name.toLowerCase() === targetName.toLowerCase()) {
-        setActiveSession(previous => previous ? { ...previous, exercises: normalized.exercises } : previous);
-      }
       if (permanent) {
         const exists = sessions.some(session => session.name.toLowerCase() === targetName.toLowerCase());
         const updated = exists
           ? sessions.map(session => session.name.toLowerCase() === targetName.toLowerCase() ? { ...session, exercises: normalized.exercises } : session)
           : [...sessions, { name: targetName, exercises: normalized.exercises }];
-        setSessions(updated);
-        setSplit(previous => ({ ...previous, sessions: updated }));
-        await saveSplit(updated);
+        const saved = await saveSplit(updated);
+        if (!saved.ok) return notSaved(saved.error);
       }
-      return;
+      if (activeSession && activeSession.name.toLowerCase() === targetName.toLowerCase()) {
+        setActiveSession(previous => previous ? { ...previous, exercises: normalized.exercises } : previous);
+      }
+      return { ok: true, message: permanent ? `Saved: ${targetName} is updated in your plan.` : "Applied to this workout only." };
     }
     const changeSession = session => {
       if (!session) return session;
@@ -5206,13 +5737,19 @@ Respond ONLY with valid JSON:
       });
       return { ...session, exercises };
     };
-    setActiveSession(previous => changeSession(previous));
-    if (permanent && activeSession) {
-      const updated = sessions.map(session => session.name === activeSession.name ? changeSession(session) : session);
-      setSessions(updated);
-      setSplit(previous => ({ ...previous, sessions: updated }));
-      await saveSplit(updated);
+    if (!activeSession) return { ok: false, message: "Nothing was changed: no workout is open." };
+    const changedWorkout = changeSession(activeSession);
+    if (JSON.stringify(changedWorkout.exercises) === JSON.stringify(activeSession.exercises)) {
+      return { ok: false, message: `Nothing was changed: ${action.exercise} is not in this workout.` };
     }
+    if (permanent) {
+      const updated = sessions.map(session => session.name === activeSession.name ? changeSession(session) : session);
+      if (JSON.stringify(updated) === JSON.stringify(sessions)) return { ok: false, message: `Nothing was changed: ${action.exercise} is not in ${activeSession.name} in your saved plan.` };
+      const saved = await saveSplit(updated);
+      if (!saved.ok) return notSaved(saved.error);
+    }
+    setActiveSession(changedWorkout);
+    return { ok: true, message: permanent ? "Saved to your plan and applied to this workout." : "Applied to this workout only." };
   };
 
   // Structured active-workout state (exercise -> set -> weight/reps/done),
@@ -5230,12 +5767,13 @@ Respond ONLY with valid JSON:
   const applyStructuredCoachAction = async action => {
     if (action.scope === "permanent") {
       const updated = applyCoachActionToProgramme(sessions, action);
-      setSessions(updated);
-      setSplit(previous => ({ ...(previous || {}), sessions: updated }));
-      await saveSplit(updated);
-      return;
+      if (JSON.stringify(updated) === JSON.stringify(sessions)) return { ok: false, message: "Nothing was changed: that exercise is not in your saved plan." };
+      const saved = await saveSplit(updated);
+      if (!saved.ok) return { ok: false, message: `Not saved: ${saved.error}. Your plan has not changed.` };
+      return { ok: true, message: "Saved to your plan." };
     }
     setActiveSession(previous => applyCoachActionToWorkout(previous, action));
+    return { ok: true, message: "Applied to this workout only." };
   };
 
   const fitnessCoach = (
@@ -5269,6 +5807,43 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       />
     </div>
   );
+  // The plan coach card is shown with or without a saved plan.
+  const planCoachCard = (
+            <div className="t3d-card" style={{ marginBottom: 16 }}>
+              <div className="t3d-ctitle" style={{ color: NEON }}>AI COACH</div>
+              <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask about your current plan, progress, recovery or exercise choices.</p>
+              {coachMessages.length === 0 && (
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
+                  {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
+                    <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
+                  ))}
+                </div>
+              )}
+              {coachMessages.length > 0 && (
+                <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
+                  {coachMessages.map((message, index) => (
+                    <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
+                      <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
+                      <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
+                    </div>
+                  ))}
+                  {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
+                </div>
+              )}
+              {coachMessages.at(-1)?.role === "assistant" && isYesNoQuestion(coachMessages.at(-1)?.content) && (
+                <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  {["Yes", "No", "More detail"].map(reply => <button key={reply} className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach(reply)}>{reply.toUpperCase()}</button>)}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <input className="t3d-ai-input" placeholder="Ask a question about your current plan..." value={coachQuestion}
+                  onChange={event => setCoachQuestion(event.target.value)}
+                  onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanCoach(); } }} />
+                <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach()} disabled={coachLoading || !coachQuestion.trim()}>{coachLoading ? "ASKING..." : "ASK"}</button>
+              </div>
+            </div>
+  );
+
   const discardWorkoutDialog = discardWorkoutWarning ? (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
       <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="discard-workout-title" style={{ width: "100%", maxWidth: 360, borderColor: NEON3, textAlign: "center" }}>
@@ -5338,10 +5913,24 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             <div style={{ color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
               {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN
             </div>
-            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }} onClick={() => finishWorkout()} disabled={workoutFinishing}>
+            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }} onClick={() => remainingSetCount > 0 ? setEndWorkoutConfirm(remainingSetCount) : finishWorkout()} disabled={workoutFinishing}>
               {workoutFinishing ? "SAVING..." : "END WORKOUT"}
             </button>
           </div>
+          {endWorkoutConfirm !== null && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
+              <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="end-workout-title" style={{ width: "100%", maxWidth: 340, borderColor: "#FFB547", textAlign: "center" }}>
+                <div id="end-workout-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>
+                  {endWorkoutConfirm} SET{endWorkoutConfirm === 1 ? "" : "S"} NOT LOGGED
+                </div>
+                <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>End anyway? Sets you have not logged will be recorded as skipped.</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setEndWorkoutConfirm(null)}>KEEP GOING</button>
+                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1, minHeight: 44 }} onClick={() => { setEndWorkoutConfirm(null); finishWorkout(); }}>END ANYWAY</button>
+                </div>
+              </div>
+            </div>
+          )}
           {/* Delete session - kept nearby but deliberately unobtrusive */}
           <div style={{ textAlign: "right", marginBottom: 10 }}>
             <button type="button" onClick={() => setDiscardWorkoutWarning(true)}
@@ -5561,8 +6150,15 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     if (aiBuilding) return (
       <div className="t3d-fade"><div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
         <div style={{ fontSize: 30, marginBottom: 16 }}>🤖</div>
-        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 8 }}>BUILDING YOUR PROGRAMME</div>
-        <div style={{ fontSize: 11, color: "#E0EAF0" }}>Analysing your answers...</div>
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 14 }}>BUILDING YOUR PROGRAMME</div>
+        <ol role="status" aria-live="polite" style={{ listStyle: "none", padding: 0, margin: "0 auto", maxWidth: 320, textAlign: "left" }}>
+          {AI_BUILD_STAGES.map((stage, index) => (
+            <li key={stage} style={{ fontSize: 11, padding: "5px 0", color: index < aiBuildStage ? NEON : index === aiBuildStage ? "#E0EAF0" : "#4A6070" }}>
+              {index < aiBuildStage ? "✓" : index === aiBuildStage ? "▸" : "·"} {stage}{index === aiBuildStage ? "..." : ""}
+            </li>
+          ))}
+        </ol>
+        <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 12 }}>This usually takes 20–40 seconds.</div>
       </div></div>
     );
 
@@ -5597,56 +6193,111 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               setAiPlanSaving(true);
               setAiPlanError("");
               try {
-                const unapprovedSessions = normalizeFitnessSessions(aiPlan.sessions).map(session => ({ ...session, approval: { approved: false } }));
-                const programme = { sessions: unapprovedSessions, split_name: aiPlan.split_name || "My Programme" };
-                // Upsert: `split` is cleared during a full rebuild even though the user's row still exists.
+                // Saving is the approval: no second "review & approve" step.
+                const now = new Date();
+                const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions), now);
+                const programme = { sessions: approvedSessions, split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null };
+                // Upsert so an existing plan row is replaced rather than duplicated.
                 const { error } = await supabase.from("workout_splits").upsert({ user_id: user.id, ...programme }, { onConflict: "user_id" });
                 if (error) throw error;
-                setSessions(unapprovedSessions);
-                setSplit({ sessions: unapprovedSessions, split_name: aiPlan.split_name });
+                setSessions(approvedSessions);
+                setSplit({ ...programme });
                 setView("home");
               } catch {
                 setAiPlanError("Your programme could not be saved. Please try again.");
               } finally { setAiPlanSaving(false); }
-            }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE FOR MY APPROVAL"}</button>
+            }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE PLAN"}</button>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiPlanSaving} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </div>
       </div>
     );
 
-    const currentQ = AI_QUESTIONS[aiStep];
+    const currentQ = aiAskedQuestions[aiStep] || aiAskedQuestions[0];
+    if (!currentQ) return (
+      <div className="t3d-fade"><div className="t3d-card">
+        <div className="t3d-ctitle">YOUR ANSWERS ARE READY</div>
+        <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>Everything the coach needs came from your chat.</p>
+        {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="t3d-btn" onClick={() => buildAIPlan()}>BUILD MY PROGRAMME</button>
+          <button className="t3d-btn t3d-btn-sm" onClick={() => { setAiQuestionIds(null); setAiStep(0); }}>REVIEW ALL ANSWERS</button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setView("home")}>CANCEL</button>
+        </div>
+      </div></div>
+    );
+    const isLastQuestion = aiStep >= aiAskedQuestions.length - 1;
+    const answered = Boolean(aiAnswerText(currentQ).trim());
+    const goNext = (answers = aiAnswers) => isLastQuestion ? buildAIPlan(answers) : setAiStep(step => step + 1);
+    const selectedValues = Array.isArray(aiAnswers[currentQ.id]) ? aiAnswers[currentQ.id] : aiAnswers[currentQ.id] ? [aiAnswers[currentQ.id]] : [];
+    const optionStyle = selected => ({
+      textAlign: "left", padding: "12px 16px", fontSize: 11, letterSpacing: 1, whiteSpace: "normal",
+      background: selected ? "rgba(0,255,178,.18)" : "transparent",
+      border: `${selected ? 2 : 1}px solid ${selected ? NEON : "#31434F"}`,
+      color: selected ? NEON : "#C5D6DC",
+      boxShadow: selected ? `0 0 10px ${NEON}40` : "none",
+    });
+    const chooseOption = option => setAiAnswers(answers => {
+      if (!currentQ.multi) return { ...answers, [currentQ.id]: option };
+      const current = Array.isArray(answers[currentQ.id]) ? answers[currentQ.id] : [];
+      if (current.includes(option)) return { ...answers, [currentQ.id]: current.filter(item => item !== option) };
+      return { ...answers, [currentQ.id]: [...current, option].slice(-currentQ.multi) };
+    });
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
           <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
-            {AI_QUESTIONS.map((_, i) => (
+            {aiAskedQuestions.map((_, i) => (
               <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= aiStep ? NEON : BORDER, transition: "background .3s" }} />
             ))}
           </div>
-          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {AI_QUESTIONS.length}</div>
+          {aiPrefillNote && <p role="status" style={{ fontSize: 11, color: "#FFB547", lineHeight: 1.6, marginTop: 0 }}>{aiPrefillNote}</p>}
+          {aiQuestionIds && aiQuestionIds.length < AI_QUESTIONS.length && (
+            <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>
+              Your other answers were taken from your chat with the coach. Only the missing ones are asked here.
+            </p>
+          )}
+          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {aiAskedQuestions.length}</div>
           <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 24, lineHeight: 1.6 }}>{currentQ.q}</div>
           {currentQ.type === "choice" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
-              {currentQ.options.map((opt, i) => (
-                <button key={i} className="t3d-btn" style={{ textAlign: "left", padding: "12px 16px", fontSize: 11, letterSpacing: 1,
-                  background: aiAnswers[currentQ.id] === opt ? "rgba(0,255,178,.15)" : "transparent",
-                  borderColor: aiAnswers[currentQ.id] === opt ? NEON : BORDER,
-                  color: aiAnswers[currentQ.id] === opt ? NEON : "#4A6070" }}
-                  onClick={() => {
-                    setAiAnswers(a => ({ ...a, [currentQ.id]: opt }));
-
-                  }}>{opt}</button>
-              ))}
+              {currentQ.options.map((opt, i) => {
+                const selected = selectedValues.includes(opt);
+                return (
+                  <button key={i} type="button" aria-pressed={selected} className="t3d-btn" style={optionStyle(selected)} onClick={() => chooseOption(opt)}>
+                    {selected ? "✓ " : ""}{opt}
+                  </button>
+                );
+              })}
             </div>
           )}
           {currentQ.type === "choice" && currentQ.custom && (
             <label style={{ display: "block", fontSize: 12, marginBottom: 16 }}>
               Or describe your own answer
               <input className="t3d-input" style={{ marginTop: 8 }}
-                value={currentQ.options.includes(aiAnswers[currentQ.id]) ? "" : aiAnswers[currentQ.id] || ""}
-                onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
+                value={currentQ.multi ? aiAnswers[`${currentQ.id}_custom`] || "" : currentQ.options.includes(aiAnswers[currentQ.id]) ? "" : aiAnswers[currentQ.id] || ""}
+                onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.multi ? `${currentQ.id}_custom` : currentQ.id]: event.target.value }))} />
             </label>
+          )}
+          {currentQ.type === "days" && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                {DAYS.map(day => {
+                  const selected = selectedValues.includes(day);
+                  return (
+                    <button key={day} type="button" aria-pressed={selected} className="t3d-btn" style={{ ...optionStyle(selected), minWidth: 52, minHeight: 44, textAlign: "center", padding: "10px 8px" }}
+                      onClick={() => setAiAnswers(answers => {
+                        const current = (Array.isArray(answers.preferred_days) ? answers.preferred_days : []).filter(item => item !== "FLEXIBLE");
+                        return { ...answers, preferred_days: current.includes(day) ? current.filter(item => item !== day) : DAYS.filter(item => item === day || current.includes(item)) };
+                      })}>{day}</button>
+                  );
+                })}
+              </div>
+              <button type="button" aria-pressed={selectedValues.includes("FLEXIBLE")} className="t3d-btn" style={{ ...optionStyle(selectedValues.includes("FLEXIBLE")), width: "100%" }}
+                onClick={() => setAiAnswers(answers => ({ ...answers, preferred_days: ["FLEXIBLE"] }))}>
+                {selectedValues.includes("FLEXIBLE") ? "✓ " : ""}I&apos;m flexible – let the coach choose
+              </button>
+            </div>
           )}
           {currentQ.type === "availability" && (
             <div style={{ marginBottom: 20 }}>
@@ -5660,27 +6311,25 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   value={aiAnswers[currentQ.id] || ""}
                   onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
               </label>
-              <button className="t3d-btn" style={{ width: "100%", marginTop: 12 }}
-                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
-                onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
             </div>
-          )}          {currentQ.type === "text" && (
+          )}
+          {currentQ.type === "text" && (
             <div style={{ marginBottom: 20 }}>
               <input className="t3d-input" placeholder={currentQ.placeholder}
                 value={aiAnswers[currentQ.id] || ""}
                 onChange={e => setAiAnswers(a => ({ ...a, [currentQ.id]: e.target.value }))}
-                onKeyDown={e => e.key === "Enter" && aiAnswers[currentQ.id] && (aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan())} />
-              <button className="t3d-btn" style={{ width: "100%", padding: 12, marginTop: 12 }}
-                disabled={!String(aiAnswers[currentQ.id] || "").trim()}
-                onClick={() => aiStep < AI_QUESTIONS.length-1 ? setAiStep(s => s+1) : buildAIPlan()}>
-                {aiStep < AI_QUESTIONS.length-1 ? "NEXT →" : "BUILD MY PROGRAMME"}
-              </button>
+                onKeyDown={e => e.key === "Enter" && answered && goNext()} />
+              {currentQ.skipLabel && (
+                <button type="button" className="t3d-btn" style={{ ...optionStyle(aiAnswers[currentQ.id] === currentQ.skipLabel), width: "100%", marginTop: 10 }}
+                  onClick={() => { const answers = { ...aiAnswers, [currentQ.id]: currentQ.skipLabel }; setAiAnswers(answers); goNext(answers); }}>
+                  {currentQ.skipLabel}
+                </button>
+              )}
             </div>
           )}
-          {currentQ.type === "choice" && (
-            <button className="t3d-btn" style={{ width: "100%", marginBottom: 12 }}
-              disabled={!String(aiAnswers[currentQ.id] || "").trim()} onClick={() => setAiStep(step => step + 1)}>NEXT →</button>
-          )}
+          <button className="t3d-btn" style={{ width: "100%", padding: 12, marginBottom: 12 }} disabled={!answered} onClick={() => goNext()}>
+            {isLastQuestion ? "BUILD MY PROGRAMME" : "NEXT →"}
+          </button>
           {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
           <div style={{ display: "flex", gap: 10 }}>
             {aiStep > 0 && <button className="t3d-btn t3d-btn-sm" onClick={() => setAiStep(step => step - 1)}>← BACK</button>}
@@ -5691,6 +6340,27 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     );
   }
 
+  const openExerciseEditor = (sessionIdx, exerciseIdx) => {
+    const exercise = sessions[sessionIdx]?.exercises?.[exerciseIdx];
+    if (!exercise) return;
+    const reps = Array.isArray(exercise.reps) ? exercise.reps : String(exercise.reps || "").split("/");
+    const uniform = reps.every(rep => rep === reps[0]);
+    setNewEx({ name: exercise.name, sets: Number(exercise.sets) || reps.length || 3, reps, repsAll: uniform ? reps[0] || "" : "", perSet: !uniform, tempo: exercise.tempo || "" });
+    setEditingExerciseIdx(exerciseIdx);
+    setAddExerciseModal(sessionIdx);
+  };
+
+  // A plan the user built by hand is theirs: save it approved, starting now.
+  const saveManualPlan = async (planSessions = sessions) => {
+    const now = new Date();
+    const approved = withPlanApproval(planSessions, now);
+    const extra = { programme_started_at: now.toISOString(), week_reviewed_at: null };
+    const saved = await saveSplit(approved, extra);
+    if (!saved.ok) { window.alert(`Your plan could not be saved: ${saved.error}. Please try again.`); return; }
+    setSplit({ sessions: approved, ...extra });
+    setView("home");
+  };
+
   // ── MANUAL SETUP ──────────────────────────────────────────────────────────
   if (view === "setup") {
     return (
@@ -5698,10 +6368,9 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         <div className="t3d-card">
           {setupStep === 0 && (
             <div>
+              <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")}>← BACK</button>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
-              <button className="t3d-btn t3d-btn-sm" onClick={() => {
-                setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder");
-              }}>LET AI COACH CHOOSE MY PROGRAMME</button>
+              <button className="t3d-btn t3d-btn-sm" onClick={openAiBuilder}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
                 {[2,3,4,5,6].map(n => (
                   <button key={n} className="t3d-btn" style={{ width: 50, height: 50, fontSize: 18, padding: 0,
@@ -5756,11 +6425,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>EXERCISES</div>
                 {sessions[currentSessionIdx].exercises?.map((ex, eIdx) => (
-                  <div key={eIdx} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
+                  <div key={eIdx} role="button" tabIndex={0} aria-label={`Edit ${ex.name}`}
+                    onClick={() => openExerciseEditor(currentSessionIdx, eIdx)}
+                    onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openExerciseEditor(currentSessionIdx, eIdx); } }}
+                    style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: "pointer" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                      <div style={{ fontSize: 12 }}>{ex.name}</div>
-                      <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }}
-                        onClick={() => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s))}>✕</button>
+                      <div style={{ fontSize: 12 }}>{ex.name} <span style={{ fontSize: 9, color: "#6F8792" }}>· TAP TO EDIT</span></div>
+                      <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 8 }} aria-label={`Remove ${ex.name}`}
+                        onClick={event => { event.stopPropagation(); setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s)); }}>✕</button>
                     </div>
                     <div style={{ fontSize: 10, color: "#E0EAF0" }}>
                       {ex.sets} sets · {Array.isArray(ex.reps) ? ex.reps.join(" / ") : ex.reps} reps
@@ -5769,7 +6441,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   </div>
                 ))}
                 <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginTop: 4 }}
-                  onClick={() => setAddExerciseModal(currentSessionIdx)}>+ ADD EXERCISE</button>
+                  onClick={() => { setEditingExerciseIdx(null); setNewEx({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" }); setAddExerciseModal(currentSessionIdx); }}>+ ADD EXERCISE</button>
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
@@ -5777,12 +6449,11 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 {currentSessionIdx < sessions.length-1 ? (
                   <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => setCurrentSessionIdx(i => i+1)}>NEXT SESSION →</button>
                 ) : (
-                  <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
+                  <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => {
+                    if (sessions.some(s => !s.exercises?.length)) { setEmptySessionsWarning(true); return; }
                     const hasNoDays = sessions.some(s => !s.days || s.days.length === 0);
                     if (hasNoDays) { setNoDaysWarning(true); return; }
-                    await saveSplit(sessions);
-                    setSplit({ sessions });
-                    setView("home");
+                    saveManualPlan();
                   }}>SAVE SPLIT ✓</button>
                 )}
               </div>
@@ -5801,22 +6472,49 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setNoDaysWarning(false)}>GO BACK & ADD DAYS</button>
-                <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={async () => {
+                <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={() => {
                   setNoDaysWarning(false);
-                  await saveSplit(sessions);
-                  setSplit({ sessions });
-                  setView("home");
+                  saveManualPlan();
                 }}>SAVE ANYWAY</button>
               </div>
             </div>
           </div>
         )}
 
+        {/* Sessions without exercises would not be saved */}
+        {emptySessionsWarning && (() => {
+          const emptySessions = sessions.map((session, index) => ({ session, index })).filter(({ session }) => !session.exercises?.length);
+          return (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+              <div role="alertdialog" aria-modal="true" aria-labelledby="empty-sessions-title" style={{ background: SURFACE, border: "1px solid #FFB547", borderRadius: 8, padding: 24, maxWidth: 360, textAlign: "center" }}>
+                <div id="empty-sessions-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#FFB547", letterSpacing: 2, marginBottom: 12 }}>
+                  {emptySessions.length === 1 ? "1 SESSION HAS NO EXERCISES" : `${emptySessions.length} SESSIONS HAVE NO EXERCISES`}
+                </div>
+                <div style={{ fontSize: 12, color: "#C5D6DC", marginBottom: 18, lineHeight: 1.7 }}>
+                  {emptySessions.map(({ session }) => session.name || "Unnamed session").join(", ")} will not be saved unless you add exercises.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => { setEmptySessionsWarning(false); setCurrentSessionIdx(emptySessions[0].index); }}>ADD EXERCISES</button>
+                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#E0EAF0" }} onClick={() => {
+                    setEmptySessionsWarning(false);
+                    const remaining = sessions.filter(session => session.exercises?.length);
+                    if (!remaining.length) return;
+                    setSessions(remaining);
+                    setCurrentSessionIdx(0);
+                    if (remaining.some(session => !session.days?.length)) { setNoDaysWarning(true); return; }
+                    saveManualPlan(remaining);
+                  }}>SAVE WITHOUT THEM</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Add exercise modal */}
         {addExerciseModal !== null && (
           <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 24, width: "100%", maxWidth: 380 }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>ADD EXERCISE</div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 16 }}>{editingExerciseIdx === null ? "ADD EXERCISE" : "EDIT EXERCISE"}</div>
 
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>EXERCISE NAME</div>
@@ -5838,13 +6536,20 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 </div>
               </div>
 
-              {/* Per-set rep ranges */}
+              {/* Reps: one box for all sets, per-set optional */}
               <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>REPS PER SET</div>
-                {Array.from({ length: newEx.sets || 3 }, (_, i) => (
-                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>REPS FOR ALL SETS</div>
+                <input className="t3d-input" placeholder="e.g. 8-10 or 8" value={newEx.repsAll} disabled={newEx.perSet}
+                  onChange={e => setNewEx(prev => ({ ...prev, repsAll: e.target.value }))} />
+                <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 6 }}>Leave blank for 8–12 reps.</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10, color: "#C5D6DC", marginTop: 10, minHeight: 32 }}>
+                  <input type="checkbox" checked={newEx.perSet} onChange={e => setNewEx(prev => ({ ...prev, perSet: e.target.checked, reps: Array.from({ length: prev.sets || 3 }, (_, i) => prev.reps[i] || prev.repsAll || "") }))} />
+                  Set different reps for each set
+                </label>
+                {newEx.perSet && Array.from({ length: newEx.sets || 3 }, (_, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
                     <div style={{ fontSize: 10, color: "#E0EAF0", width: 40, fontFamily: "'Orbitron',monospace" }}>SET {i+1}</div>
-                    <input className="t3d-input" placeholder="e.g. 8-10 or 8"
+                    <input className="t3d-input" placeholder="8-12"
                       value={newEx.reps[i] || ""}
                       onChange={e => setNewEx(prev => {
                         const reps = [...(prev.reps || [])];
@@ -5856,15 +6561,23 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setAddExerciseModal(null); setNewEx({ name: "", sets: 3, reps: [], tempo: "" }); }}>CANCEL</button>
-                <button className="t3d-btn" style={{ flex: 1 }} disabled={!newEx.name}
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setAddExerciseModal(null); setEditingExerciseIdx(null); setNewEx({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" }); }}>CANCEL</button>
+                <button className="t3d-btn" style={{ flex: 1 }} disabled={!newEx.name.trim()}
                   onClick={() => {
+                    const setCount = newEx.sets || 3;
+                    const exercise = {
+                      name: newEx.name.trim(), sets: setCount, tempo: newEx.tempo,
+                      reps: Array.from({ length: setCount }, (_, index) => (newEx.perSet ? newEx.reps[index] : newEx.repsAll)?.trim() || "8-12"),
+                    };
                     setSessions(prev => prev.map((s, i) => i === addExerciseModal ? {
-                      ...s, exercises: [...(s.exercises||[]), { name: newEx.name, sets: newEx.sets || 3, reps: Array.from({ length: newEx.sets || 3 }, (_, index) => newEx.reps[index]?.trim() || "8-12"), tempo: newEx.tempo }]
+                      ...s, exercises: editingExerciseIdx === null
+                        ? [...(s.exercises || []), exercise]
+                        : s.exercises.map((existing, index) => index === editingExerciseIdx ? { ...existing, ...exercise } : existing),
                     } : s));
                     setAddExerciseModal(null);
-                    setNewEx({ name: "", sets: 3, reps: [], tempo: "" });
-                  }}>ADD ✓</button>
+                    setEditingExerciseIdx(null);
+                    setNewEx({ name: "", sets: 3, reps: [], repsAll: "", perSet: false, tempo: "" });
+                  }}>{editingExerciseIdx === null ? "ADD ✓" : "SAVE ✓"}</button>
               </div>
             </div>
           </div>
@@ -5873,20 +6586,23 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     );
   }
 
+  const planChangeIntro = [{
+    role: "assistant",
+    content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
+  }];
   const openPlanChangeCoach = () => {
-    setPlanChangeMessages([{
-      role: "assistant",
-      content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
-    }]);
+    setPlanChangeMessages(planChangeIntro);
     setPlanChangeInput("");
     setPlanChangeRecommendation(null);
     setPlanChangeOpen(true);
   };
 
-  const askPlanChangeCoach = async (suggestedMessage) => {
+  const askPlanChangeCoach = async (suggestedMessage, baseMessages = planChangeMessages) => {
     const message = String(suggestedMessage || planChangeInput).trim();
     if (!message || planChangeLoading) return;
-    const nextMessages = [...planChangeMessages, { role: "user", content: message }];
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
+    const nextMessages = [...baseMessages, { role: "user", content: message }];
     setPlanChangeMessages(nextMessages);
     setPlanChangeInput("");
     setPlanChangeLoading(true);
@@ -5918,21 +6634,60 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const changes = planChangeRecommendation?.changes || [];
     if (!changes.length) return;
     const updated = applyPlanChangeProposal(sessions, changes);
-    await saveSplit(updated);
+    if (JSON.stringify(updated) === JSON.stringify(sessions)) {
+      setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Nothing was changed: those exercises or sessions were not found in your saved plan." }]);
+      return;
+    }
+    const saved = await saveSplit(updated);
+    if (!saved.ok) {
+      setPlanChangeMessages(previous => [...previous, { role: "assistant", content: `Not saved: ${saved.error}. Your plan has not changed. Please try again.` }]);
+      return;
+    }
     setPlanChangeRecommendation(null);
-    setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Those targeted changes are now saved. Your completed workout and exercise history has not been removed." }]);
+    setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Saved: those changes are now in your plan. Your completed workout and exercise history has not been removed." }]);
   };
 
-  const startFullPlanRebuild = () => {
+  // Go straight to the AI builder, pre-filling answers from the coach chat and
+  // asking only what the chat did not cover. The current plan stays in place
+  // until the new one is saved.
+  const startFullPlanRebuild = async () => {
+    if (planRebuildPreparing) return;
+    setPlanRebuildPreparing(true);
+    const transcript = planChangeMessages.map(message => `${message.role === "user" ? "User" : "Coach"}: ${message.content}`).join("\n");
+    let answers = {};
+    // Ask the model to read the chat, retrying once if the reply is unusable.
+    for (let attempt = 0; attempt < 2 && !Object.keys(answers).length; attempt++) {
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: await chatHeaders(),
+          body: JSON.stringify({
+            responseTokens: 1500,
+            system: `Read a conversation between a user and their fitness coach and fill in the user's answers to a training questionnaire. Use what the user said (and anything the coach proposed that the user accepted). Use null only for questions the conversation does not answer. Respond with one JSON object and nothing else, using exactly these keys:
+{"goal": [up to two of ${JSON.stringify(AI_QUESTIONS[0].options)}], "goal_custom": "any other goal in the user's words, or null", "experience": "text or null", "days_per_week": number 1-7 or null, "preferred_days": ["MON".."SUN"] or ["FLEXIBLE"] or null, "session_length": "time available per session, e.g. 45 minutes, or null", "equipment": "text or null", "split": "text or null", "favourites": "exercises they enjoy, or null", "priorities": "focus areas, or null", "limitations": "injuries or things to avoid, or null"}`,
+            messages: [{ role: "user", content: `CONVERSATION\n${transcript}\n\nReturn the JSON object now.` }],
+          }),
+        });
+        if (!response.ok) throw new Error(`Extraction request failed (${response.status})`);
+        const data = await response.json();
+        const parsed = extractJsonObject(data.content?.map(block => block.text || "").join("") || "");
+        answers = questionnaireAnswersFromExtraction(parsed, AI_QUESTIONS[0].options);
+      } catch (error) {
+        console.warn("Could not pre-fill answers from the coach chat:", error.message);
+      }
+    }
+    setAiPrefillNote(Object.keys(answers).length ? "" : "We could not read your answers from the coach chat, so please answer the questions below.");
+    const missing = AI_QUESTIONS.filter(question => !aiAnswerText(question, answers).trim()).map(question => question.id);
+    setPlanRebuildPreparing(false);
     setPlanChangeOpen(false);
-    setSplit(null);
-    setSessions([]);
-    setSetupStep(0);
     setAiStep(0);
-    setAiAnswers({});
+    setAiAnswers(answers);
     setAiPlan(null);
     setAiPlanError("");
-    setView("setup");
+    setAiChatContext(transcript);
+    setAiQuestionIds(missing);
+    setView("ai_builder");
+    if (!missing.length) buildAIPlan(answers, transcript);
   };
 
   const planChangeDialog = planChangeOpen ? (
@@ -5974,7 +6729,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         {planChangeRecommendation?.recommendation === "full_rebuild" && (
           <div style={{ marginBottom: 12, padding: 11, background: "rgba(255,45,120,.05)", border: "1px solid rgba(255,45,120,.3)", borderRadius: 6 }}>
             <div style={{ fontSize: 10, color: "#C9D7DC", lineHeight: 1.55, marginBottom: 9 }}>The coach recommends rebuilding the programme. Your existing plan stays saved until a replacement is completed, and all workout history remains.</div>
-            <button className="t3d-btn t3d-btn-red" style={{ width: "100%" }} onClick={startFullPlanRebuild}>CONTINUE TO FULL PLAN REBUILD</button>
+            <button className="t3d-btn t3d-btn-red" style={{ width: "100%" }} disabled={planRebuildPreparing} onClick={startFullPlanRebuild}>{planRebuildPreparing ? "PREPARING YOUR QUESTIONS..." : "CONTINUE TO FULL PLAN REBUILD"}</button>
           </div>
         )}
 
@@ -6109,6 +6864,19 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const askPlanCoach = async (suggestedQuestion) => {
     const question = (suggestedQuestion || coachQuestion).trim();
     if (!question || coachLoading) return;
+    // This chat cannot change the saved plan. Requests to change it go to the
+    // Change Plan coach, which proposes the change for approval and saves it.
+    if (split && isPlanChangeRequest(question)) {
+      setCoachMessages([...coachMessages, { role: "user", content: question }, { role: "assistant", content: "Plan changes are made in Change Plan, where you approve them before they are saved. I've opened it with your request." }]);
+      setCoachQuestion("");
+      setPlanChangeInput("");
+      setPlanChangeRecommendation(null);
+      setPlanChangeOpen(true);
+      askPlanChangeCoach(question, planChangeIntro);
+      return;
+    }
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
 
     const updatedMessages = [...coachMessages, { role: "user", content: question }];
     setCoachMessages(updatedMessages);
@@ -6129,7 +6897,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         method: "POST",
         headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nYou cannot change the saved plan from this chat: never say a change has been made, saved or applied. If the user wants a change, tell them to use Change Plan.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
           messages: updatedMessages,
         }),
       });
@@ -6147,6 +6915,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const askApprovalCoach = async () => {
     const question = approvalQuestion.trim();
     if (!question || approvalLoading) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const updated = [...approvalMessages, { role: "user", content: question }];
     const reviewedSessions = approvalReview === "all" ? sessions : [sessions[approvalReview]].filter(Boolean);
     setApprovalMessages(updated);
@@ -6178,10 +6948,13 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const todaySession = getSessionForDayCode(homeDate.dayCode);
   const homeTodayAnchor = new Date(`${today}T12:00:00Z`);
   let missedRecommendation = null;
+  // Only days after the plan was created can have a missed session.
+  const planStartKey = split?.programme_started_at ? getZonedDateInfo(new Date(split.programme_started_at), homeTimeZone).dateKey : null;
   for (let daysAgo = 1; daysAgo <= 7; daysAgo += 1) {
     const scheduledDate = new Date(homeTodayAnchor);
     scheduledDate.setUTCDate(scheduledDate.getUTCDate() - daysAgo);
     const dateKey = scheduledDate.toISOString().slice(0, 10);
+    if (planStartKey && dateKey <= planStartKey) break;
     const scheduledSession = getSessionForDayCode(dayCodes[scheduledDate.getUTCDay()]);
     if (!scheduledSession) continue;
     const trainedSince = history.some(log => log.session_name?.toLowerCase() === scheduledSession.name?.toLowerCase() && log.date >= dateKey && log.date <= today);
@@ -6195,6 +6968,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   }
   const recommendedSession = missedRecommendation?.session || todaySession;
   const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase()));
+  const trainedToday = history.some(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2));
+  let nextScheduled = null;
+  for (let daysAhead = 1; daysAhead <= 7 && !nextScheduled; daysAhead += 1) {
+    const date = new Date(homeTodayAnchor);
+    date.setUTCDate(date.getUTCDate() + daysAhead);
+    const session = getSessionForDayCode(dayCodes[date.getUTCDay()]);
+    if (session) nextScheduled = { session, dayLabel: daysAhead === 1 ? "tomorrow" : date.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long" }) };
+  }
   const activeCompletedSets = Object.values(completedSets).reduce((total, sets) => total + sets.length, 0);
   const activeTotalSets = activeSession?.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0) || 0;
   const programmeApproved = sessions.length > 0 && sessions.every(session => session.approval?.approved);
@@ -6240,17 +7021,26 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   return (
     <div className="t3d-fade">
       {!split ? (
+        <>
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>⚡</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>FITNESS</div>
           <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>Set up your training programme.<br />Track every session. Beat every record.</div>
-          <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-            <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10 }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
-            <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
-              onClick={() => { setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setView("ai_builder"); }}>🤖 AI BUILD MY PROGRAMME</button>
+          <div style={{ display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 200px", maxWidth: 260 }}>
+              <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, width: "100%" }} onClick={() => { setSetupStep(0); setView("setup"); }}>📋 BUILD MY SPLIT</button>
+              <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 7, lineHeight: 1.5 }}>For people who already know the exercises, sets and reps they want.</div>
+            </div>
+            <div style={{ flex: "1 1 200px", maxWidth: 260 }}>
+              <button className="t3d-btn" style={{ padding: "14px 20px", fontSize: 10, width: "100%", borderColor: "rgba(0,200,255,.3)", color: NEON2 }}
+                onClick={openAiBuilder}>🤖 AI BUILD MY PROGRAMME</button>
+              <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 7, lineHeight: 1.5 }}>For beginners or anyone who wants a plan built from a few questions.</div>
+            </div>
           </div>
           <div style={{ marginTop: 20, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>TRACK3D provides general fitness guidance. Consult a qualified professional before starting any new exercise programme. Not medical advice.</div>
         </div>
+        {planCoachCard}
+        </>
       ) : (
         <>
           {weekReviewDue && (
@@ -6278,9 +7068,21 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 </div>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 12, fontSize: 10, color: "#6F8792" }}>
                   <span>Not this one?</span>
-                  <button type="button" onClick={() => requestStartWorkout(activeSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Restart it</button>
+                  <button type="button" onClick={() => openWorkoutOptions(activeSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Restart it</button>
                   <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Switch workout</button>
                   <button type="button" onClick={() => setDiscardWorkoutWarning(true)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Delete it</button>
+                </div>
+              </div>
+            ) : (recommendedDoneToday || trainedToday) ? (
+              <div>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON, letterSpacing: 2, marginBottom: 8 }}>DONE FOR TODAY ✓</div>
+                <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+                  {nextScheduled ? `Next scheduled: ${nextScheduled.session.name}, ${nextScheduled.dayLabel}.` : "No more sessions scheduled this week."}
+                </div>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 10, color: "#6F8792" }}>
+                  <span>Want to train again?</span>
+                  {recommendedSession && <button type="button" onClick={() => requestStartWorkout(recommendedSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Repeat {recommendedSession.name}</button>}
+                  <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Choose a workout</button>
                 </div>
               </div>
             ) : recommendedSession ? (
@@ -6298,11 +7100,16 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   )}
                 </div>
                 <button className="t3d-big-btn" style={{ flex: "0 1 300px", margin: 0, background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 13, fontWeight: 900, letterSpacing: 2, boxShadow: "0 0 22px rgba(0,255,178,.24)" }} onClick={() => requestStartWorkout(recommendedSession)}>
-                  ▶ {recommendedDoneToday ? "START WORKOUT AGAIN" : "START WORKOUT"}
+                  ▶ START WORKOUT
+                </button>
+                <button type="button" onClick={() => openWorkoutOptions(recommendedSession)} style={{ flexBasis: "100%", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "4px 0", textAlign: "right", textDecoration: "underline" }}>
+                  Short on time or at a different gym?
                 </button>
               </div>
             ) : (
-              <div style={{ fontSize: 11, color: "#4A6070" }}>No missed or scheduled session. Choose any workout below.</div>
+              <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+                No session scheduled today.{nextScheduled ? ` Next: ${nextScheduled.session.name}, ${nextScheduled.dayLabel}.` : ""} Choose any workout below.
+              </div>
             )}
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 16, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
@@ -6333,7 +7140,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {pendingSession && (
             <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 }}>
               <div className="t3d-card" style={{ width: "100%", maxWidth: 380, maxHeight: "calc(100dvh - 40px)", overflowY: "auto" }}>
-                <div className="t3d-ctitle" style={{ color: NEON }}>BEFORE YOU START · OPTIONAL</div>
+                <div className="t3d-ctitle" style={{ color: NEON }}>WORKOUT OPTIONS</div>
                 <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 14 }}>{pendingSession.name}</div>
                 <label style={{ display: "block", fontSize: 9, color: "#8AABB8", marginBottom: 14 }}>
                   HOW MANY MINUTES DO YOU HAVE?
@@ -6379,6 +7186,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {discardWorkoutDialog}
           {planChangeDialog}
 
+          {planCoachCard}
+
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle">THIS WEEK <span style={{ color: "#6F8792" }}>· MON TO SUN</span></div>
             <div className="t3d-grid3" style={{ marginBottom: 18 }}>
@@ -6406,43 +7215,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
           </div>
 
-          <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle" style={{ color: NEON }}>AI COACH</div>
-            <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask about your current plan, progress, recovery or exercise choices.</p>
-            {coachMessages.length === 0 && (
-              <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
-                {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
-                  <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
-                ))}
-              </div>
-            )}
-            {coachMessages.length > 0 && (
-              <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
-                {coachMessages.map((message, index) => (
-                  <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
-                    <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-                    <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
-                  </div>
-                ))}
-                {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
-              </div>
-            )}
-            {coachMessages.at(-1)?.role === "assistant" && isYesNoQuestion(coachMessages.at(-1)?.content) && (
-              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                {["Yes", "No", "More detail"].map(reply => <button key={reply} className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach(reply)}>{reply.toUpperCase()}</button>)}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 8 }}>
-              <input className="t3d-ai-input" placeholder="Ask a question about your current plan..." value={coachQuestion}
-                onChange={event => setCoachQuestion(event.target.value)}
-                onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanCoach(); } }} />
-              <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach()} disabled={coachLoading || !coachQuestion.trim()}>{coachLoading ? "ASKING..." : "ASK"}</button>
-            </div>
-          </div>
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>RECOMMENDED WEEKLY SPLIT</div>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>YOUR WEEKLY PLAN</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={openPlanChangeCoach}>CHANGE PLAN</button>
@@ -6951,6 +7727,8 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
 
 function Nutrition({ user, userSessions }) {
   const [view, setView] = useState("home");
+  // Each screen change starts at the top, not wherever the last screen was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(true);
   const [logs, setLogs] = useState([]);
@@ -7076,11 +7854,13 @@ function Nutrition({ user, userSessions }) {
         : await supabase.from("nutrition_plans").insert({ user_id: user.id, ...row });
       if (result.error) {
         console.error("savePlan error:", result.error.message, result.error.code, result.error.details, result.error.hint);
+        setPlanSaveError(result.error.message || "database error");
         return false;
       }
       return true;
     } catch (e) {
       console.error("savePlan exception:", e.message || e);
+      setPlanSaveError(e?.message || "connection problem");
       return false;
     }
   };
@@ -7151,6 +7931,16 @@ function Nutrition({ user, userSessions }) {
       return false;
     }
   };
+
+  // Save meal answers as they are given during the review, so leaving part-way
+  // never loses them. A finished day keeps its finished status.
+  const reviewAutosaveRef = useRef(false);
+  useEffect(() => {
+    if (view !== "review") { reviewAutosaveRef.current = false; return; }
+    if (!reviewAutosaveRef.current) { reviewAutosaveRef.current = true; return; }
+    saveLog(mealResults, todayLogged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mealResults, view]);
 
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
@@ -7746,7 +8536,7 @@ function Nutrition({ user, userSessions }) {
               )}
               {planSaveError && (
                 <div style={{ fontSize: 11, color: NEON3, marginTop: 12, textAlign: "center" }}>
-                  Couldn't save your plan — check your connection and try again.
+                  Couldn&apos;t save your plan: {planSaveError}. Please try again.
                 </div>
               )}
               <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
@@ -7757,7 +8547,7 @@ function Nutrition({ user, userSessions }) {
                   const realMacros = getFinalMacros();
                   const ok = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
-                  if (!ok) { setPlanSaveError(true); return; }
+                  if (!ok) return;
                   const nextLibrary = mergeMealLibrary(mealLibrary, preparedPlanMeals);
                   setMealLibrary(nextLibrary);
                   await persistNutritionPlanning(nextLibrary, weeklyMealPlan);
@@ -8705,6 +9495,7 @@ export default function App() {
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [habitsReady, setHabitsReady] = useState(false);
   const prevHabitsRef = useRef(null); // last-persisted snapshot, for diffing what changed
+  const [habitSaveError, setHabitSaveError] = useState("");
   const [fitnessSessions, setFitnessSessions] = useState([]);
   const homeTimeZone = resolveHomeTimeZone(user);
   const todayLabel = new Date().toLocaleDateString("en-US", { timeZone: homeTimeZone, weekday: "long", month: "long", day: "numeric" });
@@ -8727,6 +9518,7 @@ export default function App() {
         loaded = (defs || []).map(h => ({ id: h.id, name: h.name, category: h.category || "daily", streak: h.streak || 0, done: doneIds.has(h.id) }));
       } catch (e) {
         console.log("Habit load error:", e);
+        if (!cancelled) setHabitSaveError(`Your habits could not be loaded from your account (${e?.message || "connection problem"}). Changes may not be saved.`);
         try {
           const savedDefinitions = JSON.parse(localStorage.getItem(`track3d_habits_${user.id}`) || "[]");
           const savedToday = JSON.parse(localStorage.getItem(`track3d_habit_status_${user.id}_${todayKey}`) || "{}");
@@ -8751,35 +9543,57 @@ export default function App() {
 
     const previous = prevHabitsRef.current || [];
     const currentIds = new Set(habits.map(h => h.id));
+    const writes = [];
 
     previous.filter(h => !currentIds.has(h.id)).forEach(h => {
-      supabase.from("habits").delete().eq("user_id", user.id).eq("id", String(h.id))
-        .then(({ error }) => { if (error) console.log("Habit delete error:", error); });
+      writes.push(supabase.from("habits").delete().eq("user_id", user.id).eq("id", String(h.id)));
     });
 
     habits.forEach(h => {
       const prevMatch = previous.find(p => p.id === h.id);
       if (!prevMatch || prevMatch.name !== h.name || prevMatch.category !== h.category) {
-        supabase.from("habits").upsert({
+        writes.push(supabase.from("habits").upsert({
           id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
           streak: h.streak || 0, updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id,id" }).then(({ error }) => { if (error) console.log("Habit save error:", error); });
+        }, { onConflict: "user_id,id" }));
       }
       if (!prevMatch || Boolean(prevMatch.done) !== Boolean(h.done)) {
-        if (h.done) {
-          supabase.from("habit_completions").upsert({
+        writes.push(h.done
+          ? supabase.from("habit_completions").upsert({
             user_id: user.id, habit_id: String(h.id), date: todayKey, done: true, updated_at: new Date().toISOString(),
-          }, { onConflict: "user_id,habit_id,date" }).then(({ error }) => { if (error) console.log("Habit tick save error:", error); });
-        } else {
-          supabase.from("habit_completions").delete()
-            .eq("user_id", user.id).eq("habit_id", String(h.id)).eq("date", todayKey)
-            .then(({ error }) => { if (error) console.log("Habit untick save error:", error); });
-        }
+          }, { onConflict: "user_id,habit_id,date" })
+          : supabase.from("habit_completions").delete()
+            .eq("user_id", user.id).eq("habit_id", String(h.id)).eq("date", todayKey));
       }
     });
 
     prevHabitsRef.current = habits;
+    // Show any failure instead of only logging it, so unsaved habits are never silent.
+    Promise.all(writes).then(results => {
+      const failed = results.find(result => result.error);
+      if (failed) {
+        console.log("Habit save error:", failed.error);
+        setHabitSaveError(`Your habits could not be saved: ${failed.error.message}`);
+      }
+    }).catch(error => setHabitSaveError(`Your habits could not be saved: ${error?.message || "connection problem"}`));
   }, [habits, habitsReady, todayKey, user?.id]);
+
+  // Re-send every habit and today's ticks after a failed save.
+  const retryHabitSave = async () => {
+    if (!user) return;
+    setHabitSaveError("");
+    const results = await Promise.all([
+      ...habits.map(h => supabase.from("habits").upsert({
+        id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
+        streak: h.streak || 0, updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id,id" })),
+      ...habits.map(h => h.done
+        ? supabase.from("habit_completions").upsert({ user_id: user.id, habit_id: String(h.id), date: todayKey, done: true, updated_at: new Date().toISOString() }, { onConflict: "user_id,habit_id,date" })
+        : supabase.from("habit_completions").delete().eq("user_id", user.id).eq("habit_id", String(h.id)).eq("date", todayKey)),
+    ]).catch(error => [{ error }]);
+    const failed = results.find(result => result.error);
+    if (failed) setHabitSaveError(`Your habits could not be saved: ${failed.error?.message || "connection problem"}`);
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -8914,6 +9728,12 @@ export default function App() {
 
           {authError && <p role="status" style={{ color: "#FFB547", fontSize: 12 }}>{authError}</p>}
           {draftError && <p role="alert" style={{ color: "#FFB547", fontSize: 12 }}>This browser could not save your progress. Keep this page open until you finish.</p>}
+          {habitSaveError && (tab === "dashboard" || tab === "habits") && (
+            <div role="alert" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: 12, border: `1px solid ${NEON3}`, borderRadius: 7, background: "rgba(255,45,120,.07)", color: "#FF8AAD", fontSize: 12 }}>
+              <span style={{ flex: 1 }}>{habitSaveError}</span>
+              <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={retryHabitSave}>RETRY</button>
+            </div>
+          )}
           {[...new Set(Object.entries(activeSessions).filter(([, active]) => active).map(([kind]) => kind.startsWith("morning") ? "morning" : kind))].filter(kind => kind !== tab).map(kind => (
             <button key={kind} className="t3d-btn" onClick={() => setTab(kind)}
               style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON }}>
