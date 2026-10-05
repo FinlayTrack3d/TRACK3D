@@ -1,14 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { prepareAction } from "../../../lib/coaching/actions.js";
 import { conversationTurns, needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
-import { WORKOUT_COACH_INSTRUCTIONS } from "../../../lib/coaching/playbook.js";
+import { WORKOUT_COACH_INSTRUCTIONS, WORKOUT_RESPONSE_SHAPE as responseShape } from "../../../lib/coaching/playbook.js";
 import { buildCoachSystemBlocks, cleanCoachReply, PLAN_CHANGE_FROM_CHAT } from "../../../lib/coaching/system.js";
 import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { openAnthropicStream, partialJsonStringField, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
 
-const responseShape = `Return only JSON matching:
-{"message":"concise answer","insights":[{"kind":"progress|recovery|form|consistency|safety","text":"..."}],"actions":[],"memoryCandidates":[]}.
-Allowed actions are temporary_exercise_swap, temporary_reorder, temporary_reduce_sets, propose_permanent_exercise_swap, propose_permanent_set_change, set_inline_cue, record_memory_candidate, and record_pain_report. Use the exact camelCase fields required by the requested action. Temporary changes require a workoutId and scope today or this_week. Permanent proposals require a programmeExerciseId and scope permanent. Do not emit an action when the supplied identifiers are missing.`;
 
 function supabaseForRequest(request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
