@@ -7,7 +7,7 @@ import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
-import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
+import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
 import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -2757,22 +2757,6 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7, marginTop: -6 }}>
                         {routineTimingSummary(history.find(h => h.date === today)?.data?.routineTiming)}
                       </p>
-                      {(() => {
-                        const todayEntry = history.find(h => h.date === today);
-                        if (!todayEntry?.data) return null;
-                        return (
-                          <div style={{ textAlign: "left", margin: "12px 0" }}>
-                            <AICoach
-                              title="MORNING COACH"
-                              introduction="Ask about today's result, timing, or what to improve tomorrow."
-                              activationLabel="CHAT ABOUT THIS MORNING"
-                              openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
-                              storageKey={`morning-review-${user.id}-${today}`}
-                              system={morningCoachSystem(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
-                            />
-                          </div>
-                        );
-                      })()}
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
                     <button type="button" onClick={() => { setCompletedAction(null); openCheckinForm("edit", { data: { ...(history.find(entry => entry.date === today)?.data || {}) } }); }}
                       style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", minHeight: 44, padding: "8px 10px", cursor: "pointer" }}>
@@ -2813,6 +2797,22 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       </div>
                     </div>
                   )}
+                      {(() => {
+                        const todayEntry = history.find(h => h.date === today);
+                        if (!todayEntry?.data) return null;
+                        return (
+                          <div style={{ textAlign: "left", margin: "12px 0" }}>
+                            <AICoach
+                              title="MORNING COACH"
+                              introduction="Ask about today's result, timing, or what to improve tomorrow."
+                              activationLabel="CHAT ABOUT THIS MORNING"
+                              openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
+                              storageKey={`morning-review-${user.id}-${today}`}
+                              system={morningCoachSystem(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
+                            />
+                          </div>
+                        );
+                      })()}
                     </>
                   )}
                 </>
@@ -6586,22 +6586,23 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     );
   }
 
+  const planChangeIntro = [{
+    role: "assistant",
+    content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
+  }];
   const openPlanChangeCoach = () => {
-    setPlanChangeMessages([{
-      role: "assistant",
-      content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
-    }]);
+    setPlanChangeMessages(planChangeIntro);
     setPlanChangeInput("");
     setPlanChangeRecommendation(null);
     setPlanChangeOpen(true);
   };
 
-  const askPlanChangeCoach = async (suggestedMessage) => {
+  const askPlanChangeCoach = async (suggestedMessage, baseMessages = planChangeMessages) => {
     const message = String(suggestedMessage || planChangeInput).trim();
     if (!message || planChangeLoading) return;
     // Close the phone keyboard so the screen returns to its normal size.
     document.activeElement?.blur?.();
-    const nextMessages = [...planChangeMessages, { role: "user", content: message }];
+    const nextMessages = [...baseMessages, { role: "user", content: message }];
     setPlanChangeMessages(nextMessages);
     setPlanChangeInput("");
     setPlanChangeLoading(true);
@@ -6863,6 +6864,17 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const askPlanCoach = async (suggestedQuestion) => {
     const question = (suggestedQuestion || coachQuestion).trim();
     if (!question || coachLoading) return;
+    // This chat cannot change the saved plan. Requests to change it go to the
+    // Change Plan coach, which proposes the change for approval and saves it.
+    if (split && isPlanChangeRequest(question)) {
+      setCoachMessages([...coachMessages, { role: "user", content: question }, { role: "assistant", content: "Plan changes are made in Change Plan, where you approve them before they are saved. I've opened it with your request." }]);
+      setCoachQuestion("");
+      setPlanChangeInput("");
+      setPlanChangeRecommendation(null);
+      setPlanChangeOpen(true);
+      askPlanChangeCoach(question, planChangeIntro);
+      return;
+    }
     // Close the phone keyboard so the screen returns to its normal size.
     document.activeElement?.blur?.();
 
@@ -6885,7 +6897,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         method: "POST",
         headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nYou cannot change the saved plan from this chat: never say a change has been made, saved or applied. If the user wants a change, tell them to use Change Plan.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
           messages: updatedMessages,
         }),
       });
@@ -7174,6 +7186,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {discardWorkoutDialog}
           {planChangeDialog}
 
+          {planCoachCard}
+
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div className="t3d-ctitle">THIS WEEK <span style={{ color: "#6F8792" }}>· MON TO SUN</span></div>
             <div className="t3d-grid3" style={{ marginBottom: 18 }}>
@@ -7201,7 +7215,6 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
           </div>
 
-          {planCoachCard}
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
