@@ -10,6 +10,7 @@ import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/c
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
 import { buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
+import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
@@ -448,7 +449,7 @@ ${dayContext || "- Nothing logged yet today"}`;
         headers: await chatHeaders(),
         body: JSON.stringify({
           system: system || defaultSystem,
-          messages: updated.map(({ role, content }) => ({ role, content })),
+          messages: recentChatMessages(updated),
         }),
       });
       const data = await res.json();
@@ -7398,7 +7399,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
         headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nYou cannot change the saved plan from this chat: never say a change has been made, saved or applied. If the user wants a change, tell them to use Change Plan.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
-          messages: updatedMessages,
+          messages: recentChatMessages(updatedMessages),
         }),
       });
       if (!response.ok) throw new Error("Coach request failed");
@@ -8200,7 +8201,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           system: `You are TRACK3D's nutrition coach. You already gave feedback on the user's day. Continue the conversation naturally. Keep answers concise — 2-4 sentences. Never give medical advice. Be direct and helpful.`,
-          messages: updated,
+          messages: recentChatMessages(updated),
         }),
       });
       const data = await res.json();
