@@ -214,7 +214,7 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
     assert.equal(await page.getByTestId('plan-preview').count(), 0);
     // Viewing changed nothing.
     assert.deepEqual(writes.slice(writesBefore), [], 'preview wrote nothing');
-    assert.equal(await page.getByText('ACTIVE WORKOUT').count(), 0);
+    assert.equal(await page.getByText(/ACTIVE WORKOUT|WORKOUT IN PROGRESS/).count(), 0);
     await start.waitFor();
     await page.screenshot({ path: require('node:os').tmpdir() + '/preview-home.png' });
   }

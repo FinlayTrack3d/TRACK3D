@@ -4,6 +4,8 @@
 //  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve, coachstyle, setuplevel,
 //  loadwrites, offplancap, offplanmacros, planwarning, setprefill, nextupmorning, nextupworkout,
 //  nextupslow, nextupmorningslow, newdash,
+//  profilelive, profileexperience, restday, targetsuggest, targetkeep, logextra, logextradash, editordraft,
+//  weeklyplanstart, habitlink, activitylog, activitynextup, persistlogin, smallfixes,
 //  nutritionorder, dashlog, libraryedit, restdaybuild, restdayai, weeklybadge, fitnessrest, headerprofile,
 //  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
@@ -14,6 +16,41 @@ const scenario = process.argv[2] || 'roundup';
 const shiftKey = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
 const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date());
 (async () => {
+  if (scenario === 'persistlogin') {
+    // Signed in once, the browser closed and opened again: still signed in.
+    const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'track3d-login-'));
+    const loginUser = { id: '11111111-1111-4111-8111-111111111111', email: 't@example.invalid', aud: 'authenticated', role: 'authenticated', created_at: '2026-01-01T00:00:00Z' };
+    const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const loginToken = b64({ alg: 'HS256', typ: 'JWT' }) + '.' + b64({ sub: loginUser.id, exp: Math.floor(Date.now() / 1000) + 30 * 86400, aud: 'authenticated' }) + '.t';
+    const open = async () => {
+      const ctx = await chromium.launchPersistentContext(dir, { headless: true, viewport: { width: 390, height: 844 } });
+      await ctx.route('**/*', route => {
+        const req = route.request(), url = new URL(req.url());
+        if (url.hostname === 'localhost') return url.pathname.startsWith('/api/') ? route.fulfill({ json: { content: [{ text: 'OK.' }] } }) : route.continue();
+        if (url.pathname.includes('/auth/v1/')) return route.fulfill({ json: loginUser });
+        if (!url.pathname.includes('/rest/v1/')) return route.fulfill({ json: [] });
+        return route.fulfill({ json: req.headers().accept?.includes('vnd.pgrst.object') ? null : [] });
+      });
+      return ctx;
+    };
+    let ctx = await open();
+    let tab = await ctx.newPage();
+    await tab.goto('http://localhost:3123/login');
+    await tab.evaluate(({ loginUser, loginToken }) => localStorage.setItem('track3d-auth', JSON.stringify({ access_token: loginToken, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 30 * 86400, token_type: 'bearer', user: loginUser })), { loginUser, loginToken });
+    await tab.goto('http://localhost:3123/app');
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    await ctx.close();
+    ctx = await open();
+    tab = await ctx.newPage();
+    await tab.goto('http://localhost:3123/app');
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    assert.equal(new URL(tab.url()).pathname, '/app', 'still signed in after the browser was closed');
+    await ctx.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log('PASS persistlogin');
+    return;
+  }
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const user = { id: '11111111-1111-4111-8111-111111111111', email: 't@example.invalid', aud: 'authenticated', role: 'authenticated', created_at: '2026-01-01T00:00:00Z' };
@@ -27,6 +64,21 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         restTimerEnabled: false, restSeconds: 90, restActive: false, restDeadline: null, activeWorkoutLogId: 43,
       } }));
     }, { user });
+  }
+  if (scenario === 'restday') {
+    await context.addInitScript(() => {
+      window.__clipboardWrites = 0;
+      const count = () => { window.__clipboardWrites += 1; };
+      if (navigator.clipboard) {
+        const writeText = navigator.clipboard.writeText?.bind(navigator.clipboard);
+        const write = navigator.clipboard.write?.bind(navigator.clipboard);
+        navigator.clipboard.writeText = (...args) => { count(); return writeText ? writeText(...args) : Promise.resolve(); };
+        navigator.clipboard.write = (...args) => { count(); return write ? write(...args) : Promise.resolve(); };
+      }
+      const execCommand = document.execCommand.bind(document);
+      document.execCommand = (command, ...rest) => { if (/copy|cut/i.test(command)) count(); return execCommand(command, ...rest); };
+      document.addEventListener('copy', count, true);
+    });
   }
   await context.addInitScript(({ user, token }) => {
     localStorage.setItem('track3d-auth', JSON.stringify({ access_token: token, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 30 * 86400, token_type: 'bearer', user }));
@@ -51,6 +103,8 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   const lastWeekMonday = shiftKey(today, -((todayDow + 6) % 7) - 7);
   const timed = scenario.startsWith('nextup');
   const meals = [{ name: 'Breakfast', calories: 600, protein: 40, carbs: 60, fats: 20, ...(timed ? { time: '07:00' } : {}) }, { name: 'Lunch', calories: 700, protein: 45, carbs: 80, fats: 20, ...(timed ? { time: '12:30' } : {}) }, { name: 'Dinner', calories: 800, protein: 50, carbs: 90, fats: 25, ...(timed ? { time: '19:00' } : {}) }, ...(scenario === 'reviewskip' ? [{ name: 'Snack', calories: 250, protein: 20, carbs: 20, fats: 8 }] : [])];
+  if (scenario === 'restday') { meals[0].time = '08:00'; meals[1].time = '13:00'; meals[2].time = '21:00'; }
+  const freeDay = dayCodes[(todayDow + 2) % 7];
   const tables = {
     nutrition_plans: ['nutritionai', 'newdash'].includes(scenario) ? [] : [{ user_id: user.id, daily_calories: scenario === 'planwarning' ? 2600 : 2100, protein_target: scenario === 'planwarning' ? 100 : 135, carbs_target: 230, fats_target: 65, meals, rest_day_meals: [], meal_library: [], weekly_meal_plan: {},
       ...(scenario === 'libraryedit' ? { meal_library: [{ id: 'lib1', name: 'Protein Pancakes', calories: 450, protein: 35, carbs: 50, fats: 9, mealType: 'fixed', repeatDaily: true }] } : {}),
@@ -65,7 +119,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     nutrition_logs: [
       ...(scenario === 'offplancap' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 3720, total_protein: 85, meals_completed: { 0: true, 1: true, _review_complete: true }, off_plan_food: 'large pizza', off_plan_calories: 2420 }]
         : scenario === 'offplanmacros' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 1000, total_protein: 70, meals_completed: { 0: true, _off_plan: { protein: 30, carbs: 50, fats: 10 }, _review_complete: false }, off_plan_food: 'toast', off_plan_calories: 400 }]
-        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
+        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'weeklyplanstart', 'profilelive', 'profileexperience'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
       { id: 'n0', user_id: user.id, date: yesterday, total_calories: 2050, total_protein: 130, meals_completed: [true, true, true] },
     ],
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
@@ -79,6 +133,28 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     workout_splits: ['loadwrites', 'setprefill', 'nextupworkout', 'nextupmorning', 'nextupslow', 'nextupmorningslow'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: ['loadwrites', 'nextupslow'].includes(scenario) ? 'Upper A' : 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }]
       : scenario === 'fitnessrest' ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach', 'planchangebutton'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
+  // New scenarios' data.
+  if (scenario === 'restday') tables.nutrition_plans[0].rest_day_meals = [
+    { name: 'Rest Oats', time: '09:00', calories: 500, protein: 40, carbs: 50, fats: 12, ingredients: [{ name: 'Oats', weight: 60, unit: 'g' }] },
+    { name: 'Rest Salad', time: '18:00', calories: 1030, protein: 60, carbs: 90, fats: 40, ingredients: [{ name: 'Chicken', weight: 150, unit: 'g' }] },
+  ];
+  if (['targetsuggest', 'targetkeep'].includes(scenario)) {
+    Object.assign(tables.nutrition_plans[0], { daily_calories: 2381, protein_target: 115, updated_at: '2026-09-01T10:00:00Z', setup: { mode: 'guided', weight: 82, activityLevel: 'Moderately active', goal: 'Maintain', mealsPerDay: 3 } });
+    tables.user_profiles = [{ user_id: user.id, height_cm: '178.0', date_of_birth: '1995-01-01', sex: 'male' }];
+  }
+  if (scenario === 'habitlink') Object.assign(tables, { habits: [{ id: 'h2', user_id: user.id, name: 'Stretch or move', category: 'daily', created_at: '2026-01-01T00:00:00Z' }], habit_completions: [] });
+  if (['activitylog', 'activitynextup'].includes(scenario)) tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [
+    ...(scenario === 'activitynextup' ? [{ name: 'HYROX', kind: 'activity', activityType: 'hyrox', days: [dayCodes[todayDow]], duration_mins: 60, exercises: [], approval: { approved: true } }] : []),
+    { name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+  ] }];
+  if (scenario === 'smallfixes') {
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [{ name: 'Upper A', days: [dayCodes[todayDow]], duration_mins: 30, exercises: [{ name: 'Bench Press', sets: 4, reps: ['8-10', '8-10', '8-10', '8-10'] }, { name: 'Row', sets: 6, reps: ['8-10', '8-10', '8-10', '8-10', '8-10', '8-10'] }], approval: { approved: true, reviewAfter: '2026-11-30' } }] }];
+    tables.workout_logs = [{ id: 'w9', user_id: user.id, date: yesterday, session_name: 'Upper A', in_progress: false, total_volume: 3000, duration_mins: 32, created_at: `${yesterday}T18:00:00Z`, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '8' }] }] }];
+  }
+  if (scenario === 'weeklyplanstart') {
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [{ name: 'Push A', days: ['MON', 'THU'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
+    tables.workout_logs = [{ id: 'old', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Old Plan Day', in_progress: false, total_volume: 2000, duration_mins: 40, exercises: [] }];
+  }
   const writes = [];
   const reads = [];
   const chats = [];
@@ -144,7 +220,8 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       if (table === 'weekly_reports' && scenario === 'weeklysavefail') return route.fulfill({ status: 404, json: { code: 'PGRST205', message: "Could not find the table 'public.weekly_reports' in the schema cache" } });
       if (table === 'user_profiles' && scenario === 'profiletodofail') return route.fulfill({ status: 404, json: { code: 'PGRST205', message: "Could not find the table 'public.user_profiles' in the schema cache" } });
       if (table === 'nutrition_logs' && req.method() === 'POST') return route.fulfill({ status: 201, json: single ? { id: 'log-new' } : [{ id: 'log-new' }] });
-      if (table === 'workout_logs' && req.method() === 'POST') return route.fulfill({ status: 201, json: single ? { id: 'wlog-new' } : [{ id: 'wlog-new' }] });
+      if (table === 'workout_logs' && req.method() === 'POST') return route.fulfill({ status: 201, json: single ? { id: 'wlog-new', ...JSON.parse(req.postData() || '{}') } : [{ id: 'wlog-new' }] });
+      if (table === 'workout_splits' && req.method() === 'POST') { const body = JSON.parse(req.postData() || '{}'); return route.fulfill({ status: 201, json: single ? body : [body] }); }
       if (table === 'nutrition_plans' && scenario === 'nutritionnocolumn' && /"setup"/.test(req.postData() || '')) return route.fulfill({ status: 400, json: { code: 'PGRST204', message: "Could not find the 'setup' column of 'nutrition_plans' in the schema cache" } });
       return route.fulfill({ status: 201, json: single ? {} : [] });
     }
@@ -181,6 +258,12 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   const openNutrition = async () => {
     await page.getByRole('button', { name: /NUTRITION$/ }).last().click();
   };
+  // An existing plan opens on its review; EDIT on the targets opens the first step.
+  const openTargets = async () => {
+    await page.getByRole('button', { name: 'EDIT PLAN' }).click();
+    await page.getByText('REVIEW YOUR PLAN').waitFor();
+    await page.getByRole('button', { name: 'Edit targets' }).click();
+  };
   const planWrite = () => { const w = writes.filter(w => w.table === 'nutrition_plans' && w.method !== 'GET' && JSON.parse(w.body).daily_calories).at(-1); return w && JSON.parse(w.body); };
   if (scenario === 'loadwrites') {
     // Opening the app writes nothing, reads each row once, and has no 406s.
@@ -191,9 +274,13 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       assert.ok(count(table) <= 1, `${table} read ${count(table)} times`);
     }
     assert.deepEqual(reads.filter(r => r.single && r.count !== 1).map(r => r.table), [], 'no single() reads of missing rows (406)');
-    // Next up continues the workout in one tap, still without a write.
-    await page.getByTestId('next-up-title').filter({ hasText: 'Upper A' }).waitFor();
-    await page.getByTestId('next-up-action').click();
+    // One banner says where the workout is up to; Next up doesn't repeat it.
+    const banner = page.getByTestId('active-banner-fitness');
+    await banner.getByText('Upper A · Set 2 of 3 · Bench Press').waitFor();
+    if (process.env.SHOT) await page.screenshot({ path: 'banner.png' });
+    await page.getByTestId('next-up').waitFor();
+    assert.equal(await page.getByTestId('next-up').getByText('Upper A').count(), 0, 'no second continue card');
+    await banner.click();
     await page.getByText('SET 2 OF 3').waitFor();
     assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '80', 'weight from the set just logged');
     assert.equal(await page.getByLabel('Reps').inputValue(), '8', 'reps from the bottom of the target range');
@@ -211,11 +298,12 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByTestId('remaining-carbs').waitFor();
     if (scenario === 'offplancap') {
       assert.deepEqual([await cell('calories'), await cell('protein'), await cell('carbs'), await cell('fats')], ['0', '0g', '0g', '0g'], '0 kcal left means nothing else left');
-      await page.getByTestId('offplan-no-macros').waitFor();
+      await page.getByTestId('offplan-rough').waitFor();
+      assert.match(await page.getByTestId('offplan-rough').textContent(), /2,420 kcal/);
       if (process.env.SHOT) await page.screenshot({ path: 'offplan.png' });
     } else {
       assert.deepEqual([await cell('calories'), await cell('protein'), await cell('carbs'), await cell('fats')], ['1100', '65g', '120g', '35g'], 'off-plan macros count');
-      assert.equal(await page.getByTestId('offplan-no-macros').count(), 0);
+      assert.equal(await page.getByTestId('offplan-rough').count(), 0);
     }
   } else if (scenario === 'planwarning') {
     await openNutrition();
@@ -307,6 +395,231 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     const titles = await page.locator('.t3d-main .t3d-card:not([data-new]) .t3d-ctitle').allTextContents();
     assert.equal(titles[0], 'GET STARTED', titles.join(' | '));
     if (process.env.SHOT) await page.screenshot({ path: 'newdash.png' });
+  } else if (scenario === 'profilelive') {
+    // A profile saved while the nutrition setup is open shows there at once.
+    await openNutrition();
+    await openTargets();
+    await page.getByRole('button', { name: /STEP-BY-STEP SETUP/ }).click();
+    await page.getByLabel('HEIGHT (cm)').waitFor();
+    await page.getByRole('button', { name: 'PROFILE', exact: true }).click();
+    const dialog = page.getByTestId('profile-dialog');
+    await dialog.getByLabel('Height (cm)').fill('178');
+    await dialog.getByLabel('Date of birth').fill('1995-01-01');
+    await dialog.getByRole('button', { name: 'MALE', exact: true }).click();
+    await dialog.getByRole('button', { name: 'SAVE PROFILE' }).click();
+    await page.getByTestId('app-notice').getByText('Profile saved ✓').waitFor();
+    const summary = page.getByTestId('profile-summary');
+    await summary.waitFor();
+    assert.match((await summary.textContent()).replace(/\s+/g, ' '), /From your profile: 178 cm · born 1 Jan 1995 \(age \d+\) · Male/);
+    assert.equal(await page.getByLabel('HEIGHT (cm)').count(), 0, 'not asked again');
+  } else if (scenario === 'profileexperience') {
+    await page.getByRole('button', { name: 'PROFILE', exact: true }).click();
+    const dialog = page.getByTestId('profile-dialog');
+    const save = dialog.getByRole('button', { name: 'SAVE PROFILE' });
+    assert.equal(await save.isDisabled(), true, 'nothing to save yet');
+    await dialog.getByRole('button', { name: /^ADVANCED/ }).click();
+    assert.equal(await save.isDisabled(), false, 'training experience can be saved on its own');
+    assert.match(await dialog.getByTestId('profile-missing').textContent(), /Still to add: height, date of birth, sex/);
+    await save.click();
+    await page.getByTestId('app-notice').getByText('Profile saved ✓').waitFor();
+    assert.equal(JSON.parse(writes.filter(w => w.table === 'coach_profiles').at(-1).body).experience_level, 'advanced');
+    assert.equal(writes.filter(w => w.table === 'user_profiles').length, 0, 'nothing else changed');
+  } else if (scenario === 'restday') {
+    // A rest day (nothing scheduled) with its own meals: the lighter target.
+    await page.getByText(/EATEN OF 1,850 TARGET/).waitFor();
+    await page.getByTestId('score-parts').getByText('Calories').waitFor();
+    await openNutrition();
+    await page.getByRole('button', { name: 'REST DAY', exact: true }).click();
+    await page.getByTestId('today-targets').getByText('REST DAY TARGET · 1,850 KCAL').waitFor();
+    assert.equal((await page.getByTestId('remaining-calories').textContent()).replace(/[A-Z\s]+$/, ''), '1850');
+    // Each day type's meals are checked against its own target.
+    const restGap = page.getByTestId('plan-rest-gap');
+    await restGap.waitFor();
+    assert.match((await restGap.textContent()).replace(/\s+/g, ' '), /Your rest day meals add up to 1,530 kcal and 100 g protein: 320 kcal under and 35 g protein under your targets of 1,850 kcal and 135 g protein\./);
+    assert.match(await page.getByTestId('plan-style').textContent(), /your rest day meals on rest days/);
+    if (process.env.SHOT) await page.screenshot({ path: 'plan-card.png', fullPage: true });
+    // EDIT MEALS writes nothing to the clipboard.
+    await page.getByTestId('plan-training').getByRole('button', { name: 'EDIT MEALS' }).first().click();
+    await page.getByText('ABOUT YOUR DAY').waitFor();
+    assert.equal(await page.evaluate(() => window.__clipboardWrites), 0, 'no clipboard writes');
+    // The meal times are the meals' own.
+    assert.match(await page.getByTestId('meal-times').textContent(), /Your meals run from 08:00 to 21:00\./);
+    await page.getByRole('tab', { name: /REST DAYS/ }).click();
+    assert.match(await page.getByTestId('meal-times').textContent(), /Your rest day meals run from 09:00 to 18:00\./);
+    // The review has a link to change each part.
+    await page.getByRole('button', { name: 'REVIEW', exact: true }).click();
+    for (const id of ['targets', 'structure', 'day', 'meals', 'rest']) await page.getByTestId(`review-section-${id}`).waitFor();
+    assert.match(await page.getByTestId('review-style').textContent(), /your rest day meals on rest days/);
+    await page.getByTestId('review-rest-gap').waitFor();
+    if (process.env.SHOT) await page.screenshot({ path: 'review.png', fullPage: true });
+    await page.getByRole('button', { name: 'Edit structure' }).click();
+    await page.getByText('HOW MUCH STRUCTURE DO YOU WANT?').waitFor();
+    await page.getByRole('button', { name: '← BACK TO REVIEW' }).click();
+    await page.getByText('REVIEW YOUR PLAN').waitFor();
+  } else if (scenario === 'targetsuggest' || scenario === 'targetkeep') {
+    await openNutrition();
+    const card = page.getByTestId('target-suggestion');
+    await card.waitFor();
+    const proposed = Number((await card.textContent()).match(/works out at ([\d,]+) kcal/)[1].replace(/,/g, ''));
+    assert.ok(proposed > 2600, `recalculated ${proposed}`);
+    assert.match(await card.textContent(), /178 cm, age \d+, male/);
+    if (process.env.SHOT) await page.screenshot({ path: 'suggest.png' });
+    if (scenario === 'targetkeep') {
+      await card.getByRole('button', { name: 'KEEP MY TARGETS' }).click();
+      assert.equal(await page.getByTestId('target-suggestion').count(), 0);
+      await page.reload();
+      await page.getByText('DAILY SCORE').waitFor();
+      await openNutrition();
+      await page.getByTestId('nutrition-today').waitFor();
+      assert.equal(await page.getByTestId('target-suggestion').count(), 0, 'stays dismissed');
+    } else {
+      await card.getByRole('button', { name: 'REVIEW NEW TARGETS →' }).click();
+      await page.getByTestId('setup-notice').getByText(`New targets from your profile: ${proposed.toLocaleString('en-GB')} kcal (was 2,381)`, { exact: false }).waitFor();
+      await page.getByRole('button', { name: /SAVE PLAN/ }).click();
+      await page.getByRole('button', { name: 'EDIT PLAN' }).waitFor();
+      assert.equal(planWrite().daily_calories, proposed);
+      assert.equal(await page.getByTestId('target-suggestion').count(), 0, 'up to date now');
+    }
+  } else if (scenario === 'logextra') {
+    await openNutrition();
+    const extra = page.getByTestId('nutrition-today').getByTestId('log-something-else');
+    await extra.getByRole('button', { name: '+ LOG SOMETHING ELSE' }).click();
+    if (process.env.SHOT) await page.screenshot({ path: 'extra.png' });
+    await extra.getByRole('button', { name: /^Banana/ }).click();
+    await extra.getByText('Added Banana · 105 kcal').waitFor();
+    let saved = JSON.parse(writes.filter(w => w.table === 'nutrition_logs').at(-1).body);
+    assert.equal(saved.off_plan_food, 'Banana');
+    assert.equal(saved.off_plan_calories, 105);
+    assert.deepEqual(saved.meals_completed._off_plan, { calories: 105, protein: 1, carbs: 27, fats: 0 });
+    // Calories only: a rough split counts towards protein, carbs and fat.
+    await extra.getByRole('button', { name: '+ LOG SOMETHING ELSE' }).click();
+    await extra.getByLabel('What did you have?').fill('Takeaway');
+    await extra.getByLabel('Something else KCAL').fill('900');
+    await extra.getByRole('button', { name: 'ADD', exact: true }).click();
+    await extra.getByText('Added Takeaway · 900 kcal').waitFor();
+    saved = JSON.parse(writes.filter(w => w.table === 'nutrition_logs').at(-1).body);
+    assert.equal(saved.off_plan_food, 'Banana; Takeaway');
+    assert.equal(saved.off_plan_calories, 1005);
+    assert.equal(saved.total_protein, 35, '1 g from the banana and a rough 34 g from the takeaway');
+    await page.getByTestId('offplan-rough').getByText(/900 kcal/).waitFor();
+    assert.equal((await page.getByTestId('remaining-calories').textContent()).replace(/[A-Z\s]+$/, ''), '1095');
+    // No calories to hand: the coach estimates it, with protein, carbs and fat.
+    await extra.getByRole('button', { name: '+ LOG SOMETHING ELSE' }).click();
+    await extra.getByLabel('What did you have?').fill('large pizza and two beers');
+    await extra.getByRole('button', { name: 'ESTIMATE IT' }).click();
+    await extra.getByTestId('something-else-estimate').waitFor();
+    await extra.getByRole('button', { name: 'ADD ~2,520 KCAL' }).click();
+    await extra.getByText('Added large pizza and two beers · 2,520 kcal').waitFor();
+    saved = JSON.parse(writes.filter(w => w.table === 'nutrition_logs').at(-1).body);
+    assert.equal(saved.off_plan_calories, 3525);
+    assert.deepEqual(saved.meals_completed._off_plan, { calories: 105 + 2520, protein: 1 + 86, carbs: 27 + 263, fats: 0 + 80 });
+    assert.equal(chats.filter(chat => chat.area === 'food_estimate').length, 1);
+  } else if (scenario === 'logextradash') {
+    const card = page.getByTestId('dashboard-meal-log');
+    await card.getByText('LOG AS YOU GO').waitFor();
+    await card.getByRole('button', { name: '+ LOG SOMETHING ELSE' }).click();
+    await card.getByRole('button', { name: /^Protein shake/ }).click();
+    await card.getByText('Added Protein shake · 120 kcal').waitFor();
+    const saved = JSON.parse(writes.filter(w => w.table === 'nutrition_logs').at(-1).body);
+    assert.equal(saved.off_plan_food, 'Protein shake');
+    assert.equal(saved.off_plan_calories, 120);
+    assert.equal(saved.total_protein, 24);
+  } else if (scenario === 'editordraft') {
+    await openNutrition();
+    await page.getByTestId('plan-training').getByRole('button', { name: 'EDIT MEALS' }).first().click();
+    await page.getByRole('button', { name: 'Remove Dinner' }).click();
+    // Leaving for another tab and coming back keeps the change.
+    await page.getByRole('button', { name: /DASHBOARD$/ }).last().click();
+    await page.getByText('DAILY SCORE').waitFor();
+    await openNutrition();
+    const draft = page.getByTestId('setup-draft');
+    await draft.waitFor();
+    await draft.getByRole('button', { name: 'CONTINUE EDITING →' }).click();
+    await page.getByTestId('setup-notice').getByText('Your unsaved changes from earlier are back.').waitFor();
+    await page.getByRole('button', { name: 'Remove Lunch' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Remove Dinner' }).count(), 0, 'Dinner is still removed');
+    // Closing keeps it too; discarding brings back the saved plan.
+    await page.getByRole('button', { name: '✕ CLOSE' }).click();
+    await draft.getByRole('button', { name: 'DISCARD CHANGES' }).click();
+    assert.equal(await page.getByTestId('setup-draft').count(), 0);
+    await page.getByTestId('plan-training').getByRole('button', { name: 'EDIT MEALS' }).first().click();
+    await page.getByRole('button', { name: 'Remove Dinner' }).waitFor();
+    assert.equal(writes.filter(w => w.table === 'nutrition_plans').length, 0, 'nothing saved without SAVE PLAN');
+  } else if (scenario === 'weeklyplanstart') {
+    if (todayDow === 0) { console.log('PASS weeklyplanstart (Sunday: the week is still in progress)'); await browser.close(); return; }
+    await page.getByTestId('weekly-report-card').getByRole('button', { name: 'OPEN WEEKLY REPORT →' }).click();
+    const tile = page.getByTestId('tile-workouts');
+    await tile.waitFor();
+    const text = (await tile.textContent()).replace(/\s+/g, ' ');
+    assert.doesNotMatch(text, /missed/, `the newer plan doesn't count against that week: ${text}`);
+    assert.match(text, /No weekly plan to compare against/);
+  } else if (scenario === 'habitlink') {
+    await page.getByText('Stretch or move').first().waitFor();
+    // Finishing "Stretch / Mobility" in the morning ticks the habit.
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('track3d-task-done', { detail: { name: 'Stretch / Mobility' } })));
+    await page.waitForTimeout(800);
+    const saved = writes.filter(w => w.table === 'habit_completions');
+    assert.equal(saved.length, 1, 'the matching habit was ticked');
+    assert.equal(JSON.parse(saved[0].body).habit_id, 'h2');
+  } else if (scenario === 'activitylog') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByTestId('log-activity').click();
+    const form = page.getByTestId('activity-form');
+    await form.getByRole('button', { name: 'RUN', exact: true }).click();
+    await form.getByLabel('Minutes').fill('45');
+    await form.getByLabel('Distance in km').fill('5');
+    await form.getByRole('button', { name: 'HARD', exact: true }).click();
+    if (process.env.SHOT) await page.screenshot({ path: 'activity.png' });
+    await form.getByRole('button', { name: /SAVE ACTIVITY/ }).click();
+    await page.getByText('Run logged · 45 min · Hard · 5 km').waitFor();
+    const row = JSON.parse(writes.filter(w => w.table === 'workout_logs' && w.method === 'POST').at(-1).body);
+    assert.equal(row.session_name, 'Run');
+    assert.equal(row.duration_mins, 45);
+    assert.deepEqual(row.exercises[0].activity, { type: 'run', effort: 'hard', distanceKm: 5, notes: '' });
+    await page.getByText('WORKOUT HISTORY').click();
+    await page.getByText(/Run · 45 min · Hard · 5 km/).first().waitFor();
+    // An activity can go in the weekly plan.
+    await page.getByTestId('plan-add-activity').click();
+    const planForm = page.getByTestId('plan-activity-form');
+    await planForm.getByRole('button', { name: 'HYROX', exact: true }).click();
+    await planForm.getByRole('button', { name: freeDay, exact: true }).click();
+    await planForm.getByLabel('Planned minutes').fill('60');
+    await planForm.getByRole('button', { name: /ADD TO MY PLAN/ }).click();
+    await page.locator(`[data-workout-day="${freeDay}"]`).getByText('HYROX · 60 min').waitFor();
+    const split = JSON.parse(writes.filter(w => w.table === 'workout_splits').at(-1).body);
+    assert.deepEqual(split.sessions.at(-1), { name: 'HYROX', kind: 'activity', activityType: 'hyrox', days: [freeDay], duration_mins: 60, exercises: [], approval: { approved: true } });
+  } else if (scenario === 'activitynextup') {
+    // A planned activity due today: Next up logs it in one tap.
+    await page.getByTestId('next-up-title').filter({ hasText: 'HYROX' }).waitFor();
+    assert.match(await page.getByTestId('next-up').textContent(), /Today's activity/);
+    await page.getByTestId('next-up-action').click();
+    const form = page.getByTestId('activity-form');
+    await form.waitFor({ timeout: 10000 });
+    assert.equal(await form.getByLabel('Minutes').inputValue(), '60');
+    assert.equal(await form.getByRole('button', { name: 'HYROX', exact: true }).getAttribute('aria-pressed'), 'true');
+    await form.getByRole('button', { name: /SAVE ACTIVITY/ }).click();
+    await page.getByText(/HYROX logged · 60 min · Moderate/).waitFor();
+  } else if (scenario === 'smallfixes') {
+    // Photos: the empty message fits an account that already checks in.
+    await page.getByText('PROGRESS PHOTOS').scrollIntoViewIfNeeded();
+    await page.getByText(/No front photos yet\. They.ll show up here after you add photos in a morning check-in\./).waitFor();
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    // One length for the session everywhere: the weekly plan and the preview.
+    await page.locator(`[data-workout-day="${dayCodes[todayDow]}"]`).getByText('Upper A · 30 min').waitFor();
+    await page.getByRole('button', { name: 'View Upper A exercises' }).click();
+    await page.getByTestId('plan-preview').getByText(/· 30 MIN/).waitFor();
+    await page.keyboard.press('Escape');
+    // Dates read as dates, not 2026-11-30.
+    await page.getByText(/REVIEW FROM 30 NOV/).waitFor();
+    await page.getByText('WORKOUT HISTORY').click();
+    await page.getByText('Upper A').last().click();
+    const header = (await page.getByRole('button', { name: 'Close workout history' }).locator('xpath=../..').textContent());
+    assert.doesNotMatch(header, /\d{4}-\d{2}-\d{2}/, header);
+    await page.getByRole('button', { name: 'Close workout history' }).click();
+    await openNutrition();
+    await page.getByText('NUTRITION HISTORY').click();
+    const history = await page.getByText('NUTRITION HISTORY').locator('xpath=../..').textContent();
+    assert.doesNotMatch(history, /\d{4}-\d{2}-\d{2}/, 'nutrition history dates are readable');
   } else if (scenario === 'nutritionorder') {
     await openNutrition();
     // Morning and Fitness stay mounted (hidden), so only visible cards count.
@@ -353,8 +666,11 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await openNutrition();
     const rows = page.getByTestId('library-meal');
     await rows.filter({ hasText: 'Protein Pancakes' }).waitFor();
-    assert.equal(await rows.filter({ hasText: 'Protein Pancakes' }).getByText('IN PLAN').count(), 0);
-    assert.equal(await rows.filter({ hasText: 'Breakfast' }).getByText('IN PLAN').count(), 1);
+    // Each meal shows once: plan meals are in LOG AS YOU GO, not the library.
+    assert.equal(await rows.filter({ hasText: 'Breakfast' }).count(), 0);
+    assert.equal(await page.getByText('TRAINING DAY MEALS', { exact: true }).count(), 0, 'no separate meal list');
+    await page.getByRole('button', { name: "Breakfast: what's in it" }).click();
+    await page.getByTestId('meal-details').getByText('600 kcal').waitFor();
     await page.getByRole('button', { name: 'Edit Protein Pancakes' }).click();
     const nameInput = page.getByPlaceholder('Meal name');
     assert.equal(await nameInput.inputValue(), 'Protein Pancakes');
@@ -371,13 +687,13 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.waitForTimeout(400);
     library = JSON.parse(writes.filter(w => w.table === 'nutrition_plans').at(-1).body).meal_library;
     assert.equal(library.some(m => m.name === 'Protein Pancakes'), false);
-    // A plan meal is edited in the meal plan.
-    await page.getByRole('button', { name: 'Edit Breakfast' }).click();
+    // Plan meals are edited in the meal plan.
+    await page.getByRole('button', { name: 'EDIT MEAL PLAN →' }).click();
     await page.getByText('ABOUT YOUR DAY').waitFor();
     await page.getByRole('button', { name: 'Edit Breakfast' }).waitFor();
   } else if (scenario === 'restdaybuild' || scenario === 'restdayai') {
     await openNutrition();
-    await page.getByRole('button', { name: 'EDIT MEALS' }).click();
+    await page.getByTestId('plan-training').getByRole('button', { name: 'EDIT MEALS' }).first().click();
     const choice = page.getByTestId('rest-day-choice');
     await choice.getByText('On days with no workout, eat:').waitFor();
     await choice.getByRole('button', { name: 'DIFFERENT REST DAY MEALS' }).click();
@@ -395,7 +711,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       await page.getByText('Rest Chicken Salad').waitFor();
       const request = chats.find(c => c.area === 'rest_day_plan').messages[0].content;
       assert.match(request, /REST DAY plan/);
-      assert.match(request, /Targets: 1785 kcal/, '15% lighter than 2,100');
+      assert.match(request, /Targets: 1850 kcal/, 'the rest day target: about 12% lighter than 2,100');
       assert.match(request, /Allergies: none reported|ALLERGIES/);
     }
     // The training day tab is one tap away and REVIEW is always there.
@@ -405,7 +721,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: 'REVIEW →' }).click();
     await page.getByText('REVIEW YOUR PLAN').waitFor();
     await page.getByRole('button', { name: /SAVE PLAN/ }).click();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).waitFor();
+    await page.getByRole('button', { name: 'EDIT PLAN' }).waitFor();
     const saved = JSON.parse(writes.filter(w => w.table === 'nutrition_plans' && JSON.parse(w.body).daily_calories).at(-1).body);
     assert.equal(saved.meals.length, 3);
     assert.deepEqual(saved.rest_day_meals.map(m => m.name), scenario === 'restdaybuild' ? ['Breakfast', 'Lunch'] : ['Rest Oats', 'Rest Chicken Salad', 'Rest Salmon & Veg']);
@@ -419,7 +735,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     if (process.env.SHOT) await page.screenshot({ path: 'weekly-new.png' });
     await card.getByRole('button', { name: 'OPEN WEEKLY REPORT →' }).click();
     await page.getByTestId('weekly-recap').waitFor();
-    await page.getByRole('button', { name: '← BACK' }).click();
+    await page.getByRole('button', { name: '← BACK', exact: true }).click();
     await page.getByTestId('weekly-report-card').waitFor();
     assert.equal(await page.getByTestId('weekly-new-badge').count(), 0, 'no badge once opened');
     assert.notEqual(await page.locator('.t3d-main .t3d-card').first().getAttribute('data-testid'), 'weekly-report-card', 'back in its usual place');
@@ -443,7 +759,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   } else if (scenario === 'headerprofile') {
     await page.getByRole('button', { name: 'PROFILE', exact: true }).click();
     const dialog = page.getByTestId('profile-dialog');
-    await dialog.getByText('TRAINING EXPERIENCE').waitFor();
+    await dialog.getByLabel('Height (cm)').waitFor();
     await dialog.getByLabel('Height (cm)').fill('176');
     await dialog.getByLabel('Date of birth').fill(bornYearsAgo(31));
     await dialog.getByRole('button', { name: 'MALE', exact: true }).click();
@@ -465,7 +781,9 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await form.getByLabel('Date of birth').fill(bornYearsAgo(29));
     await form.getByRole('button', { name: 'PREFER NOT TO SAY' }).click();
     await form.getByText(/average of the male and female results/).waitFor();
-    assert.equal(await save.isDisabled(), true, 'training experience is needed too');
+    // Any part can be saved; the form says what's still missing.
+    assert.equal(await save.isDisabled(), false, 'saving part of the profile is fine');
+    assert.match(await form.getByTestId('profile-missing').textContent(), /Still to add: training experience/);
     await form.getByRole('button', { name: /^INTERMEDIATE/ }).click();
     if (process.env.SHOT) { await page.waitForTimeout(600); await page.screenshot({ path: 'prof-todo.png' }); }
     await save.click();
@@ -486,7 +804,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     }
   } else if (scenario === 'profileprefill' || scenario === 'profilepartial') {
     await openNutrition();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).click();
+    await openTargets();
     await page.getByRole('button', { name: /STEP-BY-STEP SETUP/ }).click();
     await page.getByLabel('WEIGHT (kg)').fill('70');
     const summary = page.getByTestId('profile-summary');
@@ -501,7 +819,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       await page.getByText(/Based on 70 kg, 175 cm, age 40, sex not given \(average of male and female\)/).waitFor();
       await page.waitForTimeout(300);
       assert.equal(writes.filter(w => w.table === 'user_profiles').length, 0, 'nothing changed, nothing saved');
-      await page.getByRole('button', { name: '← BACK' }).click();
+      await page.getByRole('button', { name: '← BACK', exact: true }).click();
       await summary.getByRole('button', { name: 'edit' }).click();
       assert.equal(await page.getByLabel('HEIGHT (cm)').inputValue(), '175');
       assert.equal(await page.getByLabel('DATE OF BIRTH').inputValue(), bornYearsAgo(40));
@@ -521,13 +839,13 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     }
   } else if (scenario === 'nutritionnocolumn') {
     await openNutrition();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).click();
+    await openTargets();
     await page.getByLabel('DATE OF BIRTH').fill(bornYearsAgo(34));
     await page.getByRole('button', { name: 'CALCULATE MY TARGETS →' }).click();
     await page.getByRole('button', { name: 'NEXT: BUILD MEALS →' }).click();
     await page.getByRole('button', { name: 'REVIEW →' }).click();
     await page.getByRole('button', { name: /SAVE PLAN/ }).click();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).first().waitFor();
+    await page.getByRole('button', { name: 'EDIT PLAN' }).waitFor();
     const attempts = writes.filter(w => w.table === 'nutrition_plans' && JSON.parse(w.body).daily_calories);
     assert.equal(attempts.length, 2);
     assert.ok(JSON.parse(attempts[0].body).setup);
@@ -535,7 +853,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(JSON.parse(attempts[1].body).goal, 'Lose fat');
   } else if (scenario === 'nutritionedit') {
     await openNutrition();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).click();
+    await openTargets();
     assert.equal(await page.getByLabel('WEIGHT (kg)').inputValue(), '82');
     assert.equal(await page.getByLabel('HEIGHT (cm)').inputValue(), '180', 'height from the last setup');
     // The old setup stored an age, not a date of birth, so only that is asked.
@@ -553,7 +871,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(await page.getByLabel('Allergies or intolerances').inputValue(), 'peanuts');
     await page.getByRole('button', { name: 'REVIEW →' }).click();
     await page.getByRole('button', { name: /SAVE PLAN/ }).click();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).first().waitFor();
+    await page.getByRole('button', { name: 'EDIT PLAN' }).waitFor();
     // The old meals now miss the new protein target, and the page says so.
     assert.match((await page.getByTestId('plan-target-gap').textContent()).replace(/\s+/g, ' '), /Your training day meals add up to 2,100 kcal and 135 g protein: 45 g protein under your targets of 2,000 kcal and 180 g protein\./);
     const saved = planWrite();
@@ -565,7 +883,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(saved.protein_target, 180);
   } else if (scenario === 'nutritionlegacy') {
     await openNutrition();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).click();
+    await openTargets();
     await page.getByRole('button', { name: /STEP-BY-STEP SETUP/ }).click();
     assert.equal(await page.getByLabel('WEIGHT (kg)').inputValue(), '79.5', 'weight from last weigh-in');
     await page.getByText('Weight from your last morning check-in.').waitFor();
@@ -596,7 +914,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: /SAME MEALS DAILY/ }).click();
     await page.getByRole('button', { name: 'NEXT: BUILD MEALS →' }).click();
     assert.equal(await page.getByLabel('Wake-up time').inputValue(), '05:30', 'wake time from the morning routine');
-    await page.getByText(/Meals run from 06:30 to 18:30/).waitFor();
+    await page.getByText(/Meals will run from 06:30 to 18:30/).waitFor();
     if (process.env.SHOT) await page.screenshot({ path: 'nut-meals.png', fullPage: true });
     await page.getByText('AI build my meal plan').click();
     await page.getByText('QUESTION 1 OF 5').waitFor();
@@ -638,7 +956,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(await save.isDisabled(), true, 'save blocked until checked');
     await page.getByLabel('I have checked these are safe for me').check();
     await save.click();
-    await page.getByRole('button', { name: 'CHANGE TARGETS' }).waitFor();
+    await page.getByRole('button', { name: 'EDIT PLAN' }).waitFor();
     const saved = planWrite();
     assert.equal(saved.goal, 'Lean bulk');
     assert.equal(saved.setup.answers.allergies, 'lactose');
@@ -763,7 +1081,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: 'SAVE & FINISH' }).click();
     await page.waitForTimeout(500);
     const saved = JSON.parse(writes.filter(w => w.table === 'nutrition_logs').at(-1).body);
-    assert.deepEqual(saved.meals_completed._off_plan, { protein: 86, carbs: 263, fats: 80 }, 'off-plan macros saved');
+    assert.deepEqual(saved.meals_completed._off_plan, { calories: 2520, protein: 86, carbs: 263, fats: 80 }, 'off-plan macros saved with the calories they cover');
     assert.equal(saved.total_calories, 4070);
     assert.equal(saved.total_protein, 191, 'off-plan protein counts');
   } else if (scenario === 'dashexcludes') {

@@ -9,7 +9,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
+import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -18,9 +18,11 @@ import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBef
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
 import { nextUpItems } from "../lib/next-up";
-import { EXPERIENCE_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
-import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel } from "../lib/nutrition-setup";
-import { addOffPlanMacros, calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { dailyScore } from "../lib/daily-score";
+import { linkedHabitIds } from "../lib/habit-links";
+import { EXPERIENCE_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
+import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, targetUpdateSuggestion } from "../lib/nutrition-setup";
+import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
 // On start the dashboard, the hidden Morning and Fitness tabs and the weekly
@@ -1725,6 +1727,8 @@ function MorningSection({ user }) {
     } : null
   ), [view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
     liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive, finalisedDraft]);
+  // The live routine's tasks, for the in-progress banner line.
+  const liveRoutineStepsRef = useRef([]);
   useSessionDraft(user?.id, `morning-${today}`, morningDraft, draft => {
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(draft.view)) return;
     setCheckinStep(draft.checkinStep || 0);
@@ -1741,7 +1745,9 @@ function MorningSection({ user }) {
     setLiveInputActive(Boolean(draft.liveInputActive));
     setLiveNow(Date.now());
     setView(draft.view);
-  });
+  }, draft => (draft.view === "liveMorning"
+    ? [`Task ${(draft.liveTaskIndex || 0) + 1} of ${liveRoutineStepsRef.current.length || "?"}`, liveRoutineStepsRef.current[draft.liveTaskIndex || 0]?.name].filter(Boolean).join(" · ")
+    : "Check-in in progress"));
   const fileRef = useRef(null);
 
   const NON_NEGS = [
@@ -2059,10 +2065,16 @@ function MorningSection({ user }) {
   const allSteps = scheduledTasks.length > 0 ? activeScheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
 
   const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
+  useEffect(() => { liveRoutineStepsRef.current = liveRoutineSteps; });
   const currentLiveTask = liveRoutineSteps[liveTaskIndex];
+  // The routine's plan is every task, the check-in at the end included, so
+  // it matches the minutes the task list adds up to. The live timer stops
+  // before the check-in, which counts at its planned length.
+  const routinePlannedMinutes = allSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+  const checkinStepMinutes = Number(allSteps.find(step => step.id === "checkin")?.duration) || 0;
   const captureLiveRoutineTiming = () => ({
-    plannedMinutes: liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0),
-    actualMinutes: liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null,
+    plannedMinutes: routinePlannedMinutes,
+    actualMinutes: liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) + checkinStepMinutes : null,
     completedAt: new Date().toISOString(),
   });
 
@@ -2104,7 +2116,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   const finaliseCheckin = async () => {
     const draftKey = { key: JSON.stringify(checkinData), step: checkinStep };
     const score = morningScore(checkinData);
-    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const plannedRoutineMinutes = routinePlannedMinutes;
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     setSavingCheckin(true);
     setSubmissionError("");
@@ -2266,6 +2278,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
       ...prev,
       [currentLiveTask.id || currentLiveTask.name]: true
     }));
+    // The same thing as a habit (Stretch / Mobility and "Stretch or move") ticks it too.
+    window.dispatchEvent(new CustomEvent("track3d-task-done", { detail: { name: currentLiveTask.name } }));
 
     moveToNextLiveTask();
   };
@@ -2699,7 +2713,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const formDate = editingDate || today;
     const isPastEntry = formDate !== today;
     const formSteps = allSteps.filter(step => step.id !== "checkin");
-    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const plannedRoutineMinutes = routinePlannedMinutes;
     const toggleStyle = selected => ({ flex: 1, minHeight: 44, borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" });
     return (
       <div className={`t3d-fade ${isRoughCheckin || isLogCheckin ? "t3d-rough-checkin" : ""}`}>
@@ -4058,7 +4072,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             {currentStep.type === "tick" && (
               <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
                 <button className="t3d-tick-btn"
-                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: true })); setCheckinStep(s => reviewingMissed ? allSteps.length : s + 1); setReviewingMissed(false); }}>
+                  onClick={() => { setCheckinData(d => ({ ...d, [currentStep.id || currentStep.name]: true })); window.dispatchEvent(new CustomEvent("track3d-task-done", { detail: { name: currentStep.name } })); setCheckinStep(s => reviewingMissed ? allSteps.length : s + 1); setReviewingMissed(false); }}>
                   ✓
                 </button>
                 <button className="t3d-cross-btn"
@@ -4086,7 +4100,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const score = morningScore(checkinData);
     const quote = MORNING_QUOTES[Math.floor(Math.random() * MORNING_QUOTES.length)];
     const editableSteps = allSteps.map((step, index) => ({ step, index })).filter(({ step }) => step.id !== "checkin");
-    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const plannedRoutineMinutes = routinePlannedMinutes;
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
     const routineTimingText = routineTimingSummary({ plannedMinutes: plannedRoutineMinutes, actualMinutes: actualRoutineMinutes });
 
@@ -4552,12 +4566,12 @@ function ProgressPhotos({ user }) {
       </div>
       {filtered.length === 0 ? (
         <div style={{ textAlign: "center", padding: "24px 0", fontSize: 11, color: "#E0EAF0" }}>
-          No {angle} photos yet — they'll show up here after your first morning check-in.
+          {`No ${angle} photos yet. They'll show up here after you add photos in a morning check-in.`}
         </div>
       ) : (
         <div style={{ textAlign: "center" }}>
           <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 10 }}>
-            {new Date(current.date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+            {dateKeyLabel(current.date, { day: "numeric", month: "short", year: "numeric" })}
           </div>
           <div style={{ width: "100%", maxWidth: 280, height: 340, margin: "0 auto 14px", borderRadius: 8, overflow: "hidden", border: `1px solid ${BORDER}`, display: "flex", alignItems: "center", justifyContent: "center", background: SURFACE2 }}>
             {urlCache[current.data.photos[angle]] === "unavailable" ? (
@@ -4650,6 +4664,8 @@ async function loadWeeklyReportData(user, week) {
     week, todayKey,
     workoutLogs: (workouts.data || []).map(log => ({ ...log, in_progress: !isFinishedWorkout(log, todayKey) })),
     sessions: split.data?.sessions || [],
+    // Sessions only count as planned from the day this plan started.
+    planStartKey: split.data?.programme_started_at ? getZonedDateInfo(new Date(split.data.programme_started_at), resolveHomeTimeZone(user)).dateKey : null,
     habits: habits.data || [],
     habitCompletions: completions.data || [],
     checkins: checkins.data || [],
@@ -4830,7 +4846,7 @@ function WeeklyRecap({ user, onBack }) {
             {workouts && (
               <div className="t3d-reveal" style={reveal(1)}>
                 <ReportTile testId="tile-workouts" label="WORKOUTS COMPLETED" value={workouts.planned ? `${workouts.completed} / ${workouts.planned}` : workouts.completed}
-                  sub={workouts.planned ? (workouts.completed >= workouts.planned ? "Every planned session done" : `${workouts.planned - workouts.completed} planned session${workouts.planned - workouts.completed === 1 ? "" : "s"} missed`) : "No weekly plan to compare against"}
+                  sub={workouts.planned ? (workouts.completed >= workouts.planned ? "Every planned session done" : workouts.missed ? `${workouts.missed} planned session${workouts.missed === 1 ? "" : "s"} missed` : week.inProgress ? "On track so far" : "No planned sessions missed") : "No weekly plan to compare against"}
                   progress={workouts.planned ? workouts.completed / workouts.planned : null} />
               </div>
             )}
@@ -4930,7 +4946,9 @@ const COACH_STYLE_SUMMARIES = {
 
 // ─── Profile form (dashboard "Complete your profile" to-do) ──────────────────
 // Height, date of birth and sex in one short form. Date of birth is saved
-// rather than age, so age stays right. Only what is filled in is saved.
+// rather than age, so age stays right. Any part can be saved on its own
+// (for example just the training experience); only what is filled in is
+// saved, and the form says what is still missing.
 function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   const [heightCm, setHeightCm] = useState(profile?.heightCm ? String(profile.heightCm) : "");
   const [dateOfBirth, setDateOfBirth] = useState(profile?.dateOfBirth || "");
@@ -4939,18 +4957,24 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   const [personality, setPersonality] = useState(profile?.personality || "balanced");
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
-  const problem = profileProblem({ heightCm, dateOfBirth, sex, experienceLevel }, today, { requireExperience: true });
+  const problem = profileProblem({ heightCm, dateOfBirth, sex, experienceLevel }, today, { partial: true });
+  const missing = missingProfileFields({ heightCm, dateOfBirth, sex, experienceLevel });
+  const profileValues = profileUpdate({ heightCm, dateOfBirth, sex });
+  const profileChanged = Object.keys(profileChanges(profile || {}, { heightCm, dateOfBirth, sex })).length > 0;
+  const coachChanged = (experienceLevel || null) !== (profile?.experienceLevel || null) || personality !== (profile?.personality || "balanced");
+  const canSave = !problem && !saving && (profileChanged || coachChanged);
   const touched = Boolean(heightCm || dateOfBirth || sex);
   const save = async () => {
-    if (problem || saving) return;
+    if (!canSave) return;
     setSaving(true);
     setStatus("");
-    const values = profileUpdate({ heightCm, dateOfBirth, sex });
+    const values = profileValues;
     const updatedAt = new Date().toISOString();
-    // Training experience is read by every coach from coach_profiles.
+    // Training experience and coach style are read by every coach from
+    // coach_profiles. Each table is only written when something in it changed.
     const [profileResult, coachResult] = await Promise.all([
-      supabase.from("user_profiles").upsert({ user_id: user.id, ...values, updated_at: updatedAt }, { onConflict: "user_id" }),
-      supabase.from("coach_profiles").upsert({ user_id: user.id, experience_level: experienceLevel, personality, updated_at: updatedAt }, { onConflict: "user_id" }),
+      profileChanged ? supabase.from("user_profiles").upsert({ user_id: user.id, ...values, updated_at: updatedAt }, { onConflict: "user_id" }) : { error: null },
+      coachChanged ? supabase.from("coach_profiles").upsert({ user_id: user.id, ...(experienceLevel ? { experience_level: experienceLevel } : {}), personality, updated_at: updatedAt }, { onConflict: "user_id" }) : { error: null },
     ]);
     setSaving(false);
     const error = profileResult.error || coachResult.error;
@@ -4964,7 +4988,15 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
       experienceLevel !== profile?.experienceLevel && profile?.experienceLevel && `Level: ${experienceLevel.toUpperCase()}`,
     ].filter(Boolean);
     if (changes.length) window.dispatchEvent(new CustomEvent("track3d-coach-settings", { detail: { note: changes.join("; ") } }));
-    onSaved({ ...normaliseProfile(values, experienceLevel), personality });
+    // Fields left empty keep what is stored (a save never clears them).
+    const savedFields = normaliseProfile(values, experienceLevel || profile?.experienceLevel);
+    onSaved({
+      heightCm: savedFields.heightCm ?? profile?.heightCm ?? null,
+      dateOfBirth: savedFields.dateOfBirth ?? profile?.dateOfBirth ?? null,
+      sex: savedFields.sex ?? profile?.sex ?? null,
+      experienceLevel: savedFields.experienceLevel,
+      personality,
+    });
   };
   return (
     <div data-testid="profile-form" style={{ padding: "12px 0 4px" }}>
@@ -5006,16 +5038,21 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
         ))}
       </div>
       {touched && problem && <div style={{ fontSize: 10, color: "#FFB547", margin: "6px 0" }}>{problem}</div>}
+      {!problem && missing.length > 0 && (
+        <div data-testid="profile-missing" style={{ fontSize: 10, color: "#8AABB8", margin: "6px 0", lineHeight: 1.5 }}>
+          You can save now. Still to add: {missing.join(", ")}{missing.some(field => field !== "training experience") ? " (your calorie targets use height, date of birth and sex)" : ""}.
+        </div>
+      )}
       {status && <div role="alert" style={{ fontSize: 10, color: "#FFB547", margin: "6px 0" }}>{status}</div>}
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={onCancel}>CANCEL</button>
-        <button className="t3d-btn" style={{ flex: 1, padding: 10 }} disabled={Boolean(problem) || saving} onClick={save}>{saving ? "SAVING..." : "SAVE PROFILE"}</button>
+        <button className="t3d-btn" style={{ flex: 1, padding: 10 }} disabled={!canSave} onClick={save}>{saving ? "SAVING..." : "SAVE PROFILE"}</button>
       </div>
     </div>
   );
 }
 
-function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSaved }) {
+function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSaved, workoutBannerShown = false }) {
   const done = habits.filter(h => h.done).length;
   const [eodDone, setEodDone] = useState(false);
   const [showEod, setShowEod] = useState(false);
@@ -5146,11 +5183,16 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   const morningSkipped = Boolean(todayData.morning?.data?.routineSkipped);
   const morningDone = Boolean(todayData.morning) && !morningInProgress;
   const caloriesEaten = todayData.nutrition?.total_calories || 0;
-  const calorieGoal = todayData.nutritionPlan?.daily_calories || 0;
-  const scoreParts = [habits.length ? done / habits.length : 0, morningDone ? Math.min((todayData.morning?.score || 10) / 10, 1) : 0];
-  if (calorieGoal) scoreParts.push(Math.min(caloriesEaten / calorieGoal, 1));
-  if (todaySession) scoreParts.push(fitnessDone ? 1 : 0);
-  const score = Math.round((scoreParts.reduce((sum, value) => sum + value, 0) / scoreParts.length) * 100);
+  // Today's target: rest days with their own meals have a lighter one.
+  const dashboardTargets = dayTargets(todayData.nutritionPlan, dashboardTrainingDay);
+  const calorieGoal = dashboardTargets.calories || 0;
+  // The score is the average of what applies today; its parts are shown under it.
+  const { score, parts: scoreParts } = dailyScore({
+    habitsDone: done, habitsTotal: habits.length,
+    hasRoutine: todayData.hasRoutine, morningDone, morningScore: todayData.morning?.score,
+    caloriesEaten, calorieGoal,
+    workoutScheduled: Boolean(todaySession), workoutDone: fitnessDone,
+  });
   // Real figures for the dashboard coach; anything missing is "not logged".
   const coachDayContext = [
     `- Morning routine: ${morningSkipped ? "skipped today" : morningDone ? `done, score ${todayData.morning?.score ?? 0}/10` : morningInProgress ? "started, not finished" : "not logged"}`,
@@ -5164,7 +5206,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       ];
     }),
     `- Workouts this week: ${(() => { const week = weeklyWorkoutProgress(todayData.weekWorkouts || [], today, todayData.sessions, null, { countCurrent: false }); return week.planned ? `${week.completed} of ${week.planned} planned` : `${week.completed}`; })()}`,
-    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (app target ${calorieGoal} kcal${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
+    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (app target ${calorieGoal} kcal${dashboardTargets.restDay ? " for a rest day" : ""}${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
     ...(todayData.nutrition?.off_plan_food && Number(todayData.nutrition.off_plan_calories) > 0 ? [`- Off-plan food: ${todayData.nutrition.off_plan_food} (${todayData.nutrition.off_plan_calories} kcal, included above)`] : []),
     ...(unloggedFoodFromLog(todayData.nutrition).length ? [`- Food eaten with no calories entered (the calorie total above is incomplete): ${unloggedFoodFromLog(todayData.nutrition).join("; ")}`] : []),
     `- Habits: ${habits.length ? `${done}/${habits.length} done${habits.some(h => h.done) ? ` (done: ${habits.filter(h => h.done).map(h => h.name).join(", ")})` : ""}${habits.some(h => !h.done) ? ` (pending: ${habits.filter(h => !h.done).map(h => h.name).join(", ")})` : ""}` : "none set up"}`,
@@ -5177,7 +5219,10 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   const nextUp = nextUpItems({
     hour: Number(homeDate.time.slice(0, 2)),
     morning: { hasRoutine: todayData.hasRoutine, done: morningDone, inProgress: morningInProgress, wakeTime: todayData.wakeTime },
-    workout: { inProgressName: activeWorkout?.session_name || null, scheduledName: todaySession?.name || null, done: fitnessDone },
+    // The banner above already continues an active workout.
+    workout: workoutBannerShown
+      ? { inProgressName: null, scheduledName: null, done: true }
+      : { inProgressName: activeWorkout?.session_name || null, scheduledName: todaySession?.name || null, scheduledActivity: isActivitySession(todaySession), done: fitnessDone },
     meals: dashboardMeals.map((meal, index) => ({ name: meal.name, time: meal.time, index, logged: isMealAnswered(dashMeals.results[index]), flexible: isFlexibleMeal(meal) })),
     habits,
     endOfDayDone: eodDone,
@@ -5304,6 +5349,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
               <span style={{ fontSize: 8, color: dashboardTrainingDay ? NEON : NEON2, letterSpacing: 1 }}>{dashboardTrainingDay ? "TRAINING DAY" : "REST DAY"} MEALS</span>
             </div>
             <MealLogList meals={dashboardMeals} results={dashMeals.results} onResultsChange={dashMeals.setResults} onSave={dashMeals.save} compact />
+            <LogSomethingElse onAdd={dashMeals.addExtra} />
             {dashMeals.error && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{dashMeals.error}</div>}
             <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("nutrition")}>{todayData.nutrition?.meals_completed && todayData.nutrition.meals_completed._review_complete !== false ? "OPEN NUTRITION →" : "DAY REVIEW IN NUTRITION →"}</button>
           </div>
@@ -5317,6 +5363,15 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           <div style={{ display: "flex", justifyContent: "center", paddingTop: 4 }}>
             <ScoreRing score={score} />
           </div>
+          {scoreParts.length > 0 && (
+            <div data-testid="score-parts" style={{ marginTop: 8, display: "grid", gap: 3 }}>
+              {scoreParts.map(part => (
+                <div key={part.key} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 9, color: "#8AABB8" }}>
+                  <span>{part.label}</span><span style={{ color: part.value >= 1 ? NEON : "#C5D6DC" }}>{part.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">MORNING ROUTINE</div>
@@ -5337,7 +5392,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
             <div className="t3d-slabel" style={{ marginTop: 10 }}>COMPLETED TODAY</div>
           </> : todayData.loaded && !todayData.hasPlan ? <div style={{ color: "#8AABB8", fontSize: 12 }}>No training plan yet.</div>
             : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
-          <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? "START WORKOUT →" : todayData.loaded && !todayData.hasPlan ? "BUILD MY PLAN →" : "OPEN FITNESS"}</button>
+          {!(activeWorkout && workoutBannerShown) && <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? (isActivitySession(todaySession) ? "LOG IT →" : "START WORKOUT →") : todayData.loaded && !todayData.hasPlan ? "BUILD MY PLAN →" : "OPEN FITNESS"}</button>}
         </div>
         <div className="t3d-card">
           <div className="t3d-ctitle">CALORIES</div>
@@ -5470,7 +5525,7 @@ function ExerciseLineChart({ points }) {
 // Read-only view of one planned session: used by plan approval, the plan
 // preview sheet and the Import My Plan review. It never starts or edits anything.
 function PlanSessionCard({ session, description, label }) {
-  const minutes = session.duration_mins || session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0;
+  const minutes = sessionPlannedMinutes(session);
   return (
     <div style={{ padding: 13, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 7, marginBottom: 10, textAlign: "left" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 7 }}>
@@ -5534,6 +5589,15 @@ function PlanPreviewSheet({ title, entries, notes, onClose }) {
       </div>
     </div>
   );
+}
+
+// "Upper A · Set 2 of 4 · Bench Press": where an active workout is up to.
+function workoutProgressLine({ activeSession, exerciseIdx = 0, completedSets = {} } = {}) {
+  const exercise = activeSession?.exercises?.[exerciseIdx || 0];
+  if (!exercise) return activeSession?.name || "";
+  const done = (completedSets?.[exerciseIdx || 0] || []).length;
+  const total = Number(exercise.sets) || 0;
+  return [activeSession.name, total && done < total ? `Set ${done + 1} of ${total}` : "Sets done", exercise.name].filter(Boolean).join(" · ");
 }
 
 function normalizeFitnessSessions(sessions = []) {
@@ -5617,6 +5681,13 @@ function Fitness({ user, isActive = true }) {
   const [deleteHistoryWorkout, setDeleteHistoryWorkout] = useState(null);
   const [draggedWorkoutDay, setDraggedWorkoutDay] = useState(null);
   const [showOtherWorkouts, setShowOtherWorkouts] = useState(false);
+  // Other activities (running, HYROX, ...): a quick log with duration and
+  // effort, and a place in the weekly plan.
+  const [activityForm, setActivityForm] = useState(null);
+  const [activitySaving, setActivitySaving] = useState(false);
+  const [activityError, setActivityError] = useState("");
+  const [activityNotice, setActivityNotice] = useState("");
+  const [planActivityForm, setPlanActivityForm] = useState(null);
   const [discardWorkoutWarning, setDiscardWorkoutWarning] = useState(false);
   const [pendingSession, setPendingSession] = useState(null);
   const [availableMinutes, setAvailableMinutes] = useState("");
@@ -5710,7 +5781,7 @@ function Fitness({ user, isActive = true }) {
     setRestActive(remaining > 0);
     setWorkoutInProgress(true);
     setView("workout");
-  });
+  }, workoutProgressLine);
   const today = homeDate.dateKey;
 
 const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
@@ -6103,9 +6174,40 @@ function withPlanApproval(sessions, now = new Date()) {
     setView("workout");
   };
 
+  const openActivityLog = (prefill = {}) => {
+    setActivityError("");
+    setActivityNotice("");
+    setActivityForm({ type: prefill.type || "run", name: prefill.name || "", minutes: prefill.minutes ? String(prefill.minutes) : "", effort: "moderate", distanceKm: "", notes: "" });
+  };
+  const saveActivityLog = async () => {
+    if (!user || !activityForm || activitySaving) return;
+    if (!(Number(activityForm.minutes) >= 2)) { setActivityError("Enter how many minutes it took (2 or more)."); return; }
+    setActivitySaving(true);
+    setActivityError("");
+    // A distance only applies to activities that have one (not HYROX, say).
+    const hasDistance = ACTIVITY_TYPES.find(type => type.id === activityForm.type)?.distance;
+    // created_at as for a gym workout, so history lists it in order.
+    const row = { ...activityLogRow({ userId: user.id, date: today, ...activityForm, distanceKm: hasDistance ? activityForm.distanceKm : null }), created_at: new Date().toISOString() };
+    const { data, error } = await supabase.from("workout_logs").insert(row).select("*").single();
+    setActivitySaving(false);
+    if (error) { setActivityError(`It wasn't saved: ${error.message}. Please try again.`); return; }
+    setHistory(current => [{ ...row, ...(data || {}) }, ...current]);
+    setActivityForm(null);
+    setActivityNotice(`${row.session_name} logged · ${activitySummary(row)}`);
+  };
+  const savePlanActivity = async () => {
+    if (!planActivityForm?.days?.length) return;
+    const saved = await saveSplit([...sessions, activitySession(planActivityForm)]);
+    if (!saved.ok) { setPlanSaveError(`The activity wasn't added to your plan: ${saved.error}. Please try again.`); return; }
+    setPlanSaveError("");
+    setPlanActivityForm(null);
+  };
+
   // Start straight away with the full session at the usual gym; the
   // time/gym options are behind a small link (openWorkoutOptions).
   const requestStartWorkout = session => {
+    // An activity in the plan is logged, not started like a gym session.
+    if (isActivitySession(session)) { openActivityLog({ type: session.activityType, name: session.name, minutes: session.duration_mins }); return; }
     setAvailableMinutes("");
     setGymContext("usual");
     setGymName("");
@@ -7932,12 +8034,12 @@ function withPlanApproval(sessions, now = new Date()) {
   }
   const activeCompletedSets = Object.values(completedSets).reduce((total, sets) => total + sets.length, 0);
   const activeTotalSets = activeSession?.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0) || 0;
-  const programmeApproved = sessions.length > 0 && sessions.every(session => session.approval?.approved);
+  const programmeApproved = sessions.some(session => !isActivitySession(session)) && sessions.filter(session => !isActivitySession(session)).every(session => session.approval?.approved);
   const weekStartAnchor = new Date(homeTodayAnchor);
   weekStartAnchor.setUTCDate(weekStartAnchor.getUTCDate() - ((homeTodayAnchor.getUTCDay() + 6) % 7));
   const weekStartKey = weekStartAnchor.toISOString().slice(0, 10);
   // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not real workouts.
-  const isEmptyWorkout = log => !(Number(log.total_volume) > 0) && (Number(log.duration_mins) || 0) < 2;
+  const isEmptyWorkout = log => !activityOfLog(log) && !(Number(log.total_volume) > 0) && (Number(log.duration_mins) || 0) < 2;
   const realHistory = history.filter(log => !isEmptyWorkout(log));
   const emptyHistoryCount = history.length - realHistory.length;
   const formatLogDate = dateKey => {
@@ -8019,6 +8121,7 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 240px", minWidth: 0 }}>
                     <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8, overflowWrap: "anywhere" }}>{activeSession.name}</div>
+                    <div data-testid="active-workout-line" style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 4 }}>{workoutProgressLine({ activeSession, exerciseIdx, completedSets }).split(" · ").slice(1).join(" · ")}</div>
                     <div style={{ fontSize: 11, color: NEON2 }}>{activeCompletedSets} of {activeTotalSets} sets completed · progress saved</div>
                   </div>
                   <button className="t3d-big-btn" style={{ flex: "0 1 300px", margin: 0, background: "linear-gradient(90deg, rgba(0,255,178,.18), rgba(0,200,255,.18))", border: `1px solid ${NEON}`, color: NEON, fontSize: 12, letterSpacing: 2 }} onClick={() => setView("workout")}>
@@ -8082,7 +8185,7 @@ function withPlanApproval(sessions, now = new Date()) {
                     })} />
                   </div>
                   <div style={{ fontSize: 11, color: missedRecommendation ? "#FF8C00" : "#8AABB8" }}>
-                    {missedRecommendation ? `Make-up session missed on ${missedRecommendation.dayLabel}` : "Scheduled for today"} · {recommendedSession.exercises?.length || 0} exercises
+                    {missedRecommendation ? `Make-up session missed on ${missedRecommendation.dayLabel}` : "Scheduled for today"} · {isActivitySession(recommendedSession) ? `${activityTypeLabel(recommendedSession.activityType)} · ${sessionPlannedMinutes(recommendedSession)} min` : `${recommendedSession.exercises?.length || 0} exercises`}
                   </div>
                   {!recommendedSession.approval?.approved && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, color: "#FFB547", fontSize: 8 }}>
@@ -8092,11 +8195,11 @@ function withPlanApproval(sessions, now = new Date()) {
                   )}
                 </div>
                 <button className="t3d-big-btn" style={{ flex: "0 1 300px", margin: 0, background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 13, fontWeight: 900, letterSpacing: 2, boxShadow: "0 0 22px rgba(0,255,178,.24)" }} onClick={() => requestStartWorkout(recommendedSession)}>
-                  ▶ START WORKOUT
+                  {isActivitySession(recommendedSession) ? `▶ LOG ${recommendedSession.name.toUpperCase()}` : "▶ START WORKOUT"}
                 </button>
-                <button type="button" onClick={() => openWorkoutOptions(recommendedSession)} style={{ flexBasis: "100%", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "4px 0", textAlign: "right", textDecoration: "underline" }}>
+                {!isActivitySession(recommendedSession) && <button type="button" onClick={() => openWorkoutOptions(recommendedSession)} style={{ flexBasis: "100%", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "4px 0", textAlign: "right", textDecoration: "underline" }}>
                   Short on time or at a different gym?
-                </button>
+                </button>}
               </div>
             ) : (
               <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
@@ -8126,8 +8229,71 @@ function withPlanApproval(sessions, now = new Date()) {
               >
                 OTHER WORKOUTS {showOtherWorkouts ? "▲" : "▼"}
               </button>
+              <button className="t3d-btn t3d-btn-sm" data-testid="log-activity" style={{ padding: "5px 9px", borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => openActivityLog()}>+ LOG ACTIVITY</button>
             </div>
+            {activityNotice && <div role="status" style={{ marginTop: 10, fontSize: 11, color: NEON }}>✓ {activityNotice}</div>}
           </div>
+
+          {activityForm && (
+            <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 }}>
+              <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="activity-log-title" data-testid="activity-form" style={{ width: "100%", maxWidth: 400, maxHeight: "calc(100dvh - 40px)", overflowY: "auto" }}>
+                <div id="activity-log-title" className="t3d-ctitle" style={{ color: NEON2 }}>LOG AN ACTIVITY</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                  {ACTIVITY_TYPES.map(type => <button key={type.id} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={activityForm.type === type.id} style={{ borderColor: activityForm.type === type.id ? NEON2 : BORDER, color: activityForm.type === type.id ? NEON2 : "#8AABB8" }} onClick={() => setActivityForm(form => ({ ...form, type: type.id }))}>{type.label.toUpperCase()}</button>)}
+                </div>
+                <label style={{ display: "block", fontSize: 9, color: "#8AABB8", marginBottom: 10 }}>NAME (OPTIONAL)
+                  <input className="t3d-input" aria-label="Activity name" placeholder={activityTypeLabel(activityForm.type)} value={activityForm.name} onChange={event => { const value = event.target.value; setActivityForm(form => ({ ...form, name: value })); }} style={{ marginTop: 5 }} />
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: ACTIVITY_TYPES.find(type => type.id === activityForm.type)?.distance ? "1fr 1fr" : "1fr", gap: 8, marginBottom: 10 }}>
+                  <label style={{ fontSize: 9, color: "#8AABB8" }}>MINUTES
+                    <input className="t3d-input" aria-label="Minutes" type="number" inputMode="numeric" min="2" placeholder="e.g. 45" value={activityForm.minutes} onChange={event => { const value = event.target.value; setActivityForm(form => ({ ...form, minutes: value })); }} style={{ marginTop: 5 }} />
+                  </label>
+                  {ACTIVITY_TYPES.find(type => type.id === activityForm.type)?.distance && <label style={{ fontSize: 9, color: "#8AABB8" }}>DISTANCE (KM, OPTIONAL)
+                    <input className="t3d-input" aria-label="Distance in km" type="number" inputMode="decimal" min="0" placeholder="e.g. 5" value={activityForm.distanceKm} onChange={event => { const value = event.target.value; setActivityForm(form => ({ ...form, distanceKm: value })); }} style={{ marginTop: 5 }} />
+                  </label>}
+                </div>
+                <div style={{ fontSize: 9, color: "#8AABB8", marginBottom: 6 }}>HOW HARD WAS IT?</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, marginBottom: 10 }}>
+                  {ACTIVITY_EFFORTS.map(effort => <button key={effort.id} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={activityForm.effort === effort.id} style={{ fontSize: 8, padding: "8px 2px", borderColor: activityForm.effort === effort.id ? NEON2 : BORDER, color: activityForm.effort === effort.id ? NEON2 : "#8AABB8" }} onClick={() => setActivityForm(form => ({ ...form, effort: effort.id }))}>{effort.label.toUpperCase()}</button>)}
+                </div>
+                <input className="t3d-input" aria-label="Notes" placeholder="Notes (optional)" value={activityForm.notes} onChange={event => { const value = event.target.value; setActivityForm(form => ({ ...form, notes: value })); }} style={{ marginBottom: 10 }} />
+                {activityError && <div role="alert" style={{ fontSize: 10, color: "#FFB547", marginBottom: 8 }}>{activityError}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm" onClick={() => setActivityForm(null)}>CANCEL</button>
+                  <button className="t3d-btn" style={{ flex: 1, minHeight: 46, borderColor: NEON2, color: NEON2 }} disabled={activitySaving} onClick={saveActivityLog}>{activitySaving ? "SAVING..." : "SAVE ACTIVITY ✓"}</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {planActivityForm && (
+            <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 }}>
+              <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="plan-activity-title" data-testid="plan-activity-form" style={{ width: "100%", maxWidth: 400, maxHeight: "calc(100dvh - 40px)", overflowY: "auto" }}>
+                <div id="plan-activity-title" className="t3d-ctitle" style={{ color: NEON2 }}>ADD AN ACTIVITY TO YOUR WEEK</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                  {ACTIVITY_TYPES.map(type => <button key={type.id} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={planActivityForm.type === type.id} style={{ borderColor: planActivityForm.type === type.id ? NEON2 : BORDER, color: planActivityForm.type === type.id ? NEON2 : "#8AABB8" }} onClick={() => setPlanActivityForm(form => ({ ...form, type: type.id }))}>{type.label.toUpperCase()}</button>)}
+                </div>
+                <label style={{ display: "block", fontSize: 9, color: "#8AABB8", marginBottom: 10 }}>NAME (OPTIONAL)
+                  <input className="t3d-input" aria-label="Planned activity name" placeholder={activityTypeLabel(planActivityForm.type)} value={planActivityForm.name} onChange={event => { const value = event.target.value; setPlanActivityForm(form => ({ ...form, name: value })); }} style={{ marginTop: 5 }} />
+                </label>
+                <div style={{ fontSize: 9, color: "#8AABB8", marginBottom: 6 }}>WHICH DAYS? <span style={{ color: "#6F8792" }}>· days with a workout are taken</span></div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 4, marginBottom: 10 }}>
+                  {DAYS.map(day => {
+                    const taken = sessions.some(session => (session.days || []).some(saved => String(saved).toUpperCase().slice(0, 3) === day));
+                    const chosen = planActivityForm.days.includes(day);
+                    return <button key={day} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={chosen} disabled={taken} style={{ fontSize: 8, padding: "8px 0", borderColor: chosen ? NEON2 : BORDER, color: chosen ? NEON2 : "#8AABB8" }} onClick={() => setPlanActivityForm(form => ({ ...form, days: chosen ? form.days.filter(item => item !== day) : [...form.days, day] }))}>{day}</button>;
+                  })}
+                </div>
+                <label style={{ display: "block", fontSize: 9, color: "#8AABB8", marginBottom: 12 }}>ABOUT HOW LONG? (MIN)
+                  <input className="t3d-input" aria-label="Planned minutes" type="number" inputMode="numeric" min="5" value={planActivityForm.minutes} onChange={event => { const value = event.target.value; setPlanActivityForm(form => ({ ...form, minutes: value })); }} style={{ marginTop: 5 }} />
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="t3d-btn t3d-btn-sm" onClick={() => setPlanActivityForm(null)}>CANCEL</button>
+                  <button className="t3d-btn" style={{ flex: 1, minHeight: 46, borderColor: NEON2, color: NEON2 }} disabled={!planActivityForm.days.length} onClick={savePlanActivity}>ADD TO MY PLAN ✓</button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {pendingSession && (
             <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 }}>
@@ -8162,13 +8328,13 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 9 }}>
               {sessions.filter(session => session !== recommendedSession).map((session, index) => (
-                <button key={`${session.name}-${index}`} className="t3d-btn" onClick={() => requestStartWorkout(session)} disabled={!session.exercises?.length}
+                <button key={`${session.name}-${index}`} className="t3d-btn" onClick={() => requestStartWorkout(session)} disabled={!session.exercises?.length && !isActivitySession(session)}
                   style={{ minWidth: 0, width: "100%", minHeight: 78, display: "block", textAlign: "left", padding: "12px 14px", color: "#E0EAF0", borderColor: BORDER, whiteSpace: "normal", overflow: "hidden" }}>
                   <span style={{ display: "block", minWidth: 0 }}>
                     <span style={{ display: "block", fontSize: 10, lineHeight: 1.45, overflowWrap: "anywhere" }}>{session.name}</span>
-                    <span style={{ display: "block", marginTop: 5, fontSize: 8, color: "#4A6070" }}>{session.exercises?.length || 0} EXERCISES</span>
+                    <span style={{ display: "block", marginTop: 5, fontSize: 8, color: "#4A6070" }}>{isActivitySession(session) ? `ACTIVITY · ${sessionPlannedMinutes(session)} MIN` : `${session.exercises?.length || 0} EXERCISES`}</span>
                   </span>
-                  <span style={{ display: "block", marginTop: 8, fontSize: 8, color: NEON2, lineHeight: 1.45, overflowWrap: "anywhere" }}>{(session.days || []).join(" / ") || "FLEXIBLE"} · START →</span>
+                  <span style={{ display: "block", marginTop: 8, fontSize: 8, color: NEON2, lineHeight: 1.45, overflowWrap: "anywhere" }}>{(session.days || []).join(" / ") || "FLEXIBLE"} · {isActivitySession(session) ? "LOG IT →" : "START →"}</span>
                 </button>
               ))}
               {sessions.filter(session => session !== recommendedSession).length === 0 && <div style={{ fontSize: 11, color: "#4A6070" }}>No other sessions in this plan.</div>}
@@ -8227,14 +8393,15 @@ function withPlanApproval(sessions, now = new Date()) {
                     .map(session => ({ session })),
                 })} />
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
+                <button className="t3d-btn t3d-btn-sm" data-testid="plan-add-activity" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => setPlanActivityForm({ type: "run", name: "", days: [], minutes: "30" })}>+ ACTIVITY</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={openPlanChangeCoach}>CHANGE PLAN</button>
               </div>
             </div>
             <div style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${programmeApproved ? "rgba(0,255,178,.3)" : "rgba(255,181,71,.3)"}`, borderRadius: 6, background: programmeApproved ? "rgba(0,255,178,.04)" : "rgba(255,181,71,.04)" }}>
               <div style={{ fontSize: 9, color: programmeApproved ? NEON : "#FFB547", marginBottom: programmeApproved ? 0 : 7 }}>
-                {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${sessions[0]?.approval?.reviewAfter}` : "OPTIONAL: CHECK THE DAYS AND EXERCISES, THEN LOCK THIS PLAN IN FOR 8 WEEKS. YOU CAN TRAIN WITHOUT DOING THIS."}
+                {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${(() => { const reviewAfter = sessions.find(session => session.approval?.reviewAfter)?.approval?.reviewAfter; return /^\d{4}-\d{2}-\d{2}$/.test(String(reviewAfter || "")) ? dateKeyLabel(reviewAfter, { day: "numeric", month: "short" }).toUpperCase() : "LATER"; })()}` : "OPTIONAL: CHECK THE DAYS AND EXERCISES, THEN LOCK THIS PLAN IN FOR 8 WEEKS. YOU CAN TRAIN WITHOUT DOING THIS."}
               </div>
               {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalMessages([]); setApprovalReview("all"); }}>REVIEW &amp; LOCK IN PLAN</button>}
             </div>
@@ -8256,7 +8423,7 @@ function withPlanApproval(sessions, now = new Date()) {
                   style={{ display: "flex", alignItems: "center", gap: 12, minHeight: 48, padding: "9px 10px", margin: "0 -10px", borderBottom: `1px solid ${BORDER}`, borderRadius: isMoveTarget ? 6 : 0, outline: isMoveTarget ? "1px dashed rgba(0,200,255,.42)" : "none", background: isMoveTarget ? "rgba(0,200,255,.09)" : "transparent", cursor: isMoveTarget ? "pointer" : "default" }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, width: 32, color: isToday ? NEON : "#E0EAF0" }}>{day}</div>
                   <div style={{ flex: 1, fontSize: 11, color: isMoveTarget ? NEON2 : session ? (isToday ? "#E0EAF0" : "#4A6070") : "#2A3A48" }}>
-                    {isMoveTarget ? `PLACE HERE · ${session ? `swap with ${session.name}` : "rest day"}` : session ? `${session.name} · ${session.exercises?.reduce((total, exercise) => total + (Number(exercise.sets) || 0) * 3, 5) || 0} min` : "REST"}
+                    {isMoveTarget ? `PLACE HERE · ${session ? `swap with ${session.name}` : "rest day"}` : session ? `${session.name} · ${sessionPlannedMinutes(session)} min` : "REST"}
                   </div>
                   {isToday && <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, padding: "2px 7px", borderRadius: 10, background: "rgba(0,255,178,.1)", color: NEON, border: "1px solid rgba(0,255,178,.25)" }}>TODAY</span>}
                   {session && <button type="button" draggable aria-label={`Move ${session.name} from ${day}`} title="Drag or tap to move to another day"
@@ -8309,7 +8476,15 @@ function withPlanApproval(sessions, now = new Date()) {
                   <div id="edit-sessions-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2 }}>EDIT SESSIONS</div>
                   <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={cancelSessionEdits}>CLOSE</button>
                 </div>
-                {sessions.map((session, sIdx) => (
+                {sessions.map((session, sIdx) => isActivitySession(session) ? (
+                  <div key={sIdx} data-testid="edit-activity" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, letterSpacing: 2 }}>{session.name}</div>
+                      <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 4 }}>Activity · {sessionPlannedMinutes(session)} min · {(session.days || []).join(" / ")}</div>
+                    </div>
+                    <button className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label={`Remove ${session.name} from the plan`} onClick={() => setSessions(prev => prev.filter((_, i) => i !== sIdx))}>REMOVE</button>
+                  </div>
+                ) : (
                   <div key={sIdx} style={{ marginBottom: 20, paddingBottom: 16, borderBottom: `1px solid ${BORDER}` }}>
                     <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON, letterSpacing: 2, marginBottom: 10 }}>{session.name}</div>
                     {session.exercises?.map((ex, eIdx) => (
@@ -8390,12 +8565,6 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
             {historyOpen && (
               <div style={{ marginTop: 16 }}>
-                {workoutInProgress && activeSession && (
-                  <button className="t3d-btn" style={{ width: "100%", marginBottom: 12, textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", borderColor: NEON, background: "rgba(0,255,178,.06)" }} onClick={() => setView("workout")}>
-                    <span><span style={{ display: "block", color: NEON, fontSize: 9 }}>ACTIVE TODAY</span><span style={{ display: "block", marginTop: 4, color: "#E0EAF0" }}>{activeSession.name}</span></span>
-                    <span style={{ color: NEON }}>CONTINUE SESSION →</span>
-                  </button>
-                )}
                 {emptyHistoryCount > 0 && (
                   <button type="button" onClick={() => setShowEmptyWorkouts(value => !value)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "0 0 10px", textDecoration: "underline" }}>
                     {showEmptyWorkouts ? "Hide" : "Show"} {emptyHistoryCount} empty session{emptyHistoryCount === 1 ? "" : "s"} (started but nothing logged)
@@ -8411,8 +8580,10 @@ function withPlanApproval(sessions, now = new Date()) {
                       <div style={{ fontSize: 10, color: "#E0EAF0", whiteSpace: "nowrap" }}>{formatLogDate(log.date)}</div>
                     </div>
                     <div style={{ display: "flex", gap: 16, fontSize: 10, color: "#E0EAF0" }}>
-                      <span>{log.duration_mins || 0} min{log.duration_mins === 1 ? "" : "s"}</span>
-                      <span>{Math.round(log.total_volume || 0).toLocaleString()} kg lifted</span>
+                      {activityOfLog(log) ? <span style={{ color: NEON2 }}>{activityTypeLabel(activityOfLog(log).type)} · {activitySummary(log)}</span> : <>
+                        <span>{log.duration_mins || 0} min{log.duration_mins === 1 ? "" : "s"}</span>
+                        <span>{Math.round(log.total_volume || 0).toLocaleString()} kg lifted</span>
+                      </>}
                     </div>
                   </div>
                 ))}
@@ -8433,14 +8604,21 @@ function withPlanApproval(sessions, now = new Date()) {
                       <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label="Close workout history" onClick={() => { setViewingSession(null); setEditingHistorySession(false); setHistoryEditOriginal(null); }}>✕</button>
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                      <div style={{ fontSize: 10, color: "#E0EAF0" }}>{viewingSession.date}</div>
-                      {!editingHistorySession ? <div style={{ display: "flex", gap: 5 }}><button className="t3d-btn t3d-btn-sm" onClick={beginHistoryEdit}>EDIT WORKOUT</button><button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setWorkoutSaveError(""); setDeleteHistoryWorkout(viewingSession); }}>DELETE WORKOUT</button></div> : <div style={{ display: "flex", gap: 5 }}>
+                      <div style={{ fontSize: 10, color: "#E0EAF0" }}>{formatLogDate(viewingSession.date)}</div>
+                      {!editingHistorySession ? <div style={{ display: "flex", gap: 5 }}>{!activityOfLog(viewingSession) && <button className="t3d-btn t3d-btn-sm" onClick={beginHistoryEdit}>EDIT WORKOUT</button>}<button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setWorkoutSaveError(""); setDeleteHistoryWorkout(viewingSession); }}>DELETE WORKOUT</button></div> : <div style={{ display: "flex", gap: 5 }}>
                         <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={cancelHistoryEdit}>CANCEL</button>
                         <button className="t3d-btn t3d-btn-sm" onClick={saveHistoryEdit} disabled={historySaving}>{historySaving ? "SAVING..." : "SAVE CHANGES"}</button>
                       </div>}
                     </div>
                     {workoutSaveError && <div role="alert" style={{ color: "#FF8AAD", fontSize: 9, lineHeight: 1.5, marginBottom: 10 }}>{workoutSaveError}</div>}
-                    {(viewingSession.exercises || []).map((ex, i) => {
+                    {activityOfLog(viewingSession) && (
+                      <div data-testid="activity-detail" style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
+                        <div style={{ fontSize: 12, color: NEON2 }}>{activityTypeLabel(activityOfLog(viewingSession).type)}</div>
+                        <div style={{ fontSize: 11, color: "#E0EAF0", marginTop: 4 }}>{activitySummary(viewingSession)}</div>
+                        {activityOfLog(viewingSession).notes && <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 6, lineHeight: 1.5 }}>{activityOfLog(viewingSession).notes}</div>}
+                      </div>
+                    )}
+                    {(viewingSession.exercises || []).filter(ex => !ex?.activity).map((ex, i) => {
                       const loggedSets = ex.sets || [];
                       const prescribedSetCount = Math.max(loggedSets.length, Number(ex.prescribed_sets) || 0);
                       return <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8, cursor: editingHistorySession ? "default" : "pointer" }}
@@ -8469,10 +8647,10 @@ function withPlanApproval(sessions, now = new Date()) {
                         </div>}
                       </div>
                     })}
-                    <div style={{ marginTop: 12, padding: 12, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6, textAlign: "left" }}>
+                    {!activityOfLog(viewingSession) && <div style={{ marginTop: 12, padding: 12, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.2)", borderRadius: 6, textAlign: "left" }}>
                       <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: NEON2, letterSpacing: 1, marginBottom: 6 }}>AI COACH FEEDBACK</div>
                       <div style={{ color: viewingSession.ai_feedback ? "#C5D6DC" : "#6F8792", fontSize: 10, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{viewingSession.ai_feedback ? cleanAiText(viewingSession.ai_feedback) : "No AI Coach feedback was saved for this older workout."}</div>
-                    </div>
+                    </div>}
                   </>
                 ) : (
                   <>
@@ -8627,8 +8805,11 @@ function AiTweaksBox({ meals, setMeals, macros, goal, allergies = [], preference
 // Today's meals: ✓ (went to plan) or × (did not, with a short note) for
 // planned meals, and macro boxes for flexible meals. Shared by Nutrition and
 // the dashboard; onSave stores each change and returns true when it saved.
-function MealLogList({ meals, results, onResultsChange, onSave, compact = false }) {
+// showDetails: tapping a planned meal shows what's in it, so the Nutrition
+// page lists each meal once.
+function MealLogList({ meals, results, onResultsChange, onSave, compact = false, showDetails = false }) {
   const [status, setStatus] = useState("");
+  const [openMeal, setOpenMeal] = useState(null);
   const commit = async updated => {
     onResultsChange(updated);
     setStatus("SAVING...");
@@ -8653,12 +8834,30 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false 
             </div>
           </div>;
         }
+        const detailsOpen = showDetails && openMeal === index;
         return <div key={`${meal.name}-${index}`} style={{ padding: compact ? "8px 0" : "10px 0", borderBottom: `1px solid ${BORDER}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-            <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>
+            {showDetails ? (
+              <button type="button" aria-expanded={detailsOpen} aria-label={`${meal.name}: what's in it`} onClick={() => setOpenMeal(detailsOpen ? null : index)} style={{ flex: 1, minWidth: 0, background: "none", border: 0, padding: 0, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name} <span style={{ color: "#526873", fontSize: 9 }}>{detailsOpen ? "▴" : "▾"}</span></div>
+                <div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div>
+              </button>
+            ) : <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>}
             <button aria-label={`${meal.name} went to plan`} aria-pressed={mealWasCompleted(result)} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 36, background: mealWasCompleted(result) ? "rgba(0,255,178,.16)" : "transparent", borderColor: mealWasCompleted(result) ? NEON : BORDER }} onClick={() => commit({ ...results, [index]: true })}>✓</button>
             <button aria-label={`${meal.name} did not go to plan`} aria-pressed={missed} className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "6px 10px", minHeight: 36, background: missed ? "rgba(255,45,120,.14)" : "transparent" }} onClick={() => commit({ ...results, [index]: { completed: false, note: typeof result === "object" && result ? result.note || "" : "" } })}>×</button>
           </div>
+          {detailsOpen && (
+            <div data-testid="meal-details" style={{ margin: "8px 0 2px", padding: "8px 10px", background: SURFACE2, borderRadius: 6 }}>
+              {(meal.ingredients || []).map((ingredient, ingredientIndex) => <div key={ingredientIndex} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 10, color: "#C5D6DC", padding: "2px 0" }}><span>{ingredient.name}</span><span>{ingredient.weight}{ingredient.unit}</span></div>)}
+              {!(meal.ingredients || []).length && <div style={{ fontSize: 10, color: "#6F8792" }}>No ingredients saved for this meal.</div>}
+              <div style={{ display: "flex", gap: 10, marginTop: 6, fontSize: 10 }}>
+                <span style={{ color: NEON }}>{meal.calories || 0} kcal</span>
+                <span style={{ color: NEON2 }}>{meal.protein || 0}g P</span>
+                <span style={{ color: "#FF8C00" }}>{meal.carbs || 0}g C</span>
+                <span style={{ color: "#8AABB8" }}>{meal.fats || 0}g F</span>
+              </div>
+            </div>
+          )}
           {missed && <div style={{ marginTop: 8 }}>
             <textarea className="t3d-input" rows={2} placeholder="How did it not go to plan?" value={typeof result === "object" && result ? result.note || "" : ""} onChange={event => { const value = event.target.value; onResultsChange(current => ({ ...current, [index]: { completed: false, note: value } })); }} />
             <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 6, borderColor: "rgba(255,181,71,.35)", color: "#FFB547" }} onClick={() => commit(results)}>SAVE NOTE</button>
@@ -8670,29 +8869,122 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false 
   );
 }
 
+// "Log something else": one tap for common foods, the coach's estimate for
+// anything described, or calories with protein, carbs and fat when known.
+// Food logged as calories only gets a rough protein/carbs/fat split, so the
+// day's macros always add up. onAdd(item) saves it and returns true or false.
+function LogSomethingElse({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [values, setValues] = useState({ calories: "", protein: "", carbs: "", fats: "" });
+  const [estimate, setEstimate] = useState(null);
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const reset = () => { setName(""); setValues({ calories: "", protein: "", carbs: "", fats: "" }); setEstimate(null); };
+  const add = async item => {
+    setBusy(true);
+    setStatus("");
+    const saved = await onAdd(item);
+    setBusy(false);
+    if (saved === false) { setStatus("That couldn't be saved. Check your connection and try again."); return; }
+    setStatus(`Added ${item.name} · ${Math.round(Number(item.calories) || 0).toLocaleString("en-GB")} kcal`);
+    reset();
+    setOpen(false);
+  };
+  const estimateIt = async () => {
+    setBusy(true);
+    setStatus("");
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: await chatHeaders(),
+        body: JSON.stringify({ area: "food_estimate", messages: [{ role: "user", content: `Estimate this food exactly as I described it:\n- ${name.trim()}` }] }),
+      });
+      const result = sumFoodEstimate(extractJsonObject(await readCoachReply(res))?.items);
+      if (!result.items.length) throw new Error("no items in the estimate");
+      setEstimate(result);
+    } catch (error) {
+      console.log("Food estimate error:", error?.message);
+      setStatus("Couldn't estimate that just now. Enter the calories instead.");
+    }
+    setBusy(false);
+  };
+  const typed = { name: name.trim(), ...Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value === "" ? undefined : Number(value)])) };
+  return (
+    <div data-testid="log-something-else" style={{ marginTop: 10 }}>
+      {!open ? (
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ width: "100%", borderColor: "rgba(255,140,0,.4)", color: "#FFB547" }} onClick={() => { setOpen(true); setStatus(""); }}>+ LOG SOMETHING ELSE</button>
+      ) : (
+        <div style={{ padding: 11, border: "1px solid rgba(255,140,0,.3)", borderRadius: 7, background: "rgba(255,140,0,.04)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FFB547", letterSpacing: 1 }}>LOG SOMETHING ELSE</div>
+            <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { reset(); setOpen(false); }}>CANCEL</button>
+          </div>
+          <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>QUICK ADD</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+            {QUICK_FOODS.map(food => (
+              <button key={food.name} type="button" data-testid="quick-food" className="t3d-btn t3d-btn-sm" disabled={busy} style={{ fontSize: 9, whiteSpace: "normal", textAlign: "left" }} onClick={() => add(food)}>
+                {food.name} <span style={{ color: "#8AABB8" }}>· {food.calories}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>OR TYPE IT</div>
+          <input className="t3d-input" aria-label="What did you have?" placeholder="e.g. 2 slices of toast with butter" value={name} onChange={event => { setName(event.target.value); setEstimate(null); }} style={{ marginBottom: 6 }} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
+            {[["calories", "KCAL"], ["protein", "P (g)"], ["carbs", "C (g)"], ["fats", "F (g)"]].map(([key, label]) => (
+              <label key={key} style={{ color: "#6F8792", fontSize: 7 }}>{label}
+                <input className="t3d-input" aria-label={`Something else ${label}`} type="number" inputMode="decimal" min="0" value={values[key]} onChange={event => { const value = event.target.value; setValues(current => ({ ...current, [key]: value })); }} style={{ padding: "7px 4px", marginTop: 4, fontSize: 11 }} />
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize: 9, color: "#6F8792", lineHeight: 1.5, margin: "6px 0 8px" }}>Leave protein, carbs and fat blank for a rough split. No calories? Let the coach estimate it.</div>
+          {estimate && (
+            <div data-testid="something-else-estimate" style={{ fontSize: 10, color: "#C5D6DC", lineHeight: 1.6, marginBottom: 8 }}>
+              Estimate: {estimate.caloriesLow.toLocaleString("en-GB")}–{estimate.caloriesHigh.toLocaleString("en-GB")} kcal · about {estimate.proteinMid} g protein, {estimate.carbsMid} g carbs, {estimate.fatsMid} g fat
+              <button type="button" className="t3d-btn t3d-btn-sm" style={{ display: "block", marginTop: 6 }} disabled={busy} onClick={() => add({ name: typed.name, calories: estimate.caloriesMid, protein: estimate.proteinMid, carbs: estimate.carbsMid, fats: estimate.fatsMid })}>ADD ~{estimate.caloriesMid.toLocaleString("en-GB")} KCAL</button>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} disabled={busy || !typed.name || !(typed.calories > 0)} onClick={() => add(typed)}>ADD</button>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: "rgba(0,200,255,.35)", color: NEON2 }} disabled={busy || !typed.name || typed.calories > 0} onClick={estimateIt}>{busy && !estimate ? "ESTIMATING..." : "ESTIMATE IT"}</button>
+          </div>
+        </div>
+      )}
+      {status && <div role="status" style={{ fontSize: 9, color: status.startsWith("Added") ? NEON : "#FFB547", marginTop: 6 }}>{status}</div>}
+    </div>
+  );
+}
+
 // Today's meal ticks on the dashboard (LOG AS YOU GO and Next up), saved to
 // the same nutrition_logs row as the Nutrition page, one save at a time so
-// quick ticks never create two rows. Off-plan food and the day review are
-// left alone.
+// quick ticks never create two rows. The day review is left alone; off-plan
+// food changes only through "Log something else".
 function useDashboardMealLog({ user, today, meals, log, loaded, isTrainingDay, onLogged }) {
   const [results, setResults] = useState({});
   const [error, setError] = useState("");
   const logRef = useRef(log);
   useEffect(() => { logRef.current = log; }, [log]);
+  const resultsRef = useRef(results);
+  useEffect(() => { resultsRef.current = results; }, [results]);
   // Start from what is saved once today's data has loaded (or a row was created).
   const syncKey = `${loaded ? 1 : 0}:${today}:${log?.id || ""}`;
   useEffect(() => { setResults(logRef.current?.meals_completed || {}); }, [syncKey]);
   const saving = useRef(Promise.resolve());
-  const save = updated => {
+  // build(currentLog) gives the meal results and, for added food, the new
+  // off-plan food and calories.
+  const persist = build => {
     const run = saving.current.then(async () => {
       setError("");
       const current = logRef.current;
-      const fields = nutritionLogFields({
-        meals, results: updated,
-        offPlanCalories: current?.off_plan_calories || 0,
-        reviewComplete: current ? current.meals_completed?._review_complete !== false : false,
-        isTrainingDay,
-      });
+      const { results: updated, offPlan = null } = build(current);
+      const fields = {
+        ...nutritionLogFields({
+          meals, results: updated,
+          offPlanCalories: offPlan ? offPlan.calories : current?.off_plan_calories || 0,
+          reviewComplete: current ? current.meals_completed?._review_complete !== false : false,
+          isTrainingDay,
+        }),
+        ...(offPlan ? { off_plan_food: offPlan.food, off_plan_calories: offPlan.calories } : {}),
+      };
       try {
         const result = current?.id
           ? await supabase.from("nutrition_logs").update(fields).eq("id", current.id).eq("user_id", user.id).select("id").single()
@@ -8704,19 +8996,39 @@ function useDashboardMealLog({ user, today, meals, log, loaded, isTrainingDay, o
         return true;
       } catch (saveError) {
         console.error("Dashboard meal log error:", saveError?.message);
-        setError("That meal couldn't be saved. Check your connection and try again.");
+        setError("That couldn't be saved. Check your connection and try again.");
         return false;
       }
     });
     saving.current = run.catch(() => false);
     return run;
   };
+  const save = updated => persist(() => ({ results: updated }));
   const markEaten = index => {
     const updated = { ...results, [index]: true };
     setResults(updated);
     return save(updated);
   };
-  return { results, setResults, save, markEaten, error };
+  const addExtra = item => persist(current => {
+    const next = addExtraFood({ food: current?.off_plan_food || "", calories: current?.off_plan_calories || 0, results: resultsRef.current }, item);
+    setResults(next.results);
+    resultsRef.current = next.results;
+    return { results: next.results, offPlan: { food: next.food, calories: next.calories } };
+  });
+  return { results, setResults, save, markEaten, addExtra, error };
+}
+
+// One part of the nutrition plan review, with a link to change it.
+function PlanReviewSection({ title, onEdit, testId, children }) {
+  return (
+    <div data-testid={testId} style={{ padding: "10px 0", borderTop: `1px solid ${BORDER}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 1 }}>{title}</div>
+        <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Edit ${title.toLowerCase()}`} style={{ fontSize: 8, padding: "4px 9px" }} onClick={onEdit}>EDIT</button>
+      </div>
+      <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.55 }}>{children}</div>
+    </div>
+  );
 }
 
 // ─── AI Reply Block ───────────────────────────────────────────────────────────
@@ -8771,7 +9083,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
   );
 }
 
-function Nutrition({ user, userSessions }) {
+function Nutrition({ user, userSessions, profile: savedProfile = null, onProfileChange = () => {} }) {
   const [view, setView] = useState("home");
   // Each screen change starts at the top, not wherever the last screen was scrolled to.
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
@@ -8850,10 +9162,30 @@ function Nutrition({ user, userSessions }) {
   const [libraryMealDraft, setLibraryMealDraft] = useState({ name: "", calories: "", protein: "", carbs: "", fats: "" });
   const [libraryEditIndex, setLibraryEditIndex] = useState(null); // library meal being edited, or null for a new one
   const [nutritionPlanningStatus, setNutritionPlanningStatus] = useState("");
+  // Editing an existing plan opens on the review, with a link to each part.
+  const [reviewReturn, setReviewReturn] = useState(false);
+  const [setupNotice, setSetupNotice] = useState("");
+  // Unsaved plan changes kept on this device, so leaving the editor (another
+  // tab, a reload) never loses them.
+  const [setupDraft, setSetupDraft] = useState(null);
+  const setupBaselineRef = useRef(null);
+  const setupDraftKey = `track3d-nutrition-setup-draft:${user?.id}`;
+  const targetSuggestionStorageKey = `track3d-target-suggestion:${user?.id}`;
+  const [dismissedTargetSuggestion, setDismissedTargetSuggestion] = useState(() => { try { return localStorage.getItem(targetSuggestionStorageKey) || ""; } catch { return ""; } });
 
   const today = homeDateKey(user);
 
   useEffect(() => { if (!user) return; loadData(); }, [user]);
+
+  // The profile saved in the app (header PROFILE or the dashboard to-do).
+  // Saved while the setup is open, it fills in what the setup still lacks.
+  useEffect(() => {
+    if (!savedProfile) return;
+    setProfile(savedProfile);
+    setHeight(current => current || (savedProfile.heightCm ? String(savedProfile.heightCm) : ""));
+    setDateOfBirth(current => current || savedProfile.dateOfBirth || "");
+    setSex(current => current || sexLabel(savedProfile.sex) || "");
+  }, [savedProfile]);
 
   // Auto detect training day from fitness split
   useEffect(() => {
@@ -8863,10 +9195,86 @@ function Nutrition({ user, userSessions }) {
     setIsTrainingDay(isTraining);
   }, [userSessions, today]);
 
+  const readSetupDraft = () => {
+    try {
+      const draft = JSON.parse(localStorage.getItem(setupDraftKey) || "null");
+      return draft?.state ? draft : null;
+    } catch { return null; }
+  };
+  const clearSetupDraft = () => {
+    try { localStorage.removeItem(setupDraftKey); } catch { /* nothing was kept */ }
+    setSetupDraft(null);
+  };
+  // What the editor holds (not which step is open).
+  const setupContent = {
+    setupMode, bodyWeight, goal, activityLevel, height, dateOfBirth, sex, wakeTime, calculatedMacros, useCustomTargets,
+    customCalories, customProtein, customCarbs, customFats, mealsPerDay, nutritionStyle, hasRestDayPlan, planMeals, restDayMeals, aiNutritionAnswers,
+  };
+  useEffect(() => {
+    if (view !== "setup") { setupBaselineRef.current = null; return; }
+    const content = JSON.stringify(setupContent);
+    if (setupBaselineRef.current === null) { setupBaselineRef.current = content; return; }
+    try {
+      if (content === setupBaselineRef.current) localStorage.removeItem(setupDraftKey);
+      else localStorage.setItem(setupDraftKey, JSON.stringify({ savedAt: Date.now(), planUpdatedAt: plan?.updated_at || null, baseline: setupBaselineRef.current, state: { ...setupContent, setupStep, editingRestDay, restBuildMode, mealBuildMode } }));
+    } catch { /* the editor still works without browser storage */ }
+  });
+  const restoreSetupDraft = (draft, step = null) => {
+    const saved = draft.state;
+    setSetupStep(step ?? saved.setupStep ?? 0);
+    setSetupMode(saved.setupMode ?? null);
+    setBodyWeight(saved.bodyWeight ?? "");
+    setGoal(saved.goal || "Maintain");
+    setActivityLevel(saved.activityLevel || "Moderately active");
+    setHeight(saved.height ?? "");
+    setDateOfBirth(saved.dateOfBirth ?? "");
+    setSex(saved.sex ?? "");
+    setWakeTime(saved.wakeTime ?? "");
+    setCalculatedMacros(saved.calculatedMacros ?? null);
+    setUseCustomTargets(Boolean(saved.useCustomTargets));
+    setCustomCalories(saved.customCalories ?? ""); setCustomProtein(saved.customProtein ?? "");
+    setCustomCarbs(saved.customCarbs ?? ""); setCustomFats(saved.customFats ?? "");
+    setMealsPerDay(saved.mealsPerDay || 4);
+    setNutritionStyle(saved.nutritionStyle || "hybrid");
+    setHasRestDayPlan(Boolean(saved.hasRestDayPlan));
+    setRestBuildMode(saved.restBuildMode ?? null);
+    setMealBuildMode(saved.mealBuildMode ?? null);
+    setPlanMeals(saved.planMeals || []);
+    setRestDayMeals(saved.restDayMeals || []);
+    setEditingRestDay(Boolean(saved.editingRestDay));
+    setAiNutritionAnswers(saved.aiNutritionAnswers || {});
+    setAiNutritionStep(0);
+    setShowAiQuestions(false);
+    setEditProfileFields(false);
+    setProfileSaveNote("");
+    setRestPlanNote("");
+    setAllergyCheckConfirmed(false);
+    setMealPlanWarning("");
+    setPlanSaveError(false);
+    setReviewReturn(Boolean(plan));
+    setSetupNotice("Your unsaved changes from earlier are back.");
+    // Still unsaved compared with the plan.
+    setupBaselineRef.current = draft.baseline ?? null;
+    setView("setup");
+  };
+  // Leave the editor; unsaved changes stay kept for later.
+  const leaveSetup = () => {
+    setView("home");
+    setSetupDraft(readSetupDraft());
+  };
+  const dismissTargetSuggestion = key => {
+    setDismissedTargetSuggestion(key);
+    try { localStorage.setItem(targetSuggestionStorageKey, key); } catch { /* shown again next time */ }
+  };
+
   const loadData = async () => {
     setLoading(true);
     try {
       const { data: planData } = await readNutritionPlan(user.id);
+      // Unsaved changes are only offered while the plan they started from is current.
+      const draft = readSetupDraft();
+      if (draft && draft.planUpdatedAt === (planData?.updated_at || null)) setSetupDraft(draft);
+      else if (draft) clearSetupDraft();
       if (planData) {
         setPlan(planData);
         setNutritionStyle(inferNutritionStyle(planData.meals || []));
@@ -8874,13 +9282,13 @@ function Nutrition({ user, userSessions }) {
         setMealLibrary(mergeMealLibrary(planData.meal_library || [], planData.meals || []));
         setWeeklyMealPlan(planData.weekly_meal_plan || {});
       }
-      // Wake-up time for meal times, and the last weigh-in to start the weight field.
-      const [{ data: routineRow }, { data: weighIns }, { data: profileRow }] = await Promise.all([
+      // Wake-up time for meal times, and the last weigh-in to start the weight
+      // field. The profile comes from the app, so a profile saved anywhere
+      // shows here straight away.
+      const [{ data: routineRow }, { data: weighIns }] = await Promise.all([
         readMorningRoutine(user.id),
         supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(14),
-        readUserProfile(user.id),
       ]);
-      setProfile(normaliseProfile(profileRow));
       setRoutineWakeTime(routineRow?.wake_time || "");
       const weighed = (weighIns || []).find(row => Number(row.data?.weight) > 0);
       setLatestWeight(weighed ? String(weighed.data.weight) : "");
@@ -8963,9 +9371,14 @@ function Nutrition({ user, userSessions }) {
   // Setup and Edit Plan both start here. Edit Plan fills in what the user
   // entered last time (or their plan and last weigh-in), so saving never
   // resets the goal or other answers.
-  const openSetup = () => {
+  // step: where to open (an existing plan opens on the review).
+  const openSetup = ({ step = null } = {}) => {
+    const draft = readSetupDraft();
+    if (draft && draft.planUpdatedAt === (plan?.updated_at || null)) { restoreSetupDraft(draft, step); return; }
     const saved = plan?.setup || {};
-    setSetupStep(0);
+    setSetupStep(step ?? (plan ? 3 : 0));
+    setReviewReturn(Boolean(plan));
+    setSetupNotice("");
     setSetupMode(plan ? saved.mode || null : null);
     setUseCustomTargets(saved.mode === "custom");
     setBodyWeight(String(saved.weight || latestWeight || ""));
@@ -9004,9 +9417,24 @@ function Nutrition({ user, userSessions }) {
   // EDIT MEALS / EDIT MEAL PLAN: straight to the meals step, keeping the
   // current targets.
   const openMealEditor = (restDay = false) => {
-    openSetup();
-    setSetupStep(2);
-    if (restDay && plan?.rest_day_meals?.length) setEditingRestDay(true);
+    openSetup({ step: 2 });
+    setEditingRestDay(Boolean(restDay && plan?.rest_day_meals?.length));
+  };
+
+  // New targets worked out from the profile: shown on the review with the
+  // meals, ready to save.
+  const openTargetUpdate = suggestion => {
+    openSetup({ step: 3 });
+    setSetupMode("guided");
+    setUseCustomTargets(false);
+    setBodyWeight(String(suggestion.stats.weight || ""));
+    setHeight(String(suggestion.stats.height || ""));
+    setDateOfBirth(profile?.dateOfBirth || "");
+    setSex(suggestion.stats.sex || "");
+    setGoal(suggestion.stats.goal);
+    setActivityLevel(suggestion.stats.activityLevel);
+    setCalculatedMacros(suggestion.targets);
+    setSetupNotice(`New targets from your profile: ${suggestion.targets.calories.toLocaleString("en-GB")} kcal (was ${Number(plan?.daily_calories || 0).toLocaleString("en-GB")}). Check your meals still fit, then save.`);
   };
 
   const persistNutritionPlanning = async (library = mealLibrary, datedPlan = weeklyMealPlan) => {
@@ -9071,17 +9499,21 @@ function Nutrition({ user, userSessions }) {
     await persistNutritionPlanning(mealLibrary, next);
   };
 
-  const saveLog = async (resultsOverride = mealResults, reviewComplete = true) => {
+  // offPlan overrides the off-plan food and calories in state (for food
+  // added just now, before state has updated).
+  const saveLog = async (resultsOverride = mealResults, reviewComplete = true, offPlan = null) => {
     if (!user) return false;
     setNutritionSaveError("");
+    const food = offPlan ? offPlan.food : offPlanFood;
+    const calories = offPlan ? offPlan.calories : offPlanCals;
     const activeMeals = mealsForDay({ ...plan, weekly_meal_plan: weeklyMealPlan }, today, isTrainingDay);
-    // Off-plan macros only apply while there are off-plan calories.
+    // Off-plan figures only apply while there are off-plan calories.
     const { _off_plan: offPlanMacros, ...mealOnlyResults } = resultsOverride || {};
-    const results = Number(offPlanCals) > 0 && offPlanMacros ? { ...mealOnlyResults, _off_plan: offPlanMacros } : mealOnlyResults;
-    const totals = calculateLoggedNutrition(activeMeals, results, offPlanCals);
+    const results = Number(calories) > 0 && offPlanMacros ? { ...mealOnlyResults, _off_plan: offPlanMacros } : mealOnlyResults;
+    const totals = calculateLoggedNutrition(activeMeals, results, calories);
     const row = {
       meals_completed: { ...results, _review_complete: reviewComplete },
-      off_plan_food: offPlanFood, off_plan_calories: parseInt(offPlanCals)||0,
+      off_plan_food: food, off_plan_calories: parseInt(calories)||0,
       total_calories: totals.calories, total_protein: totals.protein,
       ai_feedback: aiFeedback, is_training_day: isTrainingDay,
       created_at: new Date().toISOString(),
@@ -9112,6 +9544,16 @@ function Nutrition({ user, userSessions }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mealResults, view]);
 
+  // "Log something else": the food joins today's off-plan food and counts
+  // towards every target straight away.
+  const addExtraToToday = async item => {
+    const next = addExtraFood({ food: offPlanFood, calories: offPlanCals, results: mealResults }, item);
+    setOffPlanFood(next.food);
+    setOffPlanCals(String(next.calories));
+    setMealResults(next.results);
+    return saveLog(next.results, todayLogged, { food: next.food, calories: next.calories });
+  };
+
   // Asks the coach for per-item ranges using the user's own amounts; the
   // totals are added up in code.
   const estimateUnloggedFood = async items => {
@@ -9139,12 +9581,13 @@ function Nutrition({ user, userSessions }) {
     const totals = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
     const completedCount = totals.completedMeals;
     const totalCals = totals.calories;
-    const calorieTarget = plan?.daily_calories || 2000;
+    const targets = dayTargets(plan, isTrainingDay);
+    const calorieTarget = targets.calories || 2000;
     const diff = totalCals - calorieTarget;
     try {
       const text = await streamCoachText({
           area: "nutrition_day",
-          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; return result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
+          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; return result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${targets.protein}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : targets.restDay ? "Rest day (lighter rest day target)." : "Rest day."} Give brief feedback.` }],
       }, setAiFeedback);
       setAiFeedback(text);
     } catch (e) {
@@ -9155,14 +9598,15 @@ function Nutrition({ user, userSessions }) {
     setAiFeedbackLoading(false);
   };
 
-  // A lighter rest day version of the training day meals: about 15% fewer
-  // calories, mostly from carbs, the same protein. Allergies still apply.
+  // A lighter rest day version of the training day meals: the rest day
+  // target (about 12% fewer calories, mostly from carbs, the same protein).
+  // Allergies still apply.
   const buildRestDayAI = async () => {
     if (!planMeals.length || restAiLoading) return;
     setRestAiLoading(true);
     setRestPlanNote("");
     const macros = getFinalMacros();
-    const restCals = Math.round(macros.calories * 0.85);
+    const restCals = restDayCalories(macros.calories);
     const targets = { calories: restCals, protein: macros.protein };
     const preferences = preferencesText(aiNutritionAnswers);
     try {
@@ -9196,7 +9640,10 @@ function Nutrition({ user, userSessions }) {
   const activeMeals = plan ? mealsForDay({ ...plan, weekly_meal_plan: weeklyMealPlan }, today, isTrainingDay) : [];
   const activeNutritionStyle = inferNutritionStyle(activeMeals);
   const loggedNutrition = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
-  const remainingNutrition = remainingNutritionTargets({ calories: plan?.daily_calories, protein: plan?.protein_target, carbs: plan?.carbs_target, fats: plan?.fats_target }, loggedNutrition);
+  // Today's targets: rest days with their own meals have a lighter one.
+  const todayTargets = dayTargets(plan, isTrainingDay);
+  const remainingNutrition = remainingNutritionTargets(todayTargets, loggedNutrition);
+  const offPlanRoughCalories = offPlanNutrition(offPlanCals, mealResults?._off_plan).roughCalories;
   const planningDates = Array.from({ length: 7 }, (_, index) => {
     const key = shiftDateKey(today, index + 1);
     return { key, label: index === 0 ? "TOMORROW" : dateKeyLabel(key, { weekday: "short", day: "numeric", month: "short" }).toUpperCase() };
@@ -9243,7 +9690,7 @@ function Nutrition({ user, userSessions }) {
       const totals = calculateLoggedNutrition(meals, mealResults, offPlanCals);
       const totalCals = totals.calories;
       const totalProtein = totals.protein;
-      const targetCals = plan?.daily_calories || 2000;
+      const targetCals = todayTargets.calories || 2000;
       const diff = totalCals - targetCals;
       const completedMeals = totals.completedMeals;
       // Food eaten without calories makes the total incomplete: never call
@@ -9258,7 +9705,7 @@ function Nutrition({ user, userSessions }) {
             <div className="t3d-grid3" style={{ marginBottom: 20 }}>
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: completedMeals===meals.length?NEON:"#FF8C00" }}>{completedMeals}/{meals.length}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>MEALS LOGGED</div></div>
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff)<100?NEON:diff>0?NEON3:"#FF8C00" }}>{totalCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>KCAL TOTAL</div></div>
-              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=plan?.protein_target?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>PROTEIN</div></div>
+              <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=todayTargets.protein?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>PROTEIN</div></div>
             </div>
             {unlogged.length > 0 ? (
               <div data-testid="total-excludes" style={{ background: "rgba(255,181,71,.06)", border: "1px solid rgba(255,181,71,.3)", borderRadius: 8, padding: 16, marginBottom: 20, textAlign: "left" }}>
@@ -9272,7 +9719,7 @@ function Nutrition({ user, userSessions }) {
                       setOffPlanFood([offPlanFood, ...unlogged.filter(item => item.meal !== "Off plan").map(item => item.food)].filter(Boolean).join("; "));
                       setOffPlanCals(String((Number(offPlanCals) || 0) + foodEstimate.caloriesMid));
                       // The protein, carbs and fat count towards today too, not just the calories.
-                      setMealResults(current => addOffPlanMacros(current, foodEstimate));
+                      setMealResults(current => addOffPlanMacros(current, foodEstimate, offPlanCals));
                       setFoodEstimate(null);
                       setFoodEstimateStatus(`Added ${foodEstimate.caloriesMid.toLocaleString()} kcal, ${foodEstimate.proteinMid} g protein, ${foodEstimate.carbsMid} g carbs and ${foodEstimate.fatsMid} g fat (the middle of the estimate).`);
                     }}>ADD ~{foodEstimate.caloriesMid.toLocaleString()} KCAL TO TODAY</button>
@@ -9438,6 +9885,8 @@ function Nutrition({ user, userSessions }) {
     const reviewConflicts = mealAllergyConflicts([...preparedPlanMeals, ...preparedRestDayMeals], allergyList);
     const reviewTargets = { calories: getFinalMacros().calories, protein: getFinalMacros().protein };
     const reviewPlanGap = mealPlanGapText(mealPlanTargetCheck(preparedPlanMeals, reviewTargets), reviewTargets);
+    const reviewRestTargets = { calories: restDayCalories(reviewTargets.calories), protein: reviewTargets.protein };
+    const reviewRestGap = preparedRestDayMeals.length ? mealPlanGapText(mealPlanTargetCheck(preparedRestDayMeals, reviewRestTargets), reviewRestTargets) : "";
     const age = ageFromDateOfBirth(dateOfBirth, today);
     const stats = { weight: bodyWeight, height, age, sex, activityLevel, goal };
     // Fields the profile already holds are shown as one line with EDIT;
@@ -9462,11 +9911,19 @@ function Nutrition({ user, userSessions }) {
         setProfileSaveNote(`${profileSaveError(error)} These details are still used for this plan.`);
         return;
       }
-      setProfile(current => ({ ...current, ...normaliseProfile({ height_cm: height, date_of_birth: dateOfBirth, sex: changes.sex || current?.sex }) }));
+      const { experienceLevel: _level, ...fields } = normaliseProfile({ height_cm: height, date_of_birth: dateOfBirth, sex: changes.sex || profile?.sex });
+      const merged = { ...(profile || {}), ...fields };
+      setProfile(merged);
+      onProfileChange(merged);
       setProfileSaveNote("");
     };
     const statsProblem = setupStatsProblem(stats);
     const wakeSlots = mealTimeSlots(wakeTime, mealsPerDay);
+    // The times the meals actually have, earliest first.
+    const currentMealTimes = currentMeals.map(meal => String(meal?.time || "")).filter(time => /^\d{1,2}:\d{2}$/.test(time)).map(time => time.padStart(5, "0")).sort();
+    // Rest days with their own meals aim for the lighter rest day target.
+    const finalMacros = getFinalMacros();
+    const restTarget = { calories: restDayCalories(finalMacros.calories), protein: finalMacros.protein };
     const changeWakeTime = value => {
       setWakeTime(value);
       setPlanMeals(meals => applyMealTimes(meals, value));
@@ -9477,12 +9934,24 @@ function Nutrition({ user, userSessions }) {
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
-          <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
-            {["GOALS", "TARGETS", "MEALS", "REVIEW"].map((s, i) => (
-              <div key={i} style={{ flex: 1, textAlign: "center", padding: "8px 4px", borderRadius: 5, fontSize: 9, letterSpacing: 1, fontFamily: "'Orbitron',monospace",
-                background: setupStep===i?"rgba(0,255,178,.08)":"transparent", border: `1px solid ${setupStep===i?NEON:BORDER}`, color: setupStep===i?NEON:"#E0EAF0" }}>{s}</div>
-            ))}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <div className="t3d-ctitle" style={{ margin: 0 }}>{plan ? "EDIT YOUR PLAN" : "SET UP YOUR NUTRITION"}</div>
+            <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={leaveSetup}>✕ CLOSE</button>
           </div>
+          {/* An existing plan can jump to any part; a new one goes in order. */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            {["GOALS", "TARGETS", "MEALS", "REVIEW"].map((label, i) => {
+              const style = { flex: 1, textAlign: "center", padding: "8px 4px", borderRadius: 5, fontSize: 9, letterSpacing: 1, fontFamily: "'Orbitron',monospace",
+                background: setupStep===i?"rgba(0,255,178,.08)":"transparent", border: `1px solid ${setupStep===i?NEON:BORDER}`, color: setupStep===i?NEON:"#E0EAF0" };
+              return reviewReturn && calculatedMacros
+                ? <button key={label} type="button" aria-current={setupStep === i ? "step" : undefined} style={{ ...style, cursor: "pointer" }} onClick={() => { if (i === 2) setEditingRestDay(false); setSetupStep(i); }}>{label}</button>
+                : <div key={label} style={style}>{label}</div>;
+            })}
+          </div>
+          {reviewReturn && calculatedMacros && setupStep !== 3 && (
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => { setEditingRestDay(false); setSetupStep(3); }}>← BACK TO REVIEW</button>
+          )}
+          {setupNotice && <div role="status" data-testid="setup-notice" style={{ fontSize: 10, color: "#FFD08A", lineHeight: 1.5, marginBottom: 12 }}>{setupNotice}</div>}
 
           {/* Step 0: Goals */}
           {setupStep === 0 && !setupMode && (
@@ -9674,8 +10143,10 @@ function Nutrition({ user, userSessions }) {
                   <input className="t3d-input" aria-label="Allergies or intolerances" placeholder="e.g. peanuts, or none" value={aiNutritionAnswers.allergies || ""} onChange={e => { const value = e.target.value; setAiNutritionAnswers(answers => ({ ...answers, allergies: value })); setAllergyCheckConfirmed(false); }} style={{ marginTop: 5 }} />
                 </label>
               </div>
-              <div style={{ fontSize: 9, color: "#8AABB8", marginBottom: 14, lineHeight: 1.5 }}>
-                {wakeSlots.length ? `Meals run from ${wakeSlots[0]} to ${wakeSlots.at(-1)}${routineWakeTime && wakeTime === routineWakeTime ? ", from your morning routine's wake-up time" : ""}.` : "Add your wake-up time so meal times fit your day."} Every meal plan is checked against your allergies.
+              <div data-testid="meal-times" style={{ fontSize: 9, color: "#8AABB8", marginBottom: 14, lineHeight: 1.5 }}>
+                {currentMealTimes.length
+                  ? `Your ${editingRestDay ? "rest day " : ""}meals run from ${currentMealTimes[0]} to ${currentMealTimes.at(-1)}.`
+                  : wakeSlots.length ? `Meals will run from ${wakeSlots[0]} to ${wakeSlots.at(-1)}${routineWakeTime && wakeTime === routineWakeTime ? ", from your morning routine's wake-up time" : ""}.` : "Add your wake-up time so meal times fit your day."} Every meal plan is checked against your allergies.
               </div>
 
               {/* Training days / rest days, when rest days have their own meals */}
@@ -9690,7 +10161,7 @@ function Nutrition({ user, userSessions }) {
                 // Starting the rest day plan: copying the training day is the quickest way.
                 <div data-testid="rest-day-start">
                   <div className="t3d-ctitle">BUILD YOUR REST DAY MEALS</div>
-                  <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 12 }}>Rest days are usually a little lighter: about 10–15% fewer calories, mostly from carbs, with the same protein.</div>
+                  <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 12 }}>Rest days are usually a little lighter. Your rest day target is {restTarget.calories.toLocaleString("en-GB")} kcal: about 12% fewer calories, mostly from carbs, with the same protein.</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11 }} disabled={!planMeals.length} onClick={() => { setRestDayMeals(planMeals.map(meal => ({ ...meal }))); setRestBuildMode("own"); }}>
                       📋 Copy my training day meals
@@ -9698,7 +10169,7 @@ function Nutrition({ user, userSessions }) {
                     </button>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11, borderColor: "rgba(0,200,255,.3)", color: NEON2 }} disabled={!planMeals.length || restAiLoading} onClick={buildRestDayAI}>
                       🤖 {restAiLoading ? "Building your rest day..." : "AI: lighter version of my training day"}
-                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>Similar foods, about 15% fewer calories, checked against your allergies</div>
+                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>Similar foods, about 12% fewer calories, checked against your allergies</div>
                     </button>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11 }} onClick={() => setRestBuildMode("common")}>
                       🍽️ Choose from common meals
@@ -9840,9 +10311,9 @@ function Nutrition({ user, userSessions }) {
                       ))}
                       {/* Totals vs target */}
                       <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 10 }}>
-                        <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>{editingRestDay ? "REST DAY TOTALS vs DAILY TARGETS" : "TOTALS vs TARGETS"}</div>
-                        {[["Calories", currentMeals.reduce((a,m)=>a+(m.calories||0),0), getFinalMacros().calories, NEON, "kcal"],
-                          ["Protein", currentMeals.reduce((a,m)=>a+(m.protein||0),0), getFinalMacros().protein, NEON2, "g"]].map(([l,v,t,c,u]) => (
+                        <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>{editingRestDay ? "REST DAY TOTALS vs REST DAY TARGETS" : "TOTALS vs TARGETS"}</div>
+                        {[["Calories", currentMeals.reduce((a,m)=>a+(m.calories||0),0), editingRestDay ? restTarget.calories : finalMacros.calories, NEON, "kcal"],
+                          ["Protein", currentMeals.reduce((a,m)=>a+(m.protein||0),0), finalMacros.protein, NEON2, "g"]].map(([l,v,t,c,u]) => (
                           <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
                             <span style={{ color: "#E0EAF0" }}>{l}</span>
                             <span style={{ color: Math.abs(v-t)/t<0.1?NEON:"#FF8C00" }}>{v} / {t}{u}</span>
@@ -9852,7 +10323,7 @@ function Nutrition({ user, userSessions }) {
                     </div>
                   )}
 
-                  {editingRestDay && currentMeals.length > 0 && <div style={{ fontSize: 9, color: "#8AABB8", lineHeight: 1.5, margin: "-6px 0 10px" }}>Rest days are usually 10–15% lighter, mostly from carbs, with the same protein.</div>}
+                  {editingRestDay && currentMeals.length > 0 && <div style={{ fontSize: 9, color: "#8AABB8", lineHeight: 1.5, margin: "-6px 0 10px" }}>Rest day target: {restTarget.calories.toLocaleString("en-GB")} kcal, about 12% lighter than training days (mostly from carbs, the same protein).</div>}
                   {editingRestDay && planMeals.length > 0 && !restAiLoading && <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 8, borderColor: "rgba(0,200,255,.3)", color: NEON2 }} onClick={buildRestDayAI}>🤖 {currentMeals.length ? "REBUILD WITH AI (LIGHTER)" : "AI: LIGHTER VERSION OF MY TRAINING DAY"}</button>}
                   {(buildMode === "own" || editingRestDay) && nutritionStyle !== "flexible" && <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginBottom: 14 }} onClick={() => { setEditMealIdx(null); setNewMeal({ name:"",time:"",ingredients:[],calories:"",protein:"",carbs:"",fats:"" }); setAddMealModal(true); }}>+ ADD MEAL</button>}
                 </div>
@@ -9886,35 +10357,52 @@ function Nutrition({ user, userSessions }) {
             </div>
           )}
 
-          {/* Step 3: Review */}
+          {/* Step 3: Review, with a link to change each part */}
           {setupStep === 3 && (
             <div>
               <div className="t3d-ctitle">REVIEW YOUR PLAN</div>
-              <div style={{ padding: 11, borderRadius: 6, border: `1px solid ${nutritionStyle === "hybrid" ? "rgba(0,255,178,.35)" : BORDER}`, background: "rgba(0,255,178,.04)", marginBottom: 12, color: "#C5D6DC", fontSize: 10, lineHeight: 1.55 }}>
-                {nutritionStyle === "hybrid" ? "Hybrid plan: repeated meals give you consistency; flexible meals let you choose foods while aiming for the remaining macros." : nutritionStyle === "flexible" ? "Flexible macro plan: choose your food and log what each meal contributes toward the daily targets." : "Fixed plan: these meals repeat each day."}
-              </div>
-              {preparedPlanMeals.map((m, i) => (
-                <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
-                  <div style={{ fontSize: 12, marginBottom: 4, color: isFlexibleMeal(m) ? NEON2 : "#E0EAF0" }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
-                  {isFlexibleMeal(m) ? <div style={{ fontSize: 9, color: "#8AABB8" }}>Choose any food and log the actual macros.</div> : m.ingredients?.map((ing,j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0" }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
-                  <div style={{ fontSize: 10, color: "#4A6070", marginTop: 6 }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
-                </div>
-              ))}
-              {preparedRestDayMeals.length === 0 && nutritionStyle !== "flexible" && <div data-testid="review-rest-same" style={{ fontSize: 10, color: "#8AABB8", margin: "4px 0 8px" }}>Rest days: the same meals as training days.</div>}
-              {preparedRestDayMeals.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <div className="t3d-ctitle">REST DAY MEALS</div>
-                  {preparedRestDayMeals.map((m, i) => (
+              <PlanReviewSection title="TARGETS" testId="review-section-targets" onEdit={() => setSetupStep(0)}>
+                <div style={{ color: "#E0EAF0" }}>{finalMacros.calories.toLocaleString("en-GB")} kcal · {finalMacros.protein} g protein · {finalMacros.carbs} g carbs · {finalMacros.fats} g fat</div>
+                {preparedRestDayMeals.length > 0 && <div>Rest days: {restTarget.calories.toLocaleString("en-GB")} kcal, about 12% lighter (from carbs, the same protein).</div>}
+                <div>{goal} · {setupMode === "custom" ? "your own targets" : activityLevel}</div>
+              </PlanReviewSection>
+              <PlanReviewSection title="STRUCTURE" testId="review-section-structure" onEdit={() => setSetupStep(1)}>
+                <div data-testid="review-style">{nutritionStyle === "hybrid"
+                  ? `Hybrid plan: repeated meals give you consistency; flexible meals let you choose foods while aiming for the remaining macros.${preparedRestDayMeals.length ? " Rest days have their own meals." : ""}`
+                  : nutritionStyle === "flexible" ? "Flexible macro plan: choose your food and log what each meal contributes toward the daily targets."
+                    : preparedRestDayMeals.length ? "Fixed plan: your training day meals repeat on training days, and your rest day meals on rest days." : "Fixed plan: these meals repeat each day."}</div>
+              </PlanReviewSection>
+              <PlanReviewSection title="YOUR DAY" testId="review-section-day" onEdit={() => { setEditingRestDay(false); setSetupStep(2); }}>
+                <div>Wake-up {wakeTime || "not set"} · Allergies: {aiNutritionAnswers.allergies?.trim() || "none given"}</div>
+              </PlanReviewSection>
+              <PlanReviewSection title={preparedRestDayMeals.length ? "TRAINING DAY MEALS" : "MEALS"} testId="review-section-meals" onEdit={() => { setEditingRestDay(false); setSetupStep(2); }}>
+                {preparedPlanMeals.map((m, i) => (
+                  <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, marginBottom: 4, color: isFlexibleMeal(m) ? NEON2 : "#E0EAF0" }}>{m.name} {m.time && <span style={{ fontSize: 10, color: "#E0EAF0" }}>· {m.time}</span>}</div>
+                    {isFlexibleMeal(m) ? <div style={{ fontSize: 9, color: "#8AABB8" }}>Choose any food and log the actual macros.</div> : m.ingredients?.map((ing,j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0" }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
+                    <div style={{ fontSize: 10, color: "#4A6070", marginTop: 6 }}>{m.calories} kcal · {m.protein}g P · {m.carbs}g C · {m.fats}g F</div>
+                  </div>
+                ))}
+                {preparedPlanMeals.length === 0 && <div>No meals yet.</div>}
+              </PlanReviewSection>
+              {nutritionStyle !== "flexible" && (
+                <PlanReviewSection title="REST DAY MEALS" testId="review-section-rest" onEdit={() => { setEditingRestDay(hasRestDayPlan); setSetupStep(2); }}>
+                  {preparedRestDayMeals.length === 0 ? <div data-testid="review-rest-same">Rest days: the same meals as training days.</div> : preparedRestDayMeals.map((m, i) => (
                     <div key={i} style={{ background: SURFACE2, borderRadius: 6, padding: 12, marginBottom: 8 }}>
-                      <div style={{ fontSize: 12 }}>{m.name}</div>
+                      <div style={{ fontSize: 12, color: "#E0EAF0" }}>{m.name} {m.time && <span style={{ fontSize: 10 }}>· {m.time}</span>}</div>
                       <div style={{ fontSize: 10, color: "#4A6070", marginTop: 4 }}>{m.calories} kcal · {m.protein}g P</div>
                     </div>
                   ))}
-                </div>
+                </PlanReviewSection>
               )}
               {reviewPlanGap && (
                 <div role="alert" data-testid="review-target-gap" style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 12, marginTop: 12, fontSize: 11, color: "#FFD08A", lineHeight: 1.55 }}>
-                  <strong style={{ color: "#FFB547" }}>Check your totals.</strong> {reviewPlanGap} You can still save, or go back and adjust portions.
+                  <strong style={{ color: "#FFB547" }}>Check your totals.</strong> {preparedRestDayMeals.length ? reviewPlanGap.replace("These meals", "Your training day meals") : reviewPlanGap} You can still save, or go back and adjust portions.
+                </div>
+              )}
+              {reviewRestGap && (
+                <div role="alert" data-testid="review-rest-gap" style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 12, marginTop: 12, fontSize: 11, color: "#FFD08A", lineHeight: 1.55 }}>
+                  <strong style={{ color: "#FFB547" }}>Check your rest days.</strong> {reviewRestGap.replace("These meals", "Your rest day meals")} You can still save, or adjust them.
                 </div>
               )}
               {reviewConflicts.length > 0 && (
@@ -9933,14 +10421,17 @@ function Nutrition({ user, userSessions }) {
                 </div>
               )}
               <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(2)}>← BACK</button>
-                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan || (reviewConflicts.length > 0 && !allergyCheckConfirmed)} onClick={async () => {
+                {reviewReturn
+                  ? <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={leaveSetup}>CLOSE</button>
+                  : <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(2)}>← BACK</button>}
+                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan || !preparedPlanMeals.length || (reviewConflicts.length > 0 && !allergyCheckConfirmed)} onClick={async () => {
                   setSavingPlan(true);
                   setPlanSaveError(false);
                   const realMacros = getFinalMacros();
                   const saved = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
                   if (!saved) return;
+                  clearSetupDraft();
                   const nextLibrary = mergeMealLibrary(mealLibrary, preparedPlanMeals);
                   setMealLibrary(nextLibrary);
                   await persistNutritionPlanning(nextLibrary, weeklyMealPlan);
@@ -10009,19 +10500,47 @@ function Nutrition({ user, userSessions }) {
 
   // ── HOME VIEW ─────────────────────────────────────────────────────────────
   const todayLog = logs.find(l => l.date === today);
-  // The training day meals against the daily targets: say so when they miss.
-  const planTargets = { calories: plan?.daily_calories, protein: plan?.protein_target };
-  const planGap = plan?.meals?.length ? mealPlanGapText(mealPlanTargetCheck(plan.meals, planTargets), planTargets) : "";
+  // Each day type's meals against that day's targets: say so when they miss.
+  const restPlan = hasRestDayMeals(plan);
+  const trainingTargets = dayTargets(plan, true);
+  const restTargets = dayTargets(plan, false);
+  const gapFor = (meals, targets) => (meals?.length ? mealPlanGapText(mealPlanTargetCheck(meals, targets), targets) : "");
+  const trainingGap = gapFor(plan?.meals, trainingTargets);
+  const restGap = restPlan ? gapFor(plan.rest_day_meals, restTargets) : "";
+  const mealsTotal = meals => (meals || []).reduce((total, meal) => ({ calories: total.calories + (Number(meal.calories) || 0), protein: total.protein + (Number(meal.protein) || 0) }), { calories: 0, protein: 0 });
+  const planStyle = inferNutritionStyle(plan?.meals || []);
+  const planStyleText = planStyle === "hybrid"
+    ? `Repeat your anchor meals; choose freely for the flexible slots.${restPlan ? " Rest days have their own meals." : ""}`
+    : planStyle === "flexible" ? "Choose your food and work toward the daily totals."
+      : restPlan ? "Your training day meals repeat on training days, and your rest day meals on rest days." : "The same planned meals repeat each day.";
   const planMealNames = new Set([...(plan?.meals || []), ...(plan?.rest_day_meals || [])].map(meal => String(meal?.name || "").trim().toLowerCase()).filter(Boolean));
+  // Plan meals show once, in LOG AS YOU GO; the library lists the others.
+  const libraryOnly = mealLibrary.map((meal, index) => ({ meal, index })).filter(({ meal }) => !planMealNames.has(String(meal.name || "").trim().toLowerCase()));
+  // A profile completed after the plan was made can change the targets.
+  const targetSuggestion = plan ? targetUpdateSuggestion({ plan, profile, weight: latestWeight, activityLevel: suggestActivityLevel(trainingDaysCount), todayKey: today }) : null;
+  const targetSuggestionKey = targetSuggestion ? `${plan?.updated_at || ""}|${targetSuggestion.targets.calories}` : "";
+  const showTargetSuggestion = Boolean(targetSuggestion) && dismissedTargetSuggestion !== targetSuggestionKey;
+  // The week's average target: rest days count with their own target.
+  const avgTarget = weekLogs.length ? Math.round(weekLogs.reduce((total, log) => total + dayTargets(plan, log.is_training_day !== false).calories, 0) / weekLogs.length) : trainingTargets.calories;
 
   return (
     <div className="t3d-fade">
+      {setupDraft && (
+        <div className="t3d-card" data-testid="setup-draft" style={{ marginBottom: 16, borderColor: "rgba(255,181,71,.45)" }}>
+          <div className="t3d-ctitle" style={{ color: "#FFB547" }}>UNSAVED PLAN CHANGES</div>
+          <div style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6, marginBottom: 10 }}>You started changing your nutrition plan and didn&apos;t save it. Your changes are kept on this device.</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="t3d-btn t3d-btn-sm" onClick={() => restoreSetupDraft(setupDraft)}>CONTINUE EDITING →</button>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={clearSetupDraft}>DISCARD CHANGES</button>
+          </div>
+        </div>
+      )}
       {!plan ? (
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>🥗</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>NUTRITION</div>
           <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 28, lineHeight: 1.7 }}>Build your nutrition plan.<br />Track every meal. Hit every target.</div>
-          <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={openSetup}>SET UP MY NUTRITION</button>
+          <button className="t3d-btn" style={{ fontSize: 11, padding: "14px 28px" }} onClick={() => openSetup()}>SET UP MY NUTRITION</button>
           <div style={{ marginTop: 16, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>Calorie targets are estimates. Consult a dietitian for medical nutrition advice.</div>
         </div>
       ) : (
@@ -10035,8 +10554,9 @@ function Nutrition({ user, userSessions }) {
                 <button className="t3d-btn t3d-btn-sm" aria-pressed={!isTrainingDay} style={{ background: !isTrainingDay?"rgba(0,200,255,.12)":"transparent", borderColor: !isTrainingDay?NEON2:BORDER, color: !isTrainingDay?NEON2:"#E0EAF0" }} onClick={() => setIsTrainingDay(false)}>REST DAY</button>
               </div>
             </div>
-            <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 4 }}>{activeNutritionStyle === "fixed" ? "Tick each planned meal when you have it. If it changes, tap × and briefly say what happened." : "Tick repeated meals when you have them. For flexible meals, enter what the meal contributed to your macros."}</div>
-            <MealLogList meals={activeMeals} results={mealResults} onResultsChange={setMealResults} onSave={updated => saveLog(updated, todayLogged)} />
+            <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 4 }}>{activeNutritionStyle === "fixed" ? "Tick each planned meal when you have it. If it changes, tap × and briefly say what happened. Tap a meal to see what's in it." : "Tick repeated meals when you have them. For flexible meals, enter what the meal contributed to your macros."}</div>
+            <MealLogList meals={activeMeals} results={mealResults} onResultsChange={setMealResults} onSave={updated => saveLog(updated, todayLogged)} showDetails />
+            <LogSomethingElse onAdd={addExtraToToday} />
             {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{nutritionSaveError}</div>}
             {/* Day review */}
             <div style={{ borderTop: `1px solid ${BORDER}`, marginTop: 12, paddingTop: 16, textAlign: "center" }}>
@@ -10061,23 +10581,35 @@ function Nutrition({ user, userSessions }) {
 
           </div>
 
-          <div className="t3d-card" style={{ marginBottom: 16, padding: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}>
-              <div><div className="t3d-ctitle" style={{ marginBottom: 4 }}>{activeNutritionStyle === "hybrid" ? "HYBRID PLAN" : activeNutritionStyle === "flexible" ? "FLEXIBLE MACROS" : "FIXED MEALS"}</div><div style={{ color: "#8AABB8", fontSize: 9 }}>{activeNutritionStyle === "hybrid" ? "Repeat your anchor meals; choose freely for the flexible slots." : activeNutritionStyle === "flexible" ? "Choose your food and work toward the daily totals." : "The same planned meals repeat each day."}</div></div>
-              <button className="t3d-btn t3d-btn-sm" onClick={openSetup}>CHANGE TARGETS</button>
+          <div className="t3d-card" data-testid="today-targets" style={{ marginBottom: 16, padding: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>REMAINING TODAY</div>
+              <div style={{ fontSize: 9, color: todayTargets.restDay ? NEON2 : "#8AABB8" }}>{todayTargets.restDay ? "REST DAY" : "TRAINING DAY"} TARGET · {todayTargets.calories.toLocaleString("en-GB")} KCAL</div>
             </div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>REMAINING TODAY</div>
-            {Number(offPlanCals) > 0 && !(mealResults && typeof mealResults._off_plan === "object") && <div data-testid="offplan-no-macros" style={{ color: "#8AABB8", fontSize: 9, lineHeight: 1.5, marginBottom: 6 }}>Off-plan food has calories but no protein, carbs or fat figures, so what&apos;s left of those is capped by the calories left. Estimate it in the day review to count them.</div>}
+            {offPlanRoughCalories > 0 && <div data-testid="offplan-rough" style={{ color: "#8AABB8", fontSize: 9, lineHeight: 1.5, marginBottom: 6 }}>Includes a rough protein, carbs and fat split for {Math.round(offPlanRoughCalories).toLocaleString("en-GB")} kcal of extra food logged without them.</div>}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, textAlign: "center" }}>
               {[["calories","KCAL",NEON],["protein","PROTEIN",NEON2],["carbs","CARBS","#FF8C00"],["fats","FATS","#C5D6DC"]].map(([key,label,color]) => <div key={key} data-testid={`remaining-${key}`} style={{ padding: "8px 3px", background: SURFACE2, borderRadius: 5 }}><div style={{ color, fontSize: 13, fontWeight: 700 }}>{remainingNutrition[key]}{key === "calories" ? "" : "g"}</div><div style={{ color: "#6F8792", fontSize: 7, marginTop: 3 }}>{label}</div></div>)}
             </div>
           </div>
 
+          {showTargetSuggestion && (
+            <div className="t3d-card" role="status" data-testid="target-suggestion" style={{ marginBottom: 16, borderColor: "rgba(0,200,255,.45)", background: "rgba(0,200,255,.04)" }}>
+              <div className="t3d-ctitle" style={{ color: NEON2 }}>UPDATE YOUR TARGETS?</div>
+              <div style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6, marginBottom: 10 }}>
+                With your profile ({targetSuggestion.stats.height} cm, age {targetSuggestion.stats.age}, {String(targetSuggestion.stats.sex).toLowerCase()}) and {targetSuggestion.stats.weight} kg, {targetSuggestion.stats.goal} and {String(targetSuggestion.stats.activityLevel).toLowerCase()}, your target works out at <strong>{targetSuggestion.targets.calories.toLocaleString("en-GB")} kcal</strong> and {targetSuggestion.targets.protein} g protein. Your plan uses {Number(plan.daily_calories).toLocaleString("en-GB")} kcal.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="t3d-btn t3d-btn-sm" style={{ borderColor: NEON2, color: NEON2 }} onClick={() => openTargetUpdate(targetSuggestion)}>REVIEW NEW TARGETS →</button>
+                <button className="t3d-btn t3d-btn-sm" onClick={() => dismissTargetSuggestion(targetSuggestionKey)}>KEEP MY TARGETS</button>
+              </div>
+            </div>
+          )}
+
           {/* Stats */}
           <div className="t3d-grid3">
             <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">DAILY TARGET</div>
-              <div className="t3d-sval" style={{ color: NEON, fontSize: 22 }}>{plan.daily_calories}</div>
+              <div className="t3d-ctitle">{todayTargets.restDay ? "REST DAY TARGET" : "DAILY TARGET"}</div>
+              <div className="t3d-sval" style={{ color: NEON, fontSize: 22 }}>{todayTargets.calories}</div>
               <div className="t3d-slabel">KCAL</div>
             </div>
             <div className="t3d-card" style={{ textAlign: "center" }}>
@@ -10087,47 +10619,47 @@ function Nutrition({ user, userSessions }) {
             </div>
             <div className="t3d-card" style={{ textAlign: "center" }}>
               <div className="t3d-ctitle">PROTEIN TARGET</div>
-              <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 22 }}>{plan.protein_target}g</div>
+              <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 22 }}>{todayTargets.protein}g</div>
               <div className="t3d-slabel">PER DAY</div>
             </div>
           </div>
 
-          {/* Today's meals */}
-          <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>{isTrainingDay?"TRAINING DAY MEALS":"REST DAY MEALS"}</div>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => openMealEditor(!isTrainingDay)}>EDIT MEALS</button>
+          {/* The plan: a summary per day type (the meals themselves are in LOG AS YOU GO) */}
+          <div className="t3d-card" data-testid="your-plan" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>YOUR PLAN · {planStyle === "hybrid" ? "HYBRID" : planStyle === "flexible" ? "FLEXIBLE MACROS" : "FIXED MEALS"}</div>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup()}>EDIT PLAN</button>
             </div>
-            {planGap && (
-              <div role="alert" data-testid="plan-target-gap" style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 10, marginBottom: 12, fontSize: 10, color: "#FFD08A", lineHeight: 1.55 }}>
-                <strong style={{ color: "#FFB547" }}>Your meals don&apos;t match your targets.</strong> {planGap.replace("These meals", "Your training day meals")}
-                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-                  <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => openMealEditor(false)}>EDIT MEALS</button>
-                  <button className="t3d-btn t3d-btn-sm" onClick={openSetup}>CHANGE TARGETS</button>
+            <div data-testid="plan-style" style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{planStyleText}</div>
+            {[
+              { key: "training", label: "TRAINING DAYS", meals: plan.meals || [], targets: trainingTargets, gap: trainingGap, rest: false },
+              { key: "rest", label: "REST DAYS", meals: restPlan ? plan.rest_day_meals : [], targets: restTargets, gap: restGap, rest: true },
+            ].map(day => {
+              const totals = mealsTotal(day.meals);
+              return (
+                <div key={day.key} data-testid={`plan-${day.key}`} style={{ padding: "10px 0", borderTop: `1px solid ${BORDER}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 10, color: day.rest ? NEON2 : NEON, letterSpacing: 1 }}>{day.label}</div>
+                      <div style={{ fontSize: 11, color: "#C5D6DC", marginTop: 3 }}>
+                        {day.rest && !restPlan ? "The same meals as training days" : `${day.meals.length} meal${day.meals.length === 1 ? "" : "s"} · ${totals.calories.toLocaleString("en-GB")} kcal · ${totals.protein} g protein`}
+                      </div>
+                      <div style={{ fontSize: 9, color: "#6F8792", marginTop: 2 }}>Target {day.targets.calories.toLocaleString("en-GB")} kcal · {day.targets.protein} g protein{day.targets.restDay ? " (about 12% lighter)" : ""}</div>
+                    </div>
+                    <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, flexShrink: 0 }} onClick={() => openMealEditor(day.rest)}>EDIT MEALS</button>
+                  </div>
+                  {day.gap && (
+                    <div role="alert" data-testid={day.rest ? "plan-rest-gap" : "plan-target-gap"} style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 10, marginTop: 8, fontSize: 10, color: "#FFD08A", lineHeight: 1.55 }}>
+                      <strong style={{ color: "#FFB547" }}>Your meals don&apos;t match your targets.</strong> {day.gap.replace("These meals", day.rest ? "Your rest day meals" : "Your training day meals")}
+                      <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => openMealEditor(day.rest)}>EDIT MEALS</button>
+                        <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup({ step: 0 })}>CHANGE TARGETS</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
-            {activeMeals.map((m, i) => (
-              <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                  <div style={{ fontSize: 12, color: isFlexibleMeal(m) ? NEON2 : "#E0EAF0" }}>{m.name}{!isFlexibleMeal(m) && <span style={{ color: NEON, fontSize: 8, marginLeft: 7 }}>REPEATS</span>}</div>
-                  <div style={{ fontSize: 10, color: "#E0EAF0" }}>{m.time}</div>
-                </div>
-                {isFlexibleMeal(m) ? <div style={{ fontSize: 9, color: "#8AABB8", lineHeight: 1.45 }}>Choose any food. This is a guide for how much of today&apos;s macros to use here.</div> : m.ingredients?.map((ing, j) => <div key={j} style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 2 }}>{ing.name} — {ing.weight}{ing.unit}</div>)}
-                <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 10 }}>
-                  <span style={{ color: NEON }}>{m.calories} kcal</span>
-                  <span style={{ color: NEON2 }}>{m.protein}g P</span>
-                  <span style={{ color: "#FF8C00" }}>{m.carbs}g C</span>
-                  <span style={{ color: "#8AABB8" }}>{m.fats}g F</span>
-                </div>
-              </div>
-            ))}
-            <div style={{ display: "flex", gap: 16, padding: "10px 0", fontSize: 11 }}>
-              <span style={{ color: NEON, fontFamily: "'Orbitron',monospace", fontSize: 10 }}>{activeMeals.reduce((a,m)=>a+(m.calories||0),0)} kcal</span>
-              <span style={{ color: NEON2 }}>{activeMeals.reduce((a,m)=>a+(m.protein||0),0)}g P</span>
-              <span style={{ color: "#FF8C00" }}>{activeMeals.reduce((a,m)=>a+(m.carbs||0),0)}g C</span>
-              <span style={{ color: "#8AABB8" }}>{activeMeals.reduce((a,m)=>a+(m.fats||0),0)}g F</span>
-            </div>
+              );
+            })}
           </div>
 
           {activeNutritionStyle !== "fixed" && <div className="t3d-card" style={{ marginBottom: 16 }}>
@@ -10157,8 +10689,9 @@ function Nutrition({ user, userSessions }) {
             {nutritionPlanningStatus && <div role="status" style={{ color: nutritionPlanningStatus === "SAVED" ? NEON : nutritionPlanningStatus.startsWith("COULD") ? NEON3 : "#8AABB8", fontSize: 8, marginTop: 8 }}>{nutritionPlanningStatus}</div>}
           </div>}
 
-          <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><div className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</div><div style={{ color: "#8AABB8", fontSize: 9 }}>Save meals you enjoy and reuse them when planning the week.</div></div><div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}><button className="t3d-btn t3d-btn-sm" onClick={() => (showLibraryForm ? closeLibraryForm() : setShowLibraryForm(true))}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button><button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => openMealEditor(false)}>EDIT MEAL PLAN →</button></div></div>
+
+          <div className="t3d-card" data-testid="meal-library" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><div className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</div><div style={{ color: "#8AABB8", fontSize: 9 }}>Meals you like that aren&apos;t in your plan, ready for planning the week. Your plan&apos;s meals are in LOG AS YOU GO.</div></div><div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}><button className="t3d-btn t3d-btn-sm" onClick={() => (showLibraryForm ? closeLibraryForm() : setShowLibraryForm(true))}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button><button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => openMealEditor(false)}>EDIT MEAL PLAN →</button></div></div>
             {showLibraryForm && <div style={{ padding: 11, background: SURFACE2, borderRadius: 6, marginBottom: 10 }}>
               <input className="t3d-input" placeholder="Meal name" value={libraryMealDraft.name} onChange={event => setLibraryMealDraft(meal => ({ ...meal, name: event.target.value }))} style={{ marginBottom: 8 }} />
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
@@ -10167,18 +10700,15 @@ function Nutrition({ user, userSessions }) {
               <button className="t3d-btn" disabled={!libraryMealDraft.name.trim()} onClick={saveLibraryMeal} style={{ width: "100%", marginTop: 9 }}>{libraryEditIndex !== null ? "SAVE CHANGES" : "SAVE TO LIBRARY"}</button>
               {libraryEditIndex !== null && <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => deleteLibraryMeal(libraryEditIndex)} style={{ width: "100%", marginTop: 7 }}>DELETE FROM LIBRARY</button>}
             </div>}
-            {mealLibrary.length === 0 ? <div style={{ color: "#6F8792", fontSize: 10 }}>Your repeated meals will appear here automatically.</div> : mealLibrary.map((meal, index) => {
-              // Meals in the plan are edited in the meal plan (the plan's version wins);
-              // meals saved only to the library are edited here.
-              const inPlan = planMealNames.has(String(meal.name || "").trim().toLowerCase());
-              return <div key={meal.id || `${meal.name}-${index}`} data-testid="library-meal" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
+            {libraryOnly.length === 0 ? <div style={{ color: "#6F8792", fontSize: 10 }}>No other meals saved yet. Add meals you like with + NEW MEAL.</div> : libraryOnly.map(({ meal, index }) => (
+              <div key={meal.id || `${meal.name}-${index}`} data-testid="library-meal" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ color: "#E0EAF0", fontSize: 11 }}>{meal.name}{inPlan && <span style={{ color: NEON, fontSize: 7, marginLeft: 6, letterSpacing: 1 }}>IN PLAN</span>}</div>
+                  <div style={{ color: "#E0EAF0", fontSize: 11 }}>{meal.name}</div>
                   <div style={{ color: "#8AABB8", fontSize: 9 }}>{meal.calories || 0} kcal · {meal.protein || 0}g P</div>
                 </div>
-                <button className="t3d-btn t3d-btn-sm" aria-label={`Edit ${meal.name}`} style={{ fontSize: 8 }} onClick={() => (inPlan ? openMealEditor(false) : editLibraryMeal(index))}>EDIT</button>
-              </div>;
-            })}
+                <button className="t3d-btn t3d-btn-sm" aria-label={`Edit ${meal.name}`} style={{ fontSize: 8 }} onClick={() => editLibraryMeal(index)}>EDIT</button>
+              </div>
+            ))}
           </div>
 
           {/* 7-day chart */}
@@ -10187,7 +10717,7 @@ function Nutrition({ user, userSessions }) {
             <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80, padding: "0 4px" }}>
               {last7Logs.map((d, i) => {
                 const cals = d.log?.total_calories||0;
-                const target = plan.daily_calories||2000;
+                const target = dayTargets(plan, d.log?.is_training_day !== false).calories || 2000;
                 const pct = cals?Math.min((cals/target)*100,130):0;
                 const color = !cals?BORDER:Math.abs(cals-target)/target<0.1?NEON:cals>target*1.1?NEON3:"#FF8C00";
                 return (
@@ -10211,7 +10741,7 @@ function Nutrition({ user, userSessions }) {
             {weeklyOpen && (
               <div style={{ marginTop: 16 }}>
                 <div className="t3d-grid3">
-                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON }}>{avgCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>AVG KCAL</div><div style={{ fontSize: 8, color: Math.abs(avgCals-plan.daily_calories)/plan.daily_calories<0.05?NEON:"#FF8C00" }}>target {plan.daily_calories}</div></div>
+                  <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON }}>{avgCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>AVG KCAL</div><div style={{ fontSize: 8, color: avgTarget && Math.abs(avgCals-avgTarget)/avgTarget<0.05?NEON:"#FF8C00" }}>target {avgTarget}</div></div>
                   <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: NEON2 }}>{avgProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>AVG PROTEIN</div><div style={{ fontSize: 8, color: avgProtein>=plan.protein_target?NEON:"#FF8C00" }}>target {plan.protein_target}g</div></div>
                   <div style={{ textAlign: "center" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#FF8C00" }}>{onPlanDays}/7</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>ON PLAN DAYS</div></div>
                 </div>
@@ -10235,7 +10765,7 @@ function Nutrition({ user, userSessions }) {
                   return (
                     <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <div style={{ fontSize: 10, color: "#E0EAF0", fontFamily: "'Orbitron',monospace" }}>{log.date}</div>
+                        <div style={{ fontSize: 10, color: "#E0EAF0", fontFamily: "'Orbitron',monospace" }}>{dateKeyLabel(log.date, { weekday: "short", day: "numeric", month: "short" })}</div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                           <div style={{ fontSize: 10, color: completed/total>=0.8?NEON:"#FF8C00" }}>{completed}/{total} meals</div>
                           <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => {
@@ -10873,6 +11403,16 @@ export default function App() {
   // and the header PROFILE button both edit it.
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  // A short confirmation under the header ("Profile saved ✓").
+  const [notice, setNotice] = useState("");
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 4000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+  const profileSaved = saved => { setProfile(saved); setNotice("Profile saved ✓"); };
+  // What each active session is up to, for the banner ("Upper A · Set 2 of 4 · Bench Press").
+  const [activeSummaries, setActiveSummaries] = useState({});
   const homeTimeZone = resolveHomeTimeZone(user);
   const todayLabel = new Date().toLocaleDateString("en-US", { timeZone: homeTimeZone, weekday: "long", month: "long", day: "numeric" });
   const todayKey = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
@@ -11056,14 +11596,24 @@ export default function App() {
     const active = event => {
       if (event.detail.userId === user?.id) {
         setActiveSessions(previous => ({ ...previous, [event.detail.kind]: event.detail.active }));
+        setActiveSummaries(previous => ({ ...previous, [event.detail.kind]: event.detail.summary || "" }));
       }
     };
     const failed = event => { if (event.detail.userId === user?.id) setDraftError(true); };
+    // A finished morning task ticks the habit that is the same thing.
+    const taskDone = event => {
+      setHabits(current => {
+        const ids = linkedHabitIds(event.detail?.name, current);
+        return ids.length ? current.map(habit => (ids.includes(habit.id) ? { ...habit, done: true } : habit)) : current;
+      });
+    };
     window.addEventListener("track3d-active-session", active);
     window.addEventListener("track3d-draft-error", failed);
+    window.addEventListener("track3d-task-done", taskDone);
     return () => {
       window.removeEventListener("track3d-active-session", active);
       window.removeEventListener("track3d-draft-error", failed);
+      window.removeEventListener("track3d-task-done", taskDone);
     };
   }, [user?.id]);
   useEffect(() => {
@@ -11091,6 +11641,11 @@ export default function App() {
   ];
 
   const titles = { dashboard: "DASHBOARD", morning: "MORNING", fitness: "FITNESS", nutrition: "NUTRITION", habits: "HABITS" };
+  // Active sessions by tab (today's morning draft is "morning-<date>").
+  const activeBanners = Object.entries(activeSessions).filter(([, active]) => active).reduce((list, [kind]) => {
+    const bannerTab = kind.startsWith("morning") ? "morning" : kind;
+    return list.some(banner => banner.tab === bannerTab) ? list : [...list, { tab: bannerTab, summary: activeSummaries[kind] || "" }];
+  }, []);
 
   return (
     <>
@@ -11136,16 +11691,22 @@ export default function App() {
               <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={retryHabitSave}>RETRY</button>
             </div>
           )}
-          {[...new Set(Object.entries(activeSessions).filter(([, active]) => active).map(([kind]) => kind.startsWith("morning") ? "morning" : kind))].filter(kind => kind !== tab).map(kind => (
-            <button key={kind} className="t3d-btn" onClick={() => setTab(kind)}
-              style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON }}>
-              ACTIVE {kind === "morning" ? "MORNING ROUTINE" : "WORKOUT"} — TAP TO CONTINUE →
+          {notice && <div role="status" data-testid="app-notice" style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${NEON}`, borderRadius: 7, background: "rgba(0,255,178,.08)", color: NEON, fontSize: 12 }}>{notice}</div>}
+          {/* One place to continue an active workout or morning: what it is up to, one tap back. */}
+          {activeBanners.filter(banner => banner.tab !== tab).map(banner => (
+            <button key={banner.tab} data-testid={`active-banner-${banner.tab}`} className="t3d-btn" onClick={() => setTab(banner.tab)}
+              style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON, background: "rgba(0,255,178,.06)" }}>
+              <span style={{ display: "block", fontSize: 9, color: NEON, letterSpacing: 1.5 }}>{banner.tab === "morning" ? "MORNING ROUTINE IN PROGRESS" : "WORKOUT IN PROGRESS"}</span>
+              <span style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 5 }}>
+                <span style={{ color: "#E0EAF0", fontSize: 12, fontFamily: "'Inter',sans-serif", letterSpacing: 0, fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" }}>{banner.summary || (banner.tab === "morning" ? "Your morning routine" : "Your workout")}</span>
+                <span style={{ color: NEON, whiteSpace: "nowrap" }}>CONTINUE →</span>
+              </span>
             </button>
           ))}
-          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} profile={profile} onProfileSaved={setProfile} />}
+          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} profile={profile} onProfileSaved={profileSaved} workoutBannerShown={activeBanners.some(banner => banner.tab === "fitness")} />}
           <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
           <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} /></div>
-          {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} />}
+          {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} profile={profile} onProfileChange={setProfile} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
 
@@ -11154,7 +11715,7 @@ export default function App() {
             <div role="dialog" aria-modal="true" aria-label="Your profile" data-testid="profile-dialog" onClick={event => event.stopPropagation()} className="t3d-card" style={{ width: "100%", maxWidth: 440, maxHeight: "90dvh", overflowY: "auto", marginBottom: 0 }}>
               <div className="t3d-ctitle" style={{ marginBottom: 4 }}>PROFILE &amp; COACH SETTINGS</div>
               {profile ? (
-                <ProfileForm user={user} profile={profile} today={todayKey} onCancel={() => setProfileOpen(false)} onSaved={saved => { setProfile(saved); setProfileOpen(false); }} />
+                <ProfileForm user={user} profile={profile} today={todayKey} onCancel={() => setProfileOpen(false)} onSaved={saved => { profileSaved(saved); setProfileOpen(false); }} />
               ) : <div style={{ fontSize: 11, color: "#8AABB8", padding: "10px 0" }}>Loading your profile...</div>}
             </div>
           </div>
