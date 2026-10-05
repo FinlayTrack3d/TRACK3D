@@ -238,7 +238,7 @@ const css = `
   .t3d-ai-input::placeholder { color: #607784; }
   .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
   .t3d-compact-coach .t3d-ai-msg { padding: 8px 10px; margin-bottom: 6px; line-height: 1.6; font-size: 12px; }
-  .t3d-rough-checkin { max-height: calc(100dvh - 145px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: 8px; }
+  .t3d-rough-checkin { padding-bottom: 8px; }
   @keyframes t3dblink { 0%,100%{opacity:1} 50%{opacity:0} }
   .t3d-cursor::after { content:'|'; animation: t3dblink .7s infinite; color: #00FFB2; }
   .t3d-input { background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 13px; line-height: 1.4; outline: none; transition: border-color .18s; width: 100%; }
@@ -261,6 +261,44 @@ const css = `
 `;
 
 // ─── Score Ring ───────────────────────────────────────────────────────────────
+// Decorative task icon with a trailing space; "▸" (stored on older custom
+// tasks) looked tappable, so it is not shown.
+const taskIcon = task => task?.icon && task.icon !== "▸" ? `${task.icon} ` : "";
+
+// Check-in data keys that are flags or timing, not tasks.
+const HIDDEN_CHECKIN_KEYS = new Set(["wakeTiming", "routineTiming", "inProgress", "roughCheckin", "routineSkipped", "skipReason", "recordedAt", "loggedAfter", "checkin", "photos"]);
+
+// Thumbnails for a check-in's stored progress photos (placeholders such as
+// "skipped" or "deferred" are not files).
+function CheckinPhotoThumbs({ photos }) {
+  const paths = Object.entries(photos || {}).filter(([, value]) => typeof value === "string" && value.includes("/"));
+  const pathKey = paths.map(([, path]) => path).join("|");
+  const [urls, setUrls] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    paths.forEach(([angle, path]) => {
+      supabase.storage.from("checkin-photos").createSignedUrl(path, 3600)
+        .then(({ data }) => { if (!cancelled && data?.signedUrl) setUrls(current => ({ ...current, [angle]: data.signedUrl })); })
+        .catch(() => {});
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathKey]);
+  if (!paths.length) return <div style={{ fontSize: 10, color: "#6F8792" }}>No progress photos saved for this day.</div>;
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      {paths.map(([angle]) => (
+        <figure key={angle} style={{ margin: 0, textAlign: "center" }}>
+          {urls[angle]
+            ? <img src={urls[angle]} alt={`${angle} progress photo`} style={{ width: 72, height: 90, objectFit: "cover", borderRadius: 6, border: `1px solid ${BORDER}` }} />
+            : <div style={{ width: 72, height: 90, borderRadius: 6, border: `1px solid ${BORDER}`, background: SURFACE2 }} />}
+          <figcaption style={{ fontSize: 8, color: "#8AABB8", marginTop: 3 }}>{angle.toUpperCase()}</figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
 // Weight is stored in kg; stone and pounds are converted on entry.
 const KG_PER_LB = 0.45359237;
 function WeightEntry({ kgValue, onKgChange, unit, onUnitChange }) {
@@ -922,7 +960,7 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
       name: newTaskName.trim(),
       duration: clampTaskMinutes(newTaskDuration || 10),
       type: "tick",
-      icon: "▸"
+      icon: ""
     };
 
     const list = checkin
@@ -1354,7 +1392,19 @@ Current tasks: ${JSON.stringify(tasks)}.`,
 // A dedicated, simpler screen for turning alternating days on/off, naming
 // each rotation day, and choosing which tasks run on which day - replacing
 // the per-task dropdown that used to be buried in Edit Routine.
-function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setScheduledTasks, onDone }) {
+function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setScheduledTasks, trainingDays = [], onDone }) {
+  const WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+  const toggleWeekday = (groupId, day) => setDayGroups(groups => groups.map(group => {
+    if (group.id !== groupId) return { ...group, weekdays: (group.weekdays || []).filter(item => item !== day) };
+    const weekdays = group.weekdays || [];
+    return { ...group, weekdays: weekdays.includes(day) ? weekdays.filter(item => item !== day) : WEEKDAYS.filter(item => item === day || weekdays.includes(item)) };
+  }));
+  // First day follows the training plan's session days; the second takes the rest.
+  const matchTrainingPlan = () => setDayGroups(groups => groups.map((group, index) => (
+    index === 0 ? { ...group, weekdays: WEEKDAYS.filter(day => trainingDays.includes(day)) }
+      : index === 1 ? { ...group, weekdays: WEEKDAYS.filter(day => !trainingDays.includes(day)) }
+        : { ...group, weekdays: [] }
+  )));
   const enabled = dayGroups.length > 1;
   const editableTasks = scheduledTasks.filter(t => t.id !== "checkin");
 
@@ -1399,17 +1449,33 @@ function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setSched
             <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 10 }}>YOUR ROTATION</div>
             <div style={{ marginBottom: 20 }}>
               {dayGroups.map((group, index) => (
-                <div key={group.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <div style={{ fontSize: 9, color: "#4A6070", width: 16 }}>{index + 1}</div>
-                  <input className="t3d-input" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="e.g. Training Day" style={{ flex: 1 }} />
-                  {dayGroups.length > 2 && (
-                    <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => removeGroup(group.id)}>×</button>
-                  )}
+                <div key={group.id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div style={{ fontSize: 9, color: "#4A6070", width: 16 }}>{index + 1}</div>
+                    <input className="t3d-input" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="e.g. Training Day" style={{ flex: 1 }} />
+                    {dayGroups.length > 2 && (
+                      <button className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label={`Remove ${group.name}`} style={{ minWidth: 44, minHeight: 44 }} onClick={() => removeGroup(group.id)}>×</button>
+                    )}
+                  </div>
+                  <div role="group" aria-label={`Weekdays for ${group.name}`} style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 24 }}>
+                    {WEEKDAYS.map(day => {
+                      const selected = group.weekdays?.includes(day);
+                      return (
+                        <button key={day} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={Boolean(selected)} onClick={() => toggleWeekday(group.id, day)}
+                          style={{ minWidth: 40, minHeight: 40, padding: "4px 6px", borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" }}>{day}</button>
+                      );
+                    })}
+                  </div>
                 </div>
               ))}
+              {trainingDays.length > 0 && (
+                <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44, marginRight: 8 }} onClick={matchTrainingPlan}>
+                  MATCH MY TRAINING PLAN ({trainingDays.join(", ")})
+                </button>
+              )}
               <button className="t3d-btn t3d-btn-sm" onClick={addGroup}>+ ADD ANOTHER DAY</button>
               <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 10, lineHeight: 1.5 }}>
-                Your rotation repeats in this order, day after day (e.g. with 2 days: {dayGroups.map(g => g.name).join(", ")}, {dayGroups.map(g => g.name).join(", ")}, ...).
+                Pick weekdays to tie a day to them (for example your training days). Days with no weekdays picked rotate in order, day after day ({dayGroups.map(g => g.name).join(", ")}, ...).
               </div>
             </div>
 
@@ -1417,7 +1483,7 @@ function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setSched
             <div style={{ marginBottom: 24 }}>
               {editableTasks.map(task => (
                 <div key={task.id || task.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
-                  <div style={{ fontSize: 12, flex: 1, minWidth: 0 }}>{task.icon || "▸"} {task.name}</div>
+                  <div style={{ fontSize: 12, flex: 1, minWidth: 0 }}>{taskIcon(task)}{task.name}</div>
                   <select className="t3d-input" value={task.routineDay || "daily"} onChange={e => assignTask(task.id || task.name, e.target.value)} style={{ maxWidth: 170, fontSize: 10, padding: "6px 8px" }}>
                     <option value="daily">EVERY DAY</option>
                     {dayGroups.map(group => (
@@ -1477,6 +1543,9 @@ function MorningSection({ user }) {
   // Empty means alternating days are off.
   const [dayGroups, setDayGroups] = useState([]);
   const [confirmChangeRoutine, setConfirmChangeRoutine] = useState(false);
+  const [editingDate, setEditingDate] = useState(null);
+  const [trainingDays, setTrainingDays] = useState([]);
+  const [openHistoryDate, setOpenHistoryDate] = useState(null);
   const [pendingLiveStart, setPendingLiveStart] = useState(null);
   const [weightUnit, setWeightUnit] = useState(() => {
     try { return localStorage.getItem("track3d-weight-unit") === "st" ? "st" : "kg"; } catch { return "kg"; }
@@ -1593,6 +1662,10 @@ function MorningSection({ user }) {
         setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : []);
         setIsSetup(true);
       }
+
+      // Training plan days, so alternating days can follow the plan.
+      const { data: planData } = await supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle();
+      setTrainingDays([...new Set((planData?.sessions || []).flatMap(session => session.days || []).map(day => String(day).toUpperCase()))]);
 
       // Load checkins
       const { data: checkinHistory } = await supabase
@@ -1719,7 +1792,7 @@ function MorningSection({ user }) {
         name: customTask.trim(),
         duration: clampTaskMinutes(customTaskDuration || 10),
         type: "tick",
-        icon: "▸"
+        icon: ""
       }
     ]);
 
@@ -1816,8 +1889,13 @@ function MorningSection({ user }) {
 
   const rotationGroups = dayGroups.length >= 2 ? dayGroups : DEFAULT_DAY_GROUPS;
   const epochDay = Math.floor(Date.parse(`${today}T00:00:00Z`) / 86400000);
-  const rotationGroup = rotationGroups[((epochDay % rotationGroups.length) + rotationGroups.length) % rotationGroups.length];
-  const rotationDay = rotationGroup.id;
+  const todayDayCode = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][new Date(`${today}T12:00:00Z`).getUTCDay()];
+  // Days tied to weekdays win; days without weekdays rotate by date as before.
+  const weekdayGroup = rotationGroups.find(group => group.weekdays?.includes(todayDayCode));
+  const rotatingGroups = rotationGroups.filter(group => !group.weekdays?.length);
+  const rotationGroup = weekdayGroup
+    || (rotatingGroups.length ? rotatingGroups[((epochDay % rotatingGroups.length) + rotatingGroups.length) % rotatingGroups.length] : null);
+  const rotationDay = rotationGroup?.id || null;
   const dayGroupName = id => rotationGroups.find(g => g.id === id)?.name || `Day ${id}`;
   const alternatingOn = dayGroups.length >= 2;
   const activeScheduledTasks = alternatingOn
@@ -1913,30 +1991,22 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     finaliseCheckin();
   }, [checkinComplete, checkinData, user, loading, savingCheckin, view]);
   const isRoughCheckin = view === "roughCheckin";
+  const isLogCheckin = view === "logCheckin";
 
-  const startNormalMorningCheckin = () => {
-    setShowMissedRoutineChoice(false);
-    setSkipMorningError("");
-    setCheckinStep(0);
-    setCheckinData({});
-    setTempInput("");
-    setPhotoAngleIdx(0);
-    setPhotoFiles({ front: null, side: null, back: null });
-    setPhotoPreviews({ front: null, side: null, back: null });
-    setLiveInputActive(false);
-    setLiveDeadline(null);
-    setView("wakeCheckin");
-  };
-
-  const startRoughMorningCheckin = () => {
+  // One scrolling form for logging a morning afterwards, a rough check-in,
+  // redoing without the timer, and editing today's or a past entry.
+  const openCheckinForm = (mode, { date = today, data = {} } = {}) => {
     setShowMissedRoutineChoice(false);
     setSkipMorningError("");
     setSubmissionError("");
-    setEditSubmissionData({});
+    setEditingDate(date);
+    setEditSubmissionData(data);
     setPhotoFiles({ front: null, side: null, back: null });
     setPhotoPreviews({ front: null, side: null, back: null });
-    setView("roughCheckin");
+    setView(mode === "rough" ? "roughCheckin" : mode === "edit" ? "editSubmission" : "logCheckin");
   };
+  const startNormalMorningCheckin = () => openCheckinForm("log");
+  const startRoughMorningCheckin = () => openCheckinForm("rough");
 
   const markMorningNotToday = async () => {
     if (savingSkippedMorning) return;
@@ -2262,6 +2332,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     </div>
   ) : null;
 
+  const scoreExplanation = (
+    <details style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, margin: "8px auto", maxWidth: 430, textAlign: "left" }}>
+      <summary style={{ cursor: "pointer", minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>How is the score worked out?</summary>
+      Each task in your routine is worth an equal share of 10 points. A task counts when you tick it, log your sleep or weight, or add at least one progress photo. The check-in itself always counts. For example, with 10 tasks, skipping photos gives 9/10.
+    </details>
+  );
+
   const changeRoutineDialog = confirmChangeRoutine ? (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
       <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="change-routine-title" style={{ width: "100%", maxWidth: 360, borderColor: NEON3, textAlign: "center" }}>
@@ -2319,9 +2396,14 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     );
   }
   // Correct a saved check-in or capture a lighter, all-at-once rough check-in.
-  if (view === "editSubmission" || isRoughCheckin) {
+  if (view === "editSubmission" || isRoughCheckin || isLogCheckin) {
+    const formDate = editingDate || today;
+    const isPastEntry = formDate !== today;
+    const formSteps = allSteps.filter(step => step.id !== "checkin");
+    const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
+    const toggleStyle = selected => ({ flex: 1, minHeight: 44, borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" });
     return (
-      <div className={`t3d-fade ${isRoughCheckin ? "t3d-rough-checkin" : ""}`}>
+      <div className={`t3d-fade ${isRoughCheckin || isLogCheckin ? "t3d-rough-checkin" : ""}`}>
         <form className="t3d-card" onSubmit={async event => {
           event.preventDefault();
           if (savingCheckin) return;
@@ -2331,22 +2413,27 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             const updatedData = {
               ...editSubmissionData,
               ...(isRoughCheckin ? { routineSkipped: false, roughCheckin: true } : {}),
+              ...(isLogCheckin ? { routineSkipped: false, loggedAfter: true } : {}),
+              ...(lockedCheckinIndex >= 0 ? { checkin: true } : {}),
             };
+            // Saving the form finishes the entry, including an unfinished one from History.
+            delete updatedData.inProgress;
             const updatedPhotos = { front: "skipped", side: "skipped", back: "skipped", ...editSubmissionData.photos };
             for (const angle of PHOTO_ANGLES) {
               const file = photoFiles[angle];
               if (!file) continue;
               const extension = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
-              const path = `${user.id}/${today}/${angle}.${extension}`;
+              const path = `${user.id}/${formDate}/${angle}.${extension}`;
               const { error: uploadError } = await supabase.storage.from("checkin-photos").upload(path, file, { upsert: true, contentType: file.type || undefined });
               if (uploadError) throw uploadError;
               updatedPhotos[angle] = path;
             }
             if (editSubmissionData.photos || PHOTO_ANGLES.some(angle => photoFiles[angle])) {
               updatedData.photos = updatedPhotos;
-            }            const { error } = await supabase.from("morning_checkins").upsert({
+            }
+            const { error } = await supabase.from("morning_checkins").upsert({
               user_id: user.id,
-              date: today,
+              date: formDate,
               score: morningScore(updatedData),
               data: updatedData,
             }, { onConflict: "user_id,date" });
@@ -2359,11 +2446,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             setSavingCheckin(false);
           }
         }}>
-          <div className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : "EDIT TODAY'S SUBMISSION"}</div>
+          <div className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : isLogCheckin ? "LOG THIS MORNING" : isPastEntry ? `EDIT ${new Date(`${formDate}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }).toUpperCase()}` : "EDIT TODAY'S SUBMISSION"}</div>
           <p style={{ fontSize: 12, color: "#8AABB8" }}>
             {isRoughCheckin
               ? "Add whatever you remember. It does not need to be perfect, and you can leave anything blank."
-              : "Correct your answers to reflect what actually happened this morning."}
+              : isLogCheckin
+                ? "Fill in what you did this morning, then save."
+                : "Correct your answers to reflect what actually happened."}
           </p>
           <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
             Actual wake-up time
@@ -2375,14 +2464,36 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 planned: data.wakeTiming?.planned || wakeTime,
                 source: "manual",
               } }))} />
-          </label>          {allSteps.map(step => {
+          </label>
+          <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
+            Routine time (minutes)
+            <input className="t3d-input" type="number" inputMode="numeric" min="1" max="600" style={{ marginTop: 8 }}
+              placeholder={plannedRoutineMinutes ? `Planned: ${plannedRoutineMinutes} min` : "Minutes"}
+              value={editSubmissionData.routineTiming?.actualMinutes ?? ""}
+              onChange={event => setEditSubmissionData(data => ({ ...data, routineTiming: {
+                ...data.routineTiming,
+                plannedMinutes: data.routineTiming?.plannedMinutes || plannedRoutineMinutes,
+                actualMinutes: event.target.value === "" ? null : Math.max(1, Math.round(Number(event.target.value)) || 1),
+              } }))} />
+          </label>
+          <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44, width: "100%", marginBottom: 4 }}
+            onClick={() => setEditSubmissionData(data => ({ ...data, ...Object.fromEntries(formSteps.filter(step => step.type === "tick").map(step => [step.id || step.name, true])) }))}>
+            ✓ MARK ALL DONE
+          </button>
+          {formSteps.map(step => {
             const key = step.id || step.name;
             const value = editSubmissionData[key];
             return (
               <div key={key} style={{ padding: "14px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <label style={{ display: "block", fontSize: 12 }}>
-                  {step.icon || "▸"} {step.name}
-                  {["sleep", "number"].includes(step.type) && (
+                  {taskIcon(step)}{step.name}
+                  {step.id === "weight" && (
+                    <div style={{ marginTop: 8 }}>
+                      <WeightEntry kgValue={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+                        onKgChange={kg => setEditSubmissionData(data => ({ ...data, [key]: kg }))} unit={weightUnit} onUnitChange={chooseWeightUnit} />
+                    </div>
+                  )}
+                  {["sleep", "number"].includes(step.type) && step.id !== "weight" && (
                     <input className="t3d-input" style={{ marginTop: 8 }}
                       type={step.type === "number" ? "number" : "text"}
                       step={step.type === "number" ? "any" : undefined}
@@ -2390,14 +2501,15 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       value={typeof value === "string" || typeof value === "number" ? value : ""}
                       onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value }))} />
                   )}
-                  {step.type === "tick" && (
-                    <select className="t3d-input" style={{ marginTop: 8 }} value={value === true ? "yes" : "no"}
-                      onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value === "yes" }))}>
-                      <option value="yes">Completed</option>
-                      <option value="no">Not completed</option>
-                    </select>
-                  )}
                 </label>
+                {step.type === "tick" && (
+                  <div role="group" aria-label={step.name} style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value === true} style={toggleStyle(value === true)}
+                      onClick={() => setEditSubmissionData(data => ({ ...data, [key]: true }))}>✓ DONE</button>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value !== true} style={{ ...toggleStyle(value !== true), ...(value !== true ? { borderColor: NEON3, color: NEON3, background: "rgba(255,45,120,.08)" } : {}) }}
+                      onClick={() => setEditSubmissionData(data => ({ ...data, [key]: false }))}>✗ NOT DONE</button>
+                  </div>
+                )}
                 {step.type === "photos3" && (
                   <div style={{ fontSize: 11, color: "#8AABB8", marginTop: 8 }}>
                     {PHOTO_ANGLES.map(angle => (
@@ -2436,7 +2548,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           })}
           {submissionError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{submissionError}</p>}
           <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : "SAVE CHANGES"}</button>
+            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : isLogCheckin ? "SAVE MORNING" : "SAVE CHANGES"}</button>
             <button className="t3d-btn t3d-btn-red" type="button" disabled={savingCheckin} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </form>
@@ -2481,7 +2593,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 <>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>{skippedToday ? "↗" : "✅"}</div>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 2, marginBottom: 8 }}>
-                    {skippedToday ? "RESET FOR TOMORROW" : "MORNING COMPLETE"}
+                    {skippedToday ? "RESET FOR TOMORROW" : (() => {
+                      const todayData = history.find(h => h.date === today)?.data;
+                      return todayData?.roughCheckin || todayData?.loggedAfter ? "MORNING LOGGED" : "MORNING COMPLETE";
+                    })()}
                   </div>
                   {skippedToday ? (
                     <>
@@ -2497,6 +2612,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       <div style={{ fontSize: 11, color: "#E0EAF0", letterSpacing: 1 }}>
                         Score: {history.find(h => h.date === today)?.score || 0}/10 · Come back tomorrow!
                       </div>
+                      {scoreExplanation}
                       <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.7 }}>
                         {wakeTimingSummary(history.find(h => h.date === today)?.data?.wakeTiming)}
                       </p>
@@ -2520,63 +2636,42 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                         );
                       })()}
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 14 }}>
-                    <button type="button" onClick={() => setCompletedAction("edit")}
-                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
+                    <button type="button" onClick={() => { setCompletedAction(null); openCheckinForm("edit", { data: { ...(history.find(entry => entry.date === today)?.data || {}) } }); }}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", minHeight: 44, padding: "8px 10px", cursor: "pointer" }}>
                       Edit submission
                     </button>
-                    <button type="button" onClick={() => setCompletedAction("redo")}
-                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", padding: "8px 4px", cursor: "pointer" }}>
+                    <button type="button" onClick={() => setCompletedAction(action => action === "redo" ? null : "redo")}
+                      style={{ background: "none", border: 0, color: "#8AABB8", fontSize: 11, textDecoration: "underline", minHeight: 44, padding: "8px 10px", cursor: "pointer" }}>
                       Do again
                     </button>
                   </div>
-                  {completedAction && (
-                    <div role="alert" style={{ marginTop: 14, padding: 18, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
-                      <div style={{ color: "#FFB547", fontSize: 12, fontWeight: 700 }}>⚠ Keep your progress honest</div>
-                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.7 }}>
-                        Mistakes happen, and it is okay to correct them. Being honest about your morning helps you reflect, learn, and keep moving forward.
-                        {completedAction === "redo" ? " Choose Live Morning or Normal Check-in to start again. Your current submission will only be replaced when you save the new one." : " Only change your answers to reflect what actually happened."}
+                  {completedAction === "redo" && (
+                    <div style={{ marginTop: 10, padding: 14, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
+                      <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6, margin: "0 0 10px" }}>
+                        Choose Redo with guided timer or Redo without timer. Today&apos;s check-in stays saved until you finish the new one.
                       </p>
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
-                          const action = completedAction;
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" type="button" style={{ minHeight: 44 }} onClick={() => confirmLiveStart(() => {
                           setCompletedAction(null);
                           setSubmissionError("");
-                          if (action === "edit") {
-                            setEditSubmissionData({ ...(history.find(entry => entry.date === today)?.data || {}) });
-                            setPhotoFiles({ front: null, side: null, back: null });
-                            setPhotoPreviews({ front: null, side: null, back: null });
-                            setView("editSubmission");
-                          } else {
-                            setCheckinData({});
-                            setCheckinStep(0);
-                            setTempInput("");
-                            setPhotoAngleIdx(0);
-                            setPhotoFiles({ front: null, side: null, back: null });
-                            setPhotoPreviews({ front: null, side: null, back: null });
-                            setLiveInputActive(false);
-                            setLiveTaskIndex(0);
-                            startLiveTimer(liveRoutineSteps[0]);
-                            setLiveStartedAt(Date.now());
-                        recordLiveWakeTime();
-                            setView("liveMorning");
-                          }
-                        }}>{completedAction === "edit" ? "CONTINUE TO EDIT" : "REDO WITH GUIDED TIMER"}</button>
-                        {completedAction === "redo" && (
-                          <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => {
-                            setCompletedAction(null);
-                            setSubmissionError("");
-                            setCheckinData({});
-                            setCheckinStep(0);
-                            setTempInput("");
-                            setPhotoAngleIdx(0);
-                            setPhotoFiles({ front: null, side: null, back: null });
-                            setPhotoPreviews({ front: null, side: null, back: null });
-                            setLiveInputActive(false);
-                            setLiveDeadline(null);
-                            setLiveStartedAt(null);
-                            setView("wakeCheckin");
-                          }}>REDO WITHOUT TIMER</button>
-                        )}                        <button className="t3d-btn t3d-btn-sm" type="button" onClick={() => setCompletedAction(null)}>CANCEL</button>
+                          setCheckinData({});
+                          setCheckinStep(0);
+                          setTempInput("");
+                          setPhotoAngleIdx(0);
+                          setPhotoFiles({ front: null, side: null, back: null });
+                          setPhotoPreviews({ front: null, side: null, back: null });
+                          setLiveInputActive(false);
+                          setLiveTaskIndex(0);
+                          startLiveTimer(liveRoutineSteps[0]);
+                          setLiveStartedAt(Date.now());
+                          recordLiveWakeTime();
+                          setView("liveMorning");
+                        })}>REDO WITH GUIDED TIMER</button>
+                        <button className="t3d-btn t3d-btn-sm" type="button" style={{ minHeight: 44 }} onClick={() => {
+                          setCompletedAction(null);
+                          openCheckinForm("log");
+                        }}>REDO WITHOUT TIMER</button>
+                        <button className="t3d-btn t3d-btn-sm t3d-btn-red" type="button" style={{ minHeight: 44 }} onClick={() => setCompletedAction(null)}>CANCEL</button>
                       </div>
                     </div>
                   )}
@@ -2696,10 +2791,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             {/* Today's schedule */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE{alternatingOn ? ` · ${dayGroupName(rotationDay).toUpperCase()}` : ""}</div>
+                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE{alternatingOn && rotationDay ? ` · ${dayGroupName(rotationDay).toUpperCase()}` : ""}</div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
   <button
     className="t3d-btn t3d-btn-sm"
+    style={{ minHeight: 44 }}
     onClick={() => setView("editRoutine")}
   >
     EDIT ROUTINE
@@ -2707,6 +2803,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   <button
     className="t3d-btn t3d-btn-sm"
+    style={{ minHeight: 44 }}
     onClick={() => setView("rotationSetup")}
   >
     ALTERNATING DAYS
@@ -2714,6 +2811,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   <button
     className="t3d-btn t3d-btn-sm t3d-btn-red"
+    style={{ minHeight: 44 }}
     onClick={() => setConfirmChangeRoutine(true)}
   >
     CHANGE ROUTINE
@@ -2723,7 +2821,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               {activeScheduledTasks.map((t, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: NEON2, width: 45 }}>{t.scheduledTime}</div>
-                  <div style={{ flex: 1, fontSize: 12 }}>{t.icon || "▸"} {t.name}{alternatingOn && t.routineDay && t.routineDay !== "daily" ? ` · ${dayGroupName(t.routineDay).toUpperCase()}` : ""}</div>
+                  <div style={{ flex: 1, fontSize: 12 }}>{taskIcon(t)}{t.name}{alternatingOn && t.routineDay && t.routineDay !== "daily" ? ` · ${dayGroupName(t.routineDay).toUpperCase()}` : ""}</div>
                   <div style={{ fontSize: 10, color: "#E0EAF0" }}>{t.duration}min</div>
                 </div>
               ))}
@@ -2768,31 +2866,53 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   {history.length === 0 ? (
                     <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", padding: "16px 0" }}>No history yet — complete your first morning check-in!</div>
                   ) : (
-                    history.map((entry, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: `1px solid ${BORDER}` }}>
-                        <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#E0EAF0", width: 80 }}>
-                          {new Date(entry.date).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                    history.map(entry => {
+                      const data = entry.data || {};
+                      const unfinished = Boolean(data.inProgress);
+                      const isOpen = openHistoryDate === entry.date;
+                      const taskEntries = Object.entries(data).filter(([key]) => !HIDDEN_CHECKIN_KEYS.has(key));
+                      return (
+                        <div key={entry.date} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                          <button type="button" aria-expanded={isOpen} onClick={() => setOpenHistoryDate(isOpen ? null : entry.date)}
+                            style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", minHeight: 44, padding: "10px 0", background: "none", border: 0, color: "inherit", cursor: "pointer", textAlign: "left" }}>
+                            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#E0EAF0", width: 80 }}>
+                              {new Date(`${entry.date}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" })}
+                            </div>
+                            <div style={{ flex: 1, fontSize: 10, color: "#8AABB8" }}>
+                              {data.routineSkipped ? "Skipped" : unfinished ? "Started · not finished" : data.roughCheckin ? "Rough check-in" : data.loggedAfter ? "Logged afterwards" : "Completed"}
+                            </div>
+                            <div style={{
+                              fontFamily: "'Orbitron',monospace", fontSize: 13, fontWeight: 700,
+                              color: unfinished || data.routineSkipped ? "#6F8792" : entry.score >= 7 ? NEON : entry.score >= 4 ? "#FF8C00" : NEON3
+                            }}>{unfinished || data.routineSkipped ? "—" : `${entry.score}/10`}</div>
+                            <span aria-hidden="true" style={{ color: "#8AABB8", transform: isOpen ? "rotate(180deg)" : "none" }}>▾</span>
+                          </button>
+                          {isOpen && (
+                            <div style={{ padding: "0 0 14px", fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>
+                              <div>{wakeTimingSummary(data.wakeTiming)}</div>
+                              <div>{routineTimingSummary(data.routineTiming)}</div>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", margin: "8px 0" }}>
+                                {taskEntries.map(([k, v]) => (
+                                  <span key={k} style={{
+                                    fontSize: 9, padding: "2px 6px", borderRadius: 10,
+                                    background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
+                                    color: v === true ? NEON : v === false ? NEON3 : NEON2,
+                                    border: `1px solid ${v === true ? "rgba(0,255,178,.2)" : v === false ? "rgba(255,45,120,.2)" : "rgba(0,200,255,.2)"}`,
+                                  }}>
+                                    {morningStepName(k)}: {v === true ? "✓" : v === false ? "✗" : k === "weight" && v ? `${v} kg` : String(v || "—")}
+                                  </span>
+                                ))}
+                              </div>
+                              <CheckinPhotoThumbs photos={data.photos} />
+                              <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44, marginTop: 8 }}
+                                onClick={() => openCheckinForm("edit", { date: entry.date, data: { ...data } })}>
+                                {unfinished ? "FINISH THIS CHECK-IN" : "EDIT THIS DAY"}
+                              </button>
+                            </div>
+                          )}
                         </div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {entry.data && Object.entries(entry.data).filter(([key]) => key !== "wakeTiming").map(([k, v]) => (
-                              <span key={k} style={{
-                                fontSize: 9, padding: "2px 6px", borderRadius: 10,
-                                background: v === true ? "rgba(0,255,178,.1)" : v === false ? "rgba(255,45,120,.1)" : "rgba(0,200,255,.1)",
-                                color: v === true ? NEON : v === false ? NEON3 : NEON2,
-                                border: `1px solid ${v === true ? "rgba(0,255,178,.2)" : v === false ? "rgba(255,45,120,.2)" : "rgba(0,200,255,.2)"}`,
-                              }}>
-                                {morningStepName(k)}: {v === true ? "✓" : v === false ? "✗" : String(v).slice(0,8)}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                        <div style={{
-                          fontFamily: "'Orbitron',monospace", fontSize: 13, fontWeight: 700,
-                          color: entry.score >= 7 ? NEON : entry.score >= 4 ? "#FF8C00" : NEON3
-                        }}>{entry.score}/10</div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               )}
@@ -2835,6 +2955,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
         setDayGroups={setDayGroups}
         scheduledTasks={scheduledTasks}
         setScheduledTasks={setScheduledTasks}
+        trainingDays={trainingDays}
         onDone={() => setView("editRoutine")}
       />
     );
@@ -2928,7 +3049,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       fontSize: 11,
                       color: "#E0EAF0"
                     }}>
-                      ▸ {task.name}
+                      {taskIcon(task)}{task.name}
                     </div>
 
                     <input
@@ -3195,7 +3316,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       fontSize: 10,
                       color: "#E0EAF0"
                     }}>
-                      ▸ {task.name}
+                      {taskIcon(task)}{task.name}
                     </div>
 
                     <div style={{
@@ -3440,7 +3561,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               fontSize: 34,
               marginBottom: 10
             }}>
-              {currentLiveTask.icon || "▸"}
+              {taskIcon(currentLiveTask)}
             </div>
 
             <div style={{
@@ -3486,8 +3607,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 fontSize: 11,
                 color: "#E0EAF0"
               }}>
-                {liveRoutineSteps[liveTaskIndex + 1].icon || "▸"}{" "}
-                {liveRoutineSteps[liveTaskIndex + 1].name}
+                {taskIcon(liveRoutineSteps[liveTaskIndex + 1])}                {liveRoutineSteps[liveTaskIndex + 1].name}
                 {" · "}
                 {liveRoutineSteps[liveTaskIndex + 1].duration} min
               </div>
@@ -3576,7 +3696,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             STEP {checkinStep + 1} OF {checkinDoneIndex}
           </div>
           <div className="t3d-checkin-step">
-            <div style={{ fontSize: 40, marginBottom: 16 }}>{currentStep.icon || "▸"}</div>
+            {taskIcon(currentStep) && <div aria-hidden="true" style={{ fontSize: 40, marginBottom: 16 }}>{taskIcon(currentStep)}</div>}
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 2, color: "#E0EAF0", marginBottom: 8 }}>
               {currentStep.name}
             </div>
@@ -3628,6 +3748,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#E0EAF0", letterSpacing: 2, marginBottom: 8 }}>
             MORNING SCORE
           </div>
+          {scoreExplanation}
           <p style={{ fontSize: 12, color: NEON2, lineHeight: 1.7 }}>
             {wakeTimingSummary(checkinData.wakeTiming)}
           </p>
@@ -3652,7 +3773,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </div>
           </details>
           <div style={{ marginBottom: 24 }}>
-            {Object.entries(checkinData).filter(([key]) => !["wakeTiming", "routineTiming"].includes(key)).map(([k, v]) => (
+            {Object.entries(checkinData).filter(([key]) => !HIDDEN_CHECKIN_KEYS.has(key) || key === "photos").map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                 <span style={{ color: "#4A6070" }}>{morningStepName(k)}</span>
                 <span style={{ color: v === true ? NEON : v === false ? NEON3 : NEON2 }}>
