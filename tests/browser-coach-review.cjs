@@ -1,7 +1,7 @@
 // Browser regression checks for the AI coach review. Run against a production build: npm run start -- --port 3123
 // then: node tests/browser-coach-review.cjs <scenario>   (all remote services are mocked)
 // Browser checks for the AI coach review (sections F-J). Scenarios:
-//  nutritionhistory, roundup, roundupfail, weeklysavefail
+//  nutritionhistory, roundup, roundupfail, weeklysavefail, painresolve
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -27,6 +27,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     ],
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
     calendar_tasks: [{ title: 'Gym', status: 'done' }, { title: 'Emails', status: 'pending' }],
+    workout_splits: scenario === 'painresolve' ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
   const writes = [];
   const chats = [];
@@ -40,6 +41,11 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         if (chatFails) return route.fulfill({ status: 502, json: { error: 'Coach provider failed (529): Overloaded' } });
         if ((body.system || '').includes('weekly recap')) return route.fulfill({ json: { content: [{ text: '{"biggest_win":"You trained twice.","focus":"Log meals.","verdict":"First tracked week."}' }] } });
         return route.fulfill({ json: { content: [{ text: 'Solid day: two meals on plan and a workout. Tomorrow, plan dinner before 6pm.' }] } });
+      }
+      if (url.pathname === '/api/coach') {
+        const body = JSON.parse(req.postData() || '{}');
+        chats.push({ coach: true, ...body });
+        return route.fulfill({ json: /pain/i.test(body.message) ? { message: 'Stop that exercise for today — get it checked by a physio or doctor if it continues.', insights: [], actions: [], activePain: true, safetyStop: true, conversationId: 'c1' } : { message: 'Next set: 10 reps.', insights: [], actions: [], activePain: false, conversationId: 'c1' } });
       }
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: { content: [{ text: 'OK.' }] } });
       return route.continue();
@@ -104,6 +110,21 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByTestId('weekly-recap').waitFor();
     await page.getByText(/couldn't be saved, so it will be written again/).waitFor({ timeout: 10000 });
     assert.equal(await page.getByText(/schema cache|public\.weekly_reports/).count(), 0, 'no raw database message');
+  } else if (scenario === 'painresolve') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    await page.getByRole('button', { name: 'CHAT WITH FITNESS COACH' }).click();
+    const input = page.getByPlaceholder('Ask anything...');
+    await input.fill('Sharp pain in my left shoulder on that last rep.');
+    await input.press('Enter');
+    await page.getByText(/Pain noted — the coach won't load that area/).waitFor();
+    await page.getByRole('button', { name: 'PAIN RESOLVED' }).click();
+    await page.getByText(/Pain marked as resolved/).waitFor();
+    const update = writes.find(w => w.table === 'pain_reports' && w.method === 'PATCH');
+    assert(update, 'pain report updated');
+    assert.equal(JSON.parse(update.body).status, 'resolved');
+    assert(decodeURIComponent(update.url).includes('status=neq.resolved'));
+    assert.equal(await page.getByRole('button', { name: 'PAIN RESOLVED' }).count(), 0);
   } else {
     throw new Error('unknown scenario ' + scenario);
   }

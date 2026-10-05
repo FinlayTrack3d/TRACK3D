@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { prepareAction } from "../../../lib/coaching/actions.js";
 import { needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
 import { buildCoachSystemInstructions } from "../../../lib/coaching/playbook.js";
-import { safetyDirective } from "../../../lib/coaching/safety.js";
+import { activePainDirective, activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 
 const responseShape = `Return only JSON matching:
@@ -46,14 +46,30 @@ export async function POST(request) {
 
     await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "user", content: message });
 
+    // Pain reported in the last 48 hours and not marked resolved.
+    const { data: painRows } = await supabase.from("pain_reports")
+      .select("id,report,body_area,exercise_key,severity,status,reported_at")
+      .eq("user_id", user.id).neq("status", "resolved")
+      .gte("reported_at", new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString())
+      .order("reported_at", { ascending: false }).limit(5);
+    let activePain = activePainReports(painRows || []);
+
+    // The instant stop reply is for a first pain report and for red flags.
+    // Later messages while pain is active go to the coach with the
+    // active-pain directive, so it can actually adapt the session.
     const safety = safetyDirective(message);
-    if (safety) {
-      const payload = { message: safety.message, insights: [{ kind: "safety", text: safety.message }], actions: [] };
+    if (safety && (safety.severity === "concerning" || !activePain.length)) {
+      const payload = { message: safety.message, insights: [{ kind: "safety", text: safety.message }], actions: [], activePain: true, safetyStop: true };
+      const currentExercise = body?.clientContext?.activeWorkout?.find?.((item) => item?.isCurrentExercise)?.exercise || null;
       await Promise.all([
-        supabase.from("pain_reports").insert({ user_id: user.id, report: message, severity: safety.severity === "concerning" ? "concerning" : "unspecified" }),
+        supabase.from("pain_reports").insert({ user_id: user.id, report: message.slice(0, 1000), body_area: safety.bodyArea, exercise_key: currentExercise, severity: safety.severity === "concerning" ? "concerning" : "unspecified" }),
         supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: safety.message, structured_payload: payload }),
       ]);
       return Response.json({ ...payload, conversationId });
+    }
+    if (safety && activePain.length) {
+      // A further pain mention while pain is active: keep it in the directive.
+      activePain = [{ report: message, body_area: safety.bodyArea, status: "active", reported_at: new Date().toISOString() }, ...activePain];
     }
 
     const [{ data: context, error: contextError }, { data: profile }] = await Promise.all([
@@ -75,7 +91,7 @@ export async function POST(request) {
       const providerResponse = await postAnthropicMessages({
           model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
           max_tokens: 1200,
-          system: `${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
+          system: `${activePain.length ? `${activePainDirective(activePain)}\n\n` : ""}${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
           messages: [{ role: "user", content: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}\n\nUSER\n${message}` }],
         });
       if (!providerResponse.ok) return Response.json({ error: providerResponse.error }, { status: 502 });
@@ -86,7 +102,9 @@ export async function POST(request) {
     if (!answer) return Response.json({ error: "Coach returned an invalid response" }, { status: 502 });
 
     const preparedActions = [];
-    for (const raw of answer.actions || []) {
+    // While pain is active only temporary, load-free actions are allowed.
+    const proposed = (answer.actions || []).filter((raw) => !activePain.length || SAFE_ACTIONS_DURING_PAIN.has(raw?.type));
+    for (const raw of proposed) {
       try { preparedActions.push(prepareAction(raw)); } catch { /* Reject unrecognised or malformed model actions. */ }
     }
 
@@ -120,7 +138,7 @@ export async function POST(request) {
     });
     if (memoryRows.length) await supabase.from("coach_memories").upsert(memoryRows, { onConflict: "user_id,category,memory_key" });
 
-    const result = { message: String(answer.message || ""), insights: (answer.insights || []).slice(0, 3), actions: storedActions || [] };
+    const result = { message: String(answer.message || ""), insights: (answer.insights || []).slice(0, 3), actions: storedActions || [], activePain: activePain.length > 0 };
     await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: result.message, structured_payload: result });
     return Response.json({ ...result, conversationId, usedHistoricalRetrieval });
   } catch (error) {

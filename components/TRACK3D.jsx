@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { readDraft, useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
-import { sendCoachMessage } from "../lib/coaching/coach-client";
+import { resolveActivePain, sendCoachMessage } from "../lib/coaching/coach-client";
 import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
@@ -407,6 +407,8 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
   const [restored, setRestored] = useState(!storageKey);
   const [actions, setActions] = useState([]);
   const [conversationId, setConversationId] = useState(null);
+  const [painActive, setPainActive] = useState(false); // an unresolved pain report shapes the coach's replies
+  const [painNote, setPainNote] = useState("");
   const [personality, setPersonality] = useState("balanced");
   const endRef = useRef(null);
   const messageListRef = useRef(null);
@@ -456,6 +458,8 @@ ${dayContext || "- Nothing logged yet today"}`;
         const data = await sendCoachMessage(msg, conversationId, coachContext);
         setConversationId(data.conversationId);
         setActions((data.actions || []).map(action => ({ ...action, type: action.type || action.action_type })));
+        setPainActive(Boolean(data.activePain));
+        setPainNote("");
         setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet." }]);
         setLoading(false);
         setTimeout(scroll, 50);
@@ -608,6 +612,16 @@ ${dayContext || "- Nothing logged yet today"}`;
               <div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}>
                 <div className="t3d-ai-tag" style={{ color: NEON }}>AI</div>
                 <span className="t3d-cursor" style={{ color: "#E0EAF0", fontSize: 11 }}>Thinking</span>
+              </div>
+            )}
+            {coachingV12 && (painActive || painNote) && (
+              <div role="status" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, border: "1px solid rgba(255,181,71,.35)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: "8px 10px", marginBottom: 8 }}>
+                <span style={{ fontSize: 10, color: "#FFB547", lineHeight: 1.4 }}>{painNote || "Pain noted — the coach won't load that area until you say it's better."}</span>
+                {painActive && <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, whiteSpace: "nowrap" }} onClick={async () => {
+                  const resolved = await resolveActivePain();
+                  if (resolved.ok) { setPainActive(false); setPainNote("Pain marked as resolved. Ease back in with light, pain-free sets."); }
+                  else setPainNote(`Couldn't update that: ${resolved.error}`);
+                }}>PAIN RESOLVED</button>}
               </div>
             )}
             {coachingV12 && actions.filter(action => !["rejected", "applied"].includes(action.status)).map(action => {
