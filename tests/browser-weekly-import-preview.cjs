@@ -149,7 +149,7 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
     assert.match(flags, /Pull A:.*No day given/);
     assert.match(flags, /Cable Fly: Sets not stated - set to 3/);
     const review = await page.getByTestId('import-review').textContent();
-    assert.match(review, /Incline Dumbbell Press.*Rest 120s.*3 sets · 8-10\/8-10\/8-10 reps/);
+    assert.match(review, /Incline Dumbbell Press.*Rest 120s.*3 × 8–10/, 'sets × reps, not every set');
     assert.match(review, /Squeeze at the top/);
     assert.match(review, /NO DAY SET/);
     if (scenario === 'import') {
@@ -194,7 +194,7 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
     await sheet.waitFor();
     const sheetText = await sheet.textContent();
     assert.match(sheetText, /TODAY'S WORKOUT/);
-    assert.match(sheetText, /Bench Press.*Rest 150s.*3 sets · 6-8\/6-8\/6-8 reps/);
+    assert.match(sheetText, /Bench Press.*Rest 150s.*3 × 6–8/, 'sets × reps, not every set');
     assert.match(sheetText, /Keep 2 reps in reserve/);
     const box = await sheet.boundingBox();
     assert(box.y >= 0 && box.y + box.height <= 844 + 1, `sheet inside viewport: ${JSON.stringify(box)}`);

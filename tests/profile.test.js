@@ -12,10 +12,12 @@ test("age comes from date of birth and changes on the birthday", () => {
 });
 
 test("profile rows are read safely", () => {
-  assert.deepEqual(normaliseProfile({ height_cm: "178.0", date_of_birth: "1991-03-12", sex: "male" }), { heightCm: 178, dateOfBirth: "1991-03-12", sex: "male" });
-  assert.deepEqual(normaliseProfile(null), { heightCm: null, dateOfBirth: null, sex: null });
+  assert.deepEqual(normaliseProfile({ height_cm: "178.0", date_of_birth: "1991-03-12", sex: "male" }, "advanced"), { heightCm: 178, dateOfBirth: "1991-03-12", sex: "male", experienceLevel: "advanced" });
+  assert.deepEqual(normaliseProfile(null), { heightCm: null, dateOfBirth: null, sex: null, experienceLevel: null });
   assert.equal(isProfileComplete(normaliseProfile({ height_cm: 178, sex: "male" })), false);
-  assert.equal(isProfileComplete(normaliseProfile({ height_cm: 178, date_of_birth: "1991-03-12", sex: "prefer_not_to_say" })), true);
+  assert.equal(isProfileComplete(normaliseProfile({ height_cm: 178, date_of_birth: "1991-03-12", sex: "prefer_not_to_say" })), false, "training experience is part of the profile");
+  assert.equal(isProfileComplete(normaliseProfile({ height_cm: 178, date_of_birth: "1991-03-12", sex: "prefer_not_to_say" }, "intermediate")), true);
+  assert.equal(normaliseProfile(null, "expert").experienceLevel, null, "unknown levels are ignored");
   assert.equal(sexLabel("prefer_not_to_say"), "Prefer not to say");
   assert.equal(sexId("Female"), "female");
 });
@@ -28,6 +30,8 @@ test("the profile form is checked", () => {
   assert.match(profileProblem({ heightCm: 178, dateOfBirth: "2020-01-01", sex: "male" }, today), /13/);
   assert.match(profileProblem({ heightCm: 178, dateOfBirth: "1991-03-12", sex: "" }, today), /sex/);
   assert.equal(profileProblem({ heightCm: 178, dateOfBirth: "1991-03-12", sex: "Prefer not to say" }, today), "");
+  assert.match(profileProblem({ heightCm: 178, dateOfBirth: "1991-03-12", sex: "Male" }, today, { requireExperience: true }), /training experience/);
+  assert.equal(profileProblem({ heightCm: 178, dateOfBirth: "1991-03-12", sex: "Male", experienceLevel: "beginner" }, today, { requireExperience: true }), "");
 });
 
 test("only given and changed values are saved", () => {
