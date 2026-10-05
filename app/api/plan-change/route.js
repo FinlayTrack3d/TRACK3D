@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 
 const prescriptionFields = {
   sets: z.coerce.number().int().min(1).max(10).optional(),
@@ -76,18 +77,14 @@ Only propose exact targeted changes when the user has supplied enough informatio
 Return only JSON:
 {"message":"brief collaborative reply, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"update_session_days|update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","days":["MON"],"exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
 
-    const provider = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
+    const provider = await postAnthropicMessages({
         model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
         max_tokens: 1800,
         system,
         messages: [{ role: "user", content: `CURRENT PLAN\n${JSON.stringify(currentPlan)}\n\nRECENT LEGACY WORKOUTS\n${JSON.stringify(recentWorkouts)}\n\nSTRUCTURED EXERCISE HISTORY\n${JSON.stringify(structuredHistory || [])}` }, ...messages],
-      }),
-    });
-    if (!provider.ok) return Response.json({ error: "Coach provider failed" }, { status: 502 });
-    const payload = await provider.json();
+      });
+    if (!provider.ok) return Response.json({ error: provider.error }, { status: 502 });
+    const payload = provider.payload;
     const text = payload.content?.map((block) => block.text || "").join("") || "";
     let result;
     try {
