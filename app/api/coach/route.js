@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { prepareAction } from "../../../lib/coaching/actions.js";
 import { conversationTurns, needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
 import { WORKOUT_COACH_INSTRUCTIONS } from "../../../lib/coaching/playbook.js";
-import { buildCoachSystem } from "../../../lib/coaching/system.js";
+import { buildCoachSystem, cleanCoachReply, PLAN_CHANGE_FROM_CHAT } from "../../../lib/coaching/system.js";
 import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 
@@ -153,7 +153,18 @@ export async function POST(request) {
     });
     if (memoryRows.length) await supabase.from("coach_memories").upsert(memoryRows, { onConflict: "user_id,category,memory_key" });
 
-    const result = { message: String(answer.message || ""), insights: (answer.insights || []).slice(0, 3), actions: storedActions || [], activePain: activePain.length > 0 };
+    const cleaned = cleanCoachReply(answer.message);
+    // A permanent change the coach could not propose (no ids in the data) gets
+    // the plain CHANGE PLAN answer and a button.
+    const askedForPermanent = /\b(permanent(ly)?|for good|every (week|time)|from now on|in my plan|to my plan)\b/i.test(message) && !preparedActions.some(({ action }) => action.scope === "permanent");
+    const result = {
+      message: cleaned.message,
+      insights: (answer.insights || []).filter((insight) => !cleanCoachReply(insight?.text).planChangeHint).slice(0, 3),
+      actions: storedActions || [],
+      activePain: activePain.length > 0,
+      planChangeHint: cleaned.planChangeHint || askedForPermanent,
+    };
+    if (askedForPermanent && !cleaned.planChangeHint && !result.message.includes("CHANGE PLAN")) result.message = `${result.message} ${PLAN_CHANGE_FROM_CHAT}`.trim();
     await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: result.message, structured_payload: result });
     return Response.json({ ...result, conversationId, usedHistoricalRetrieval });
   } catch (error) {

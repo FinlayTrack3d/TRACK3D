@@ -9,7 +9,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { activeWorkoutLogIds, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
+import { activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -17,7 +17,7 @@ import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/wor
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
-import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, unloggedFoodFromLog, mealPlanTargetCheck, nextReviewStep, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
 async function chatHeaders() {
@@ -400,7 +400,7 @@ function ScoreRing({ score, size = 108, max = 100 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ dayContext, area = "dashboard", context, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
+function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -460,7 +460,7 @@ function AICoach({ dayContext, area = "dashboard", context, title, introduction,
         setActions((data.actions || []).map(action => ({ ...action, type: action.type || action.action_type })));
         setPainActive(Boolean(data.activePain));
         setPainNote("");
-        setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet." }]);
+        setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet.", planChangeHint: Boolean(data.planChangeHint) }]);
         setLoading(false);
         setTimeout(scroll, 50);
         return;
@@ -592,6 +592,10 @@ function AICoach({ dayContext, area = "dashboard", context, title, introduction,
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {(compact && !expanded ? messages.filter(m => !m.hidden).slice(-2) : messages.filter(m => !m.hidden)).map((m, i) => {
               if (m.role === "note") return <div key={i} data-testid="coach-note" style={{ textAlign: "center", fontSize: 9, color: "#6F8792", letterSpacing: 1, margin: "6px 0" }}>{m.content}</div>;
+              const changePlanButton = m.planChangeHint && onOpenChangePlan ? <button key={`cp-${i}`} className="t3d-btn t3d-btn-sm" style={{ margin: "0 0 8px", fontSize: 8 }} onClick={onOpenChangePlan}>OPEN CHANGE PLAN</button> : null;
+              if (changePlanButton && i === messages.filter(message => !message.hidden).length - 1) {
+                return <div key={i}><div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}><div className="t3d-ai-tag" style={{ color: NEON }}>AI</div><span style={{ color: "#E0EAF0", fontSize: 11, whiteSpace: "pre-wrap" }}>{cleanAiText(m.content)}</span></div>{changePlanButton}</div>;
+              }
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets|add_sets|log_set)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
               // Bigger, structured changes (a whole session/programme rewrite) travel as
               // JSON in a fenced block rather than the pipe-delimited marker above, which
@@ -4946,10 +4950,11 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
     fetchDailyActivity(user, 7).then(setActivity7);
     Promise.all([
       supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
-      supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
+      supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food,off_plan_calories").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
-      supabase.from("workout_logs").select("session_name,date,in_progress,total_volume,duration_mins").eq("user_id", user.id).eq("date", today),
+      // This week's workouts (with sets), so the coach knows what was lifted.
+      supabase.from("workout_logs").select("id,session_name,date,in_progress,total_volume,duration_mins,exercises").eq("user_id", user.id).gte("date", shiftDateKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7))).lte("date", today),
       supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
     ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
       loaded: true,
@@ -4960,8 +4965,9 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       nutritionPlan: nutritionPlan.data || null,
       sessions: split.data?.sessions || [],
       // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
-      workouts: (workouts.data || []).filter(log => !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
-      activeWorkout: (workouts.data || []).find(log => log.in_progress) || null,
+      workouts: (workouts.data || []).filter(log => log.date === today && !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
+      weekWorkouts: (workouts.data || []).filter(log => !log.in_progress),
+      activeWorkout: (workouts.data || []).find(log => log.date === today && log.in_progress) || null,
     }));
   }, [user, today]);
 
@@ -4984,7 +4990,18 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
   const coachDayContext = [
     `- Morning routine: ${morningSkipped ? "skipped today" : morningDone ? `done, score ${todayData.morning?.score ?? 0}/10` : morningInProgress ? "started, not finished" : "not logged"}`,
     `- Workout: ${activeWorkout ? `${activeWorkout.session_name} in progress` : completedWorkoutNames.length ? `completed ${completedWorkoutNames.join(" + ")}` : todaySession ? `${todaySession.name} scheduled, not logged yet` : todayData.sessions.length ? "no session scheduled today" : "no training plan set up"}`,
-    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (target ${calorieGoal} kcal${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
+    ...todayData.workouts.flatMap(log => {
+      const lines = bestSetsSummary(log.exercises || []);
+      const pbs = workoutPersonalBests(log.exercises || []);
+      return [
+        ...(lines.length ? [`- ${log.session_name} lifts: ${lines.join("; ")}`] : []),
+        `- ${log.session_name} PBs: ${pbs.length ? pbs.map(pb => `${pb.exercise} ${pb.weight}kg × ${pb.reps} (${pb.label})`).join("; ") : "none today"}`,
+      ];
+    }),
+    `- Workouts this week: ${(() => { const week = weeklyWorkoutProgress(todayData.weekWorkouts || [], today, todayData.sessions, null, { countCurrent: false }); return week.planned ? `${week.completed} of ${week.planned} planned` : `${week.completed}`; })()}`,
+    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (app target ${calorieGoal} kcal${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
+    ...(todayData.nutrition?.off_plan_food && Number(todayData.nutrition.off_plan_calories) > 0 ? [`- Off-plan food: ${todayData.nutrition.off_plan_food} (${todayData.nutrition.off_plan_calories} kcal, included above)`] : []),
+    ...(unloggedFoodFromLog(todayData.nutrition).length ? [`- Food eaten with no calories entered (the calorie total above is incomplete): ${unloggedFoodFromLog(todayData.nutrition).join("; ")}`] : []),
     `- Habits: ${habits.length ? `${done}/${habits.length} done${habits.some(h => h.done) ? ` (done: ${habits.filter(h => h.done).map(h => h.name).join(", ")})` : ""}${habits.some(h => !h.done) ? ` (pending: ${habits.filter(h => !h.done).map(h => h.name).join(", ")})` : ""}` : "none set up"}`,
     `- Daily score: ${score}/100 (calculated from the items above)`,
   ].join("\n");
@@ -5048,6 +5065,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
           {calorieGoal ? <>
             <div className="t3d-sval" style={{ color: NEON2 }}>{caloriesEaten.toLocaleString()} <span style={{ fontSize: 12, letterSpacing: 1 }}>KCAL</span></div>
             <div className="t3d-slabel">EATEN OF {calorieGoal.toLocaleString()} TARGET</div>
+            {unloggedFoodFromLog(todayData.nutrition).length > 0 && <div data-testid="kcal-excludes" style={{ fontSize: 9, color: "#FFB547", marginTop: 4 }}>Excludes: {unloggedFoodFromLog(todayData.nutrition).join(", ")}</div>}
             <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${Math.min((caloriesEaten/calorieGoal)*100,100)}%`, background: "linear-gradient(90deg,#00C8FF,#0080FF)" }} /></div>
           </> : <>
             <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6 }}>Set your daily calorie target first.</div>
@@ -6210,6 +6228,7 @@ function withPlanApproval(sessions, now = new Date()) {
         onConsumedPrompt={() => setWeekReviewPrompt(null)}
         coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
+        onOpenChangePlan={() => { setPlanChangeMessages([]); setPlanChangeInput(""); setPlanChangeRecommendation(null); setPlanChangeOpen(true); setView("home"); }}
       />
     </div>
   );
@@ -7320,10 +7339,10 @@ function withPlanApproval(sessions, now = new Date()) {
           Nothing changes until you approve it. Completed workouts and exercise records remain in your history.
         </div>
         <div role="log" aria-live="polite" style={{ maxHeight: 290, overflowY: "auto", marginBottom: 12 }}>
-          {planChangeMessages.map((message, index) => (
+          {(planChangeMessages.length ? planChangeMessages : planChangeIntro).map((message, index) => (
             <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.18)" : "rgba(0,255,178,.12)"}` }}>
               <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-              <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.content}</span>
+              <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
             </div>
           ))}
           {planChangeLoading && <div style={{ color: "#6F8792", fontSize: 10, padding: 8 }}>Coach is reviewing your plan and history...</div>}
@@ -8228,32 +8247,50 @@ function calcMacros(weight, goal, activityLevel) {
 
 
 // ─── AI Tweaks Box ────────────────────────────────────────────────────────────
+// Asks the coach for a meal plan, adds it up in code and checks it against
+// its targets (calories within 5%, protein within 10%). If it is off, asks
+// once more with the gap stated. Returns { meals, check }; check.ok is false
+// when the plan is still off, so the screen can say so.
+async function requestMealPlan(area, content, targets) {
+  const messages = [{ role: "user", content }];
+  let best = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({ area, responseTokens: 2500, messages }) });
+    const reply = await readCoachReply(res);
+    const meals = extractJsonObject(reply)?.meals;
+    if (!Array.isArray(meals) || !meals.length) {
+      messages.push({ role: "assistant", content: reply }, { role: "user", content: "That could not be read. Return the full plan as JSON only." });
+      continue;
+    }
+    const check = mealPlanTargetCheck(meals, targets);
+    best = { meals, check };
+    if (check.ok) return best;
+    messages.push({ role: "assistant", content: reply }, { role: "user", content: `Your plan adds up to ${check.totals.calories} kcal and ${check.totals.protein} g protein, but the targets are ${targets.calories} kcal and ${targets.protein} g protein (${check.problems.join("; ")}). Adjust the portions so calories are within 5% and protein within 10%, and return the full plan as JSON only.` });
+  }
+  if (!best) throw new Error("the meal plan could not be read");
+  return best;
+}
+
+const mealPlanWarningText = (check, targets) => `This plan adds up to ${check.totals.calories.toLocaleString()} kcal and ${check.totals.protein} g protein, which is off your targets of ${Number(targets.calories).toLocaleString()} kcal and ${targets.protein} g. Adjust the portions or ask for a tweak before saving.`;
+
 function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDayPlan, macros, goal, mealsPerDay, aiNutritionAnswers }) {
   const [tweakInput, setTweakInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [restLoading, setRestLoading] = useState(false);
   const [tweakDone, setTweakDone] = useState(false);
   const [restDayDone, setRestDayDone] = useState(restDayMeals.length > 0);
+  const [planWarning, setPlanWarning] = useState("");
 
   const applyTweak = async () => {
     if (!tweakInput.trim() || loading) return;
     setLoading(true);
+    setPlanWarning("");
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          area: "meal_plan_tweak",
-          messages: [{ role: "user", content: `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan keeping similar calories (${macros.calories} kcal target) and protein (${macros.protein}g target).` }],
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "";
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.meals) { setMeals(parsed.meals); setTweakDone(true); setTweakInput(""); }
-      }
-    } catch (e) { console.error(e); }
+      const targets = { calories: macros.calories, protein: macros.protein };
+      const result = await requestMealPlan("meal_plan_tweak", `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan. Targets: ${macros.calories} kcal and ${macros.protein} g protein.`, targets);
+      setMeals(result.meals); setTweakDone(true); setTweakInput("");
+      if (!result.check.ok) setPlanWarning(mealPlanWarningText(result.check, targets));
+    } catch (e) { console.error(e); setPlanWarning("Couldn't update the plan just now. Please try again."); }
     setLoading(false);
   };
 
@@ -8261,21 +8298,11 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
     setRestLoading(true);
     try {
       const restCals = Math.round(macros.calories * 0.85);
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          area: "rest_day_plan",
-          messages: [{ role: "user", content: `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${meals.map(m=>m.name).join(", ")}` }],
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "";
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.meals) { setRestDayMeals(parsed.meals); setRestDayDone(true); }
-      }
-    } catch (e) { console.error(e); }
+      const targets = { calories: restCals, protein: macros.protein };
+      const result = await requestMealPlan("rest_day_plan", `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${meals.map(m=>m.name).join(", ")}`, targets);
+      setRestDayMeals(result.meals); setRestDayDone(true);
+      setPlanWarning(result.check.ok ? "" : `Rest day: ${mealPlanWarningText(result.check, targets)}`);
+    } catch (e) { console.error(e); setPlanWarning("Couldn't build the rest day plan just now. Please try again."); }
     setRestLoading(false);
   };
 
@@ -8286,6 +8313,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>WANT TO CHANGE ANYTHING?</div>
         <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>e.g. "swap salmon for chicken", "remove eggs", "add more carbs at lunch"</div>
         {tweakDone && <div style={{ fontSize: 10, color: NEON, marginBottom: 8 }}>✓ Plan updated!</div>}
+        {planWarning && <div role="alert" data-testid="meal-plan-warning" style={{ fontSize: 10, color: "#FFB547", marginBottom: 8, lineHeight: 1.5 }}>{planWarning}</div>}
         <div style={{ display: "flex", gap: 8 }}>
           <input className="t3d-ai-input" placeholder="Describe your changes..." value={tweakInput}
             onChange={e => { setTweakInput(e.target.value); setTweakDone(false); }}
@@ -8425,6 +8453,10 @@ function Nutrition({ user, userSessions }) {
   const [aiFeedback, setAiFeedback] = useState("");
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
   const [aiFeedbackError, setAiFeedbackError] = useState("");
+  const [mealPlanWarning, setMealPlanWarning] = useState(""); // AI meal plan off its own targets
+  const [reviewSkipAnswered, setReviewSkipAnswered] = useState(false); // DAY REVIEW skips meals already logged
+  const [foodEstimate, setFoodEstimate] = useState(null);
+  const [foodEstimateStatus, setFoodEstimateStatus] = useState("");
   const [todayLogged, setTodayLogged] = useState(false);
   const [editingHistoryIdx, setEditingHistoryIdx] = useState(null);
   const [planSaveError, setPlanSaveError] = useState(false);
@@ -8590,6 +8622,26 @@ function Nutrition({ user, userSessions }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mealResults, view]);
 
+  // Asks the coach for per-item ranges using the user's own amounts; the
+  // totals are added up in code.
+  const estimateUnloggedFood = async items => {
+    setFoodEstimateStatus("ESTIMATING...");
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: await chatHeaders(),
+        body: JSON.stringify({ area: "food_estimate", messages: [{ role: "user", content: `Estimate this food exactly as I described it:\n${items.map(item => `- ${item.food}`).join("\n")}` }] }),
+      });
+      const parsed = extractJsonObject(await readCoachReply(res));
+      const estimate = sumFoodEstimate(parsed?.items);
+      if (!estimate.items.length) throw new Error("no items in the estimate");
+      setFoodEstimate(estimate);
+      setFoodEstimateStatus("");
+    } catch (error) {
+      console.log("Food estimate error:", error?.message);
+      setFoodEstimateStatus("Couldn't estimate that just now. You can type the calories in the off-plan step instead.");
+    }
+  };
+
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
     setAiFeedbackError("");
@@ -8604,7 +8656,7 @@ function Nutrition({ user, userSessions }) {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
           area: "nutrition_day",
-          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
+          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; return result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
         }),
       });
       setAiFeedback(await readCoachReply(res));
@@ -8622,23 +8674,13 @@ function Nutrition({ user, userSessions }) {
       const q = AI_NUTRITION_QUESTIONS.find(q => q.id === k);
       return `${q?.q}: ${v}`;
     }).join("\n");
+    setMealPlanWarning("");
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          area: "meal_plan_build",
-          messages: [{ role: "user", content: `Build a ${mealsPerDay} meal daily plan. Targets: ${macros.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats. User preferences:\n${context}` }],
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "";
-      // More robust JSON extraction
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        setPlanMeals(parsed.meals || []);
-      }
-    } catch (e) { console.error("AI meals error:", e); }
+      const targets = { calories: macros.calories, protein: macros.protein };
+      const result = await requestMealPlan("meal_plan_build", `Build a ${mealsPerDay} meal daily plan. Targets: ${macros.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats. User preferences:\n${context}`, targets);
+      setPlanMeals(result.meals);
+      if (!result.check.ok) setMealPlanWarning(mealPlanWarningText(result.check, targets));
+    } catch (e) { console.error("AI meals error:", e); setMealPlanWarning("Couldn't build your meal plan just now. Please try again."); }
     setAiMealLoading(false);
     setShowAiQuestions(false);
   };
@@ -8697,6 +8739,9 @@ function Nutrition({ user, userSessions }) {
       const targetCals = plan?.daily_calories || 2000;
       const diff = totalCals - targetCals;
       const completedMeals = totals.completedMeals;
+      // Food eaten without calories makes the total incomplete: never call
+      // that day under target.
+      const unlogged = unloggedFood(meals, mealResults, offPlanFood, offPlanCals);
 
       return (
         <div className="t3d-fade">
@@ -8708,14 +8753,36 @@ function Nutrition({ user, userSessions }) {
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff)<100?NEON:diff>0?NEON3:"#FF8C00" }}>{totalCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>KCAL TOTAL</div></div>
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=plan?.protein_target?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>PROTEIN</div></div>
             </div>
+            {unlogged.length > 0 ? (
+              <div data-testid="total-excludes" style={{ background: "rgba(255,181,71,.06)", border: "1px solid rgba(255,181,71,.3)", borderRadius: 8, padding: 16, marginBottom: 20, textAlign: "left" }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#FFB547", letterSpacing: 2, marginBottom: 8 }}>TOTAL IS INCOMPLETE</div>
+                <div style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>Total excludes: {unlogged.map(item => item.food).join(", ")}. Add calories for it, or let the coach estimate it.</div>
+                {foodEstimate && (
+                  <div data-testid="food-estimate" style={{ marginTop: 10, fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>
+                    {foodEstimate.items.map(item => <div key={item.name}>- {item.name}{item.amount ? ` (${item.amount})` : ""}: {item.caloriesLow}–{item.caloriesHigh} kcal, {item.proteinLow}–{item.proteinHigh} g protein</div>)}
+                    <div style={{ color: "#FFB547", marginTop: 4 }}>Estimate: {foodEstimate.caloriesLow.toLocaleString()}–{foodEstimate.caloriesHigh.toLocaleString()} kcal, {foodEstimate.proteinLow}–{foodEstimate.proteinHigh} g protein</div>
+                    <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8 }} onClick={() => {
+                      setOffPlanFood([offPlanFood, ...unlogged.filter(item => item.meal !== "Off plan").map(item => item.food)].filter(Boolean).join("; "));
+                      setOffPlanCals(String((Number(offPlanCals) || 0) + foodEstimate.caloriesMid));
+                      setFoodEstimate(null);
+                      setFoodEstimateStatus(`Added ${foodEstimate.caloriesMid.toLocaleString()} kcal (the middle of the estimate).`);
+                    }}>ADD ~{foodEstimate.caloriesMid.toLocaleString()} KCAL TO TODAY</button>
+                  </div>
+                )}
+                {!foodEstimate && <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} disabled={foodEstimateStatus === "ESTIMATING..."} onClick={() => estimateUnloggedFood(unlogged)}>{foodEstimateStatus === "ESTIMATING..." ? "ESTIMATING..." : "ESTIMATE IT"}</button>}
+                {foodEstimateStatus && foodEstimateStatus !== "ESTIMATING..." && <div role="status" style={{ fontSize: 10, color: "#FFB547", marginTop: 6 }}>{foodEstimateStatus}</div>}
+              </div>
+            ) : (
             <div style={{ background: diff>200?"rgba(255,45,120,.06)":diff<-200?"rgba(255,140,0,.06)":"rgba(0,255,178,.06)", border: `1px solid ${diff>200?"rgba(255,45,120,.2)":diff<-200?"rgba(255,140,0,.2)":"rgba(0,255,178,.2)"}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: diff>200?NEON3:diff<-200?"#FF8C00":NEON, letterSpacing: 2, marginBottom: 8 }}>
                 {diff>200?"OVER TARGET":diff<-200?"UNDER TARGET":"ON TARGET"} {diff>0?`+${diff}`:diff} KCAL
               </div>
               <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
-                {diff>200?`${diff} extra kcal. Over 7 days this pattern = ~${Math.round(diff*7/7700*10)/10}kg gained per week.`:diff<-200?`${Math.abs(diff)} kcal under target. Consistent undereating can slow metabolism and impact muscle.`:"Great calorie control today! Consistency drives results."}
+                {diff>200?`${diff} extra kcal. Over 7 days this pattern = ~${Math.round(diff*7/7700*10)/10}kg gained per week.`:diff<-200?`${Math.abs(diff)} kcal under target. Regularly eating well under target makes it harder to keep muscle and train well.`:"Close to your calorie target today."}
               </div>
             </div>
+            )}
+            {foodEstimateStatus && unlogged.length === 0 && <div role="status" style={{ fontSize: 10, color: NEON, marginBottom: 12 }}>{foodEstimateStatus}</div>}
             {offPlanFood && (
               <div style={{ background: "rgba(255,140,0,.05)", border: "1px solid rgba(255,140,0,.2)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", textAlign: "left" }}>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FF8C00", letterSpacing: 2, marginBottom: 4 }}>OFF PLAN — EXTRA ON TOP</div>
@@ -8743,7 +8810,15 @@ function Nutrition({ user, userSessions }) {
             <div style={{ textAlign: "center", padding: "16px 0" }}>
               <div style={{ fontSize: 32, marginBottom: 12 }}>🍕</div>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0", letterSpacing: 2, marginBottom: 16 }}>BE HONEST</div>
-              <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>Did you eat anything off plan today?</div>
+              {(() => {
+                const noted = unloggedFood(meals, mealResults, "", 0);
+                return noted.length ? (
+                  <div data-testid="already-noted" style={{ fontSize: 11, color: "#8AABB8", marginBottom: 14, lineHeight: 1.6, textAlign: "left" }}>
+                    Already noted: {noted.map(item => `${item.meal} — ${item.food}`).join("; ")}.
+                  </div>
+                ) : null;
+              })()}
+              <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>{unloggedFood(meals, mealResults, "", 0).length ? "Anything else off plan today?" : "Did you eat anything off plan today?"}</div>
 
               {/* Off plan input first */}
               <div style={{ background: SURFACE2, borderRadius: 8, padding: 16, marginBottom: 16, textAlign: "left" }}>
@@ -8755,7 +8830,7 @@ function Nutrition({ user, userSessions }) {
               <div style={{ display: "flex", gap: 10 }}>
                 <button className="t3d-btn" style={{ flex: 1, padding: 14, background: "rgba(0,255,178,.1)", borderColor: NEON, color: NEON }}
                   onClick={() => { setOffPlanFood(""); setOffPlanCals(""); setReviewStep(s => s+1); }}>
-                  ✓ Clean day
+                  {unloggedFood(meals, mealResults, "", 0).length ? "✓ Nothing else" : "✓ Clean day"}
                 </button>
                 <button className="t3d-btn" style={{ flex: 1, padding: 14 }} disabled={!offPlanFood}
                   onClick={() => setReviewStep(s => s+1)}>
@@ -8790,8 +8865,8 @@ function Nutrition({ user, userSessions }) {
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: "Skipped" } })); setReviewStep(step => step + 1); }}>SKIPPED</button>
-                <button className="t3d-btn" style={{ flex: 2 }} disabled={!flexibleResult.calories} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: true } })); setReviewStep(step => step + 1); }}>LOG MEAL →</button>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: "Skipped" } })); setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered)); }}>SKIPPED</button>
+                <button className="t3d-btn" style={{ flex: 2 }} disabled={!flexibleResult.calories} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: true } })); setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered)); }}>LOG MEAL →</button>
               </div>
             </div>
           </div>
@@ -8823,7 +8898,7 @@ function Nutrition({ user, userSessions }) {
             </div>
             <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 16 }}>Did you have this exactly as planned?</div>
             <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
-              <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(s => s+1); }}>✓</button>
+              <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered)); }}>✓</button>
               <button className="t3d-cross-btn" onClick={() => setMealResults(r => ({ ...r, [reviewStep]: { completed: false, note: typeof r[reviewStep] === "object" ? r[reviewStep].note || "" : "" } }))}>✗</button>
             </div>
             {mealWasMissed(mealResults[reviewStep]) && (
@@ -8831,7 +8906,7 @@ function Nutrition({ user, userSessions }) {
                 <label style={{ fontSize: 10, color: "#8AABB8" }}>HOW DID IT NOT GO TO PLAN?
                   <textarea className="t3d-input" rows={3} autoFocus placeholder="e.g. ate something different, skipped it, portion changed..." value={typeof mealResults[reviewStep] === "object" ? mealResults[reviewStep].note || "" : ""} onChange={event => setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: event.target.value } }))} style={{ marginTop: 7 }} />
                 </label>
-                <button className="t3d-btn" style={{ width: "100%", marginTop: 9 }} onClick={() => setReviewStep(step => step + 1)}>CONTINUE →</button>
+                <button className="t3d-btn" style={{ width: "100%", marginTop: 9 }} onClick={() => setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered))}>CONTINUE →</button>
               </div>
             )}
           </div>
@@ -9071,6 +9146,7 @@ function Nutrition({ user, userSessions }) {
 
                   {aiMealLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#E0EAF0" }}>🤖 Building your meal plan...</div>}
                   {/* AI tweaks box */}
+                  {mealPlanWarning && <div role="alert" data-testid="meal-plan-warning" style={{ fontSize: 11, color: "#FFB547", margin: "10px 0", lineHeight: 1.5 }}>{mealPlanWarning}</div>}
                   {mealBuildMode === "ai" && currentMeals.length > 0 && !aiMealLoading && (
                     <AiTweaksBox
                       meals={currentMeals}
@@ -9404,14 +9480,14 @@ function Nutrition({ user, userSessions }) {
                 <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2, marginBottom: 4 }}>TODAY LOGGED</div>
                 <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12 }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
-                <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => { setMealResults(todayLog?.meals_completed||{}); setOffPlanFood(todayLog?.off_plan_food||""); setOffPlanCals(String(todayLog?.off_plan_calories||"")); setReviewStep(0); setAiFeedback(""); setView("review"); }}>EDIT TODAY</button>
+                <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => { setMealResults(todayLog?.meals_completed||{}); setOffPlanFood(todayLog?.off_plan_food||""); setOffPlanCals(String(todayLog?.off_plan_calories||"")); setReviewSkipAnswered(false); setFoodEstimate(null); setFoodEstimateStatus(""); setReviewStep(0); setAiFeedback(""); setView("review"); }}>EDIT TODAY</button>
               </>
             ) : (
               <>
                 <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, letterSpacing: 1 }}>READY TO REVIEW YOUR DAY?</div>
                 <button className="t3d-big-btn"
                   style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
-                  onClick={() => { setReviewStep(0); setAiFeedback(""); setView("review"); }}>
+                  onClick={() => { setReviewSkipAnswered(true); setFoodEstimate(null); setFoodEstimateStatus(""); setReviewStep(nextReviewStep(activeMeals, mealResults, -1, true)); setAiFeedback(""); setView("review"); }}>
                   🥗 DAY REVIEW
                 </button>
               </>
@@ -9508,6 +9584,8 @@ function Nutrition({ user, userSessions }) {
                             setMealResults(log.meals_completed||{});
                             setOffPlanFood(log.off_plan_food||"");
                             setOffPlanCals(String(log.off_plan_calories||""));
+                            setReviewSkipAnswered(false);
+                            setFoodEstimate(null);
                             setReviewStep(plan.meals.length+1);
                             setView("review");
                           }}>EDIT</button>

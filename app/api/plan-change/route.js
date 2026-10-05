@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
+import { buildCoachSystem } from "../../../lib/coaching/system.js";
 
 const prescriptionFields = {
   sets: z.coerce.number().int().min(1).max(10).optional(),
@@ -66,7 +67,7 @@ export async function POST(request) {
     const structuredHistory = historyError ? [] : (historyData || []);
     if (historyError) console.warn("Plan change history fallback:", historyError.message);
 
-    const system = `You are TRACK3D's plan-change coach. Your job is to prevent unnecessary programme resets while respecting the user's goals and preferences.
+    const planChangeInstructions = `You are TRACK3D's plan-change coach. Your job is to prevent unnecessary programme resets while respecting the user's goals and preferences.
 
 First determine whether the problem needs: (1) a small targeted change to session days, exercises, sets, or reps; (2) clarification with one concise question; or (3) a full plan rebuild because the goal, training frequency, equipment, limitations, or overall structure has materially changed. Prefer targeted changes when the issue is isolated. A change to which weekdays are available normally needs update_session_days, not a full rebuild, unless the number of weekly sessions or recovery structure must also change. Do not recommend a full rebuild merely because one exercise is disliked or one prescription needs adjusting.
 
@@ -75,7 +76,9 @@ Use the current plan and training history. Never erase or rewrite completed work
 Only propose exact targeted changes when the user has supplied enough information or explicitly accepted your recommendation. Use exact session and exercise names from CURRENT PLAN. Rep prescriptions may be a string such as "8-12" or one string per set. A replacement is a different movement; a rename is only a label correction for the same movement, and preserves its history alias. A full rebuild is never applied automatically: recommend it and explain why.
 
 Return only JSON:
-{"message":"brief collaborative reply, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"update_session_days|update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","days":["MON"],"exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
+{"message":"brief collaborative reply in plain text, at most 120 words, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"update_session_days|update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","days":["MON"],"exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
+    const { data: profile } = await supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", user.id).maybeSingle();
+    const system = buildCoachSystem({ areaInstructions: planChangeInstructions, kind: "conversation", personality: profile?.personality, experienceLevel: profile?.experience_level });
 
     const provider = await postAnthropicMessages({
         model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",

@@ -59,3 +59,11 @@ test("plan change requests are recognised so they go through approve-and-save", 
   assert.equal(isPlanChangeRequest("I want to drop one exercise from Push A"), true);
   assert.equal(isPlanChangeRequest("Dumbbell Bench Press change from 3 sets to 4 sets in upper a"), true);
 });
+
+test("the review's training questions are answered; rebuild and shorten requests still go to Change Plan", async () => {
+  const { isPlanChangeRequest } = await import("../lib/coaching/plan-change.js");
+  assert.equal(isPlanChangeRequest("how many hard sets per week am I getting for chest and back, how close to failure should I train, and when should I deload?"), false);
+  assert.equal(isPlanChangeRequest("I think my plan needs a deload"), false);
+  assert.equal(isPlanChangeRequest("Rebuild my plan for 3 days a week"), true);
+  assert.equal(isPlanChangeRequest("Shorten Push A to 40 minutes"), true);
+});

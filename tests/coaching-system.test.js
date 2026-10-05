@@ -48,3 +48,11 @@ test("experience answers map to a level", () => {
   assert.equal(normaliseExperience("advanced"), "advanced");
   assert.equal(normaliseExperience("not sure"), null);
 });
+
+test("internal field names never reach the user", async () => {
+  const { cleanCoachReply, PLAN_CHANGE_FROM_CHAT } = await import("../lib/coaching/system.js");
+  const leaked = cleanCoachReply("I need a programme_exercise_id to do it. The current programme structure doesn't include those identifiers.");
+  assert.equal(leaked.message, PLAN_CHANGE_FROM_CHAT);
+  assert.equal(leaked.planChangeHint, true);
+  assert.deepEqual(cleanCoachReply("Drop to 18 kg for the last set."), { message: "Drop to 18 kg for the last set.", planChangeHint: false });
+});
