@@ -2487,12 +2487,6 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               <div key={key} style={{ padding: "14px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <label style={{ display: "block", fontSize: 12 }}>
                   {taskIcon(step)}{step.name}
-                  {step.id === "weight" && (
-                    <div style={{ marginTop: 8 }}>
-                      <WeightEntry kgValue={typeof value === "string" || typeof value === "number" ? String(value) : ""}
-                        onKgChange={kg => setEditSubmissionData(data => ({ ...data, [key]: kg }))} unit={weightUnit} onUnitChange={chooseWeightUnit} />
-                    </div>
-                  )}
                   {["sleep", "number"].includes(step.type) && step.id !== "weight" && (
                     <input className="t3d-input" style={{ marginTop: 8 }}
                       type={step.type === "number" ? "number" : "text"}
@@ -2502,6 +2496,12 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       onChange={event => setEditSubmissionData(data => ({ ...data, [key]: event.target.value }))} />
                   )}
                 </label>
+                {step.id === "weight" && (
+                  <div style={{ marginTop: 8 }}>
+                    <WeightEntry kgValue={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+                      onKgChange={kg => setEditSubmissionData(data => ({ ...data, [key]: kg }))} unit={weightUnit} onUnitChange={chooseWeightUnit} />
+                  </div>
+                )}
                 {step.type === "tick" && (
                   <div role="group" aria-label={step.name} style={{ display: "flex", gap: 8, marginTop: 8 }}>
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value === true} style={toggleStyle(value === true)}
