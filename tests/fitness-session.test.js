@@ -131,3 +131,9 @@ test("the stale-workout cleanup never finalises the workout in progress", () => 
   assert.deepEqual(activeWorkoutLogIds({ draft: abandoned, now }), [], "an old abandoned draft is not protected");
   assert.deepEqual(activeWorkoutLogIds({ now }), []);
 });
+
+test("an empty finished workout is not counted towards the week", () => {
+  const history = [{ id: 1, date: "2026-10-05", total_volume: 3000 }];
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9, { countCurrent: false }), { completed: 1, planned: 0 });
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9), { completed: 2, planned: 0 });
+});

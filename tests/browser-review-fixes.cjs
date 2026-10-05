@@ -1,10 +1,12 @@
 // Browser regression checks. Run against a production build: npm run start -- --port 3123
 // then: node tests/browser-review-fixes.cjs <scenario>   (all remote services are mocked)
 // Browser checks for review fixes 3-6. Scenarios:
-//  movefail, editfail, approvefail, aisavefail, aisaveok, routinefail, routineok, rollover, tz
+//  movefail, editfail, approvefail, aisavefail, aisaveok, routinefail, routineok, rollover, tz,
+//  photodelete, pastscore, createdat, habitretry, emptyworkout, importbig, question
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'movefail';
+const shiftKey = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
 const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(new Date(Date.now() + offset * 86400000));
 (async () => {
   const browser = await chromium.launch({ headless: true });
@@ -34,6 +36,9 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
   const failSplit = ['movefail', 'editfail', 'approvefail', 'aisavefail'].includes(scenario);
   const writes = [];
   const reads = [];
+  const storageCalls = [];
+  let habitDeleteFails = scenario === 'habitretry';
+  const yesterday = shiftKey(today, -1);
   await context.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.hostname === 'localhost') {
@@ -45,12 +50,17 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
       return route.continue();
     }
     if (url.pathname.includes('/auth/v1/')) return route.fulfill({ json: user });
-    if (url.pathname.includes('/storage/')) return route.fulfill({ json: {} });
+    if (url.pathname.includes('/storage/')) {
+      storageCalls.push({ method: req.method(), path: url.pathname, body: req.postData() });
+      if (url.pathname.includes('/object/list/')) return route.fulfill({ json: [{ name: 'front.jpg' }, { name: 'side.jpg' }] });
+      return route.fulfill({ json: [] });
+    }
     if (!url.pathname.includes('/rest/v1/')) return route.abort();
     const table = url.pathname.split('/').pop();
     const single = req.headers().accept?.includes('vnd.pgrst.object');
     if (req.method() !== 'GET') {
       writes.push({ table, method: req.method(), body: req.postData(), url: req.url() });
+      if (table === 'habits' && req.method() === 'DELETE' && habitDeleteFails) return route.fulfill({ status: 500, json: { message: 'delete failed' } });
       if (table === 'workout_logs' && req.method() === 'POST') return route.fulfill({ status: 201, json: single ? { id: 'w1' } : [{ id: 'w1' }] });
       if (table === 'workout_splits' && failSplit) return route.fulfill({ status: 500, json: { message: 'database unavailable' } });
       if (table === 'morning_routines' && scenario === 'routinefail') return route.fulfill({ status: 500, json: { message: 'database unavailable' } });
@@ -60,7 +70,10 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     reads.push(decodeURIComponent(req.url()));
     let rows = [];
     if (table === 'workout_splits') rows = split ? [split] : [];
-    if (table === 'morning_routines' && (scenario.startsWith('routine') || scenario === 'tz')) rows = [routine];
+    if (table === 'morning_routines' && (scenario.startsWith('routine') || ['tz', 'photodelete', 'pastscore', 'createdat'].includes(scenario))) rows = [routine];
+    if (table === 'morning_checkins' && ['photodelete', 'pastscore'].includes(scenario)) rows = [{ user_id: user.id, date: yesterday, score: 6, data: { sleep: '7h', 'custom-1': false, checkin: true, photos: { front: `${user.id}/${yesterday}/front.jpg`, side: 'skipped', back: 'skipped' } } }];
+    if (table === 'habits' && scenario === 'habitretry') rows = [{ id: 'h1', user_id: user.id, name: 'Drink water', category: 'health', created_at: '2026-01-01T00:00:00Z' }, { id: 'h2', user_id: user.id, name: 'Read', category: 'growth', created_at: '2026-01-01T00:00:00Z' }];
+    if (table === 'workout_logs' && scenario === 'emptyworkout' && url.searchParams.get('in_progress') !== 'eq.true') rows = [{ id: 'old', date: today, session_name: 'Pull A', total_volume: 4000, duration_mins: 40, in_progress: false, exercises: [], created_at: new Date().toISOString() }];
     if (table === 'nutrition_plans' && scenario === 'tz') rows = [{ user_id: user.id, daily_calories: 2500, protein_target: 180, meals: [{ name: 'Breakfast', calories: 600, protein: 40 }], rest_day_meals: [], meal_library: [], weekly_meal_plan: {} }];
     if (table === 'nutrition_logs' && scenario === 'tz') rows = [{ user_id: user.id, date: '2026-10-06', total_calories: 2500, total_protein: 180 }];
     if (table === 'morning_checkins' && scenario === 'tz') rows = [{ user_id: user.id, date: '2026-10-04', score: 7, data: {} }, { user_id: user.id, date: '2026-10-05', score: 8, data: {} }];
@@ -191,6 +204,84 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     } else {
       await page.getByText('✓ Routine saved').waitFor();
     }
+  } else if (scenario === 'photodelete') {
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.getByText('MORNING HISTORY').click();
+    await page.getByText('Completed', { exact: true }).first().click();
+    await page.getByRole('button', { name: 'DELETE THIS DAY' }).click();
+    await page.getByRole('button', { name: 'DELETE', exact: true }).click();
+    await page.waitForTimeout(1000);
+    assert(writes.some(w => w.table === 'morning_checkins' && w.method === 'DELETE'), 'row deleted');
+    const list = storageCalls.find(c => c.path.includes('/object/list/checkin-photos'));
+    assert(list && JSON.parse(list.body).prefix === `${user.id}/${yesterday}`, 'listed the day folder: ' + JSON.stringify(storageCalls));
+    const remove = storageCalls.find(c => c.method === 'DELETE');
+    assert.deepEqual(JSON.parse(remove.body).prefixes, [`${user.id}/${yesterday}/front.jpg`, `${user.id}/${yesterday}/side.jpg`]);
+  } else if (scenario === 'pastscore') {
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.getByText('MORNING HISTORY').click();
+    await page.getByText('Completed', { exact: true }).first().click();
+    await page.getByRole('button', { name: 'EDIT THIS DAY' }).click();
+    await page.getByRole('button', { name: 'SAVE CHANGES' }).click();
+    await page.waitForTimeout(1000);
+    const saved = writes.filter(w => w.table === 'morning_checkins' && w.method === 'POST').pop();
+    const body = JSON.parse(saved.body);
+    assert.equal(body.date, yesterday);
+    assert.equal(body.score, 6, 'older past entry keeps its original score');
+    assert.equal(body.data.scoreBasis, undefined, 'no basis invented for a past day');
+  } else if (scenario === 'createdat') {
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.getByRole('button', { name: /START MY MORNING NOW/ }).click();
+    const yes = page.getByRole('button', { name: 'YES, START NOW' });
+    if (await yes.isVisible().catch(() => false)) await yes.click();
+    await page.getByRole('textbox', { name: 'Hours slept' }).fill('7h');
+    await page.getByRole('textbox', { name: 'Hours slept' }).press('Enter');
+    await page.waitForTimeout(800);
+    await page.getByRole('button', { name: 'END MORNING' }).click();
+    await page.getByRole('button', { name: 'END AND SAVE' }).click();
+    await page.getByText('MORNING COMPLETE').waitFor();
+    await page.waitForTimeout(800);
+    const saves = writes.filter(w => w.table === 'morning_checkins' && w.method === 'POST').map(w => JSON.parse(w.body));
+    assert(saves.length >= 2, 'autosave and final save: ' + saves.length);
+    assert.ok(saves[0].created_at, 'first write sets created_at');
+    assert(saves.slice(1).every(b => b.created_at === undefined), 'later writes keep it');
+    const final = saves.at(-1);
+    assert(Array.isArray(final.data.scoreBasis) && final.data.scoreBasis.some(step => step.id === 'custom-1'), 'score basis saved');
+    assert.equal(await page.getByText('scoreBasis').count(), 0, 'basis not shown to the user');
+  } else if (scenario === 'habitretry') {
+    await page.getByRole('button', { name: /HABITS$/ }).last().click();
+    await page.getByRole('button', { name: 'Remove Read' }).click();
+    await page.getByText(/Your habits could not be saved: delete failed/).waitFor();
+    habitDeleteFails = false;
+    const before = writes.filter(w => w.table === 'habits' && w.method === 'DELETE').length;
+    await page.getByRole('button', { name: 'RETRY' }).click();
+    await page.waitForTimeout(800);
+    const deletes = writes.filter(w => w.table === 'habits' && w.method === 'DELETE').slice(before);
+    assert.equal(deletes.length, 1, 'retry re-sends the failed delete');
+    assert(deletes[0].url.includes('id=eq.h2'));
+    assert.equal(await page.getByText(/could not be saved/).count(), 0, 'error cleared');
+    await page.getByRole('button', { name: 'RETRY' }).count();
+  } else if (scenario === 'emptyworkout') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /Repeat Push B|START WORKOUT/ }).first().click();
+    await page.getByRole('button', { name: 'END WORKOUT' }).click();
+    await page.getByRole('button', { name: 'END ANYWAY' }).click();
+    await page.getByText('WORKOUT COMPLETE').waitFor();
+    const week = await page.getByTestId('complete-week').textContent();
+    assert.match(week, /1 \/ 2/, 'empty workout not counted: ' + week);
+  } else if (scenario === 'importbig') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: 'CHANGE PLAN' }).click();
+    await page.getByRole('button', { name: /Import it instead/ }).click();
+    await page.getByTestId('import-file').setInputFiles({ name: 'plan.csv', mimeType: 'text/csv', buffer: Buffer.alloc(600 * 1024, 'a') });
+    await page.getByText(/That file is too large \(600 KB\)\. The limit is 512 KB/).waitFor();
+    assert.equal(await page.getByLabel("Your coach's plan").inputValue(), '');
+  } else if (scenario === 'question') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByPlaceholder(/Ask a question about your current/).fill('Should I add a set to bench press?');
+    await page.getByRole('button', { name: 'ASK', exact: true }).click();
+    await page.waitForTimeout(1500);
+    assert.equal(await page.getByText('Plan changes are made in Change Plan').count(), 0, 'question was not routed to Change Plan');
+    assert.equal(await page.getByRole('button', { name: /APPROVE & SAVE THESE CHANGES/ }).count(), 0);
   } else {
     throw new Error('unknown scenario ' + scenario);
   }

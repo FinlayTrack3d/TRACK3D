@@ -47,4 +47,15 @@ test("plan change requests are recognised so they go through approve-and-save", 
   assert.equal(isPlanChangeRequest("Move Pull A to Thursday"), true);
   assert.equal(isPlanChangeRequest("What should I train today?"), false);
   assert.equal(isPlanChangeRequest("How should I progress this week?"), false);
+  // Questions about changes are answered, not routed to Change Plan.
+  assert.equal(isPlanChangeRequest("Should I add a set to bench press?"), false);
+  assert.equal(isPlanChangeRequest("Why did you reduce my reps on Row?"), false);
+  assert.equal(isPlanChangeRequest("Would it be better to drop Friday's session?"), false);
+  assert.equal(isPlanChangeRequest("Is it worth adding another leg day?"), false);
+  // Requests, including politely phrased ones, still go to Change Plan.
+  assert.equal(isPlanChangeRequest("Can you change Row from 3 sets to 4?"), true);
+  assert.equal(isPlanChangeRequest("Could you move Pull A to Thursday?"), true);
+  assert.equal(isPlanChangeRequest("Please swap the Leg Press exercise for Hack Squat"), true);
+  assert.equal(isPlanChangeRequest("I want to drop one exercise from Push A"), true);
+  assert.equal(isPlanChangeRequest("Dumbbell Bench Press change from 3 sets to 4 sets in upper a"), true);
 });

@@ -14,7 +14,7 @@ import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
-import { fitnessImportSystemPrompt, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
+import { IMPORT_FILE_MAX_BYTES, fitnessImportSystemPrompt, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
@@ -291,7 +291,7 @@ const css = `
 const taskIcon = task => task?.icon && task.icon !== "▸" ? `${task.icon} ` : "";
 
 // Check-in data keys that are flags or timing, not tasks.
-const HIDDEN_CHECKIN_KEYS = new Set(["wakeTiming", "routineTiming", "inProgress", "roughCheckin", "routineSkipped", "skipReason", "recordedAt", "loggedAfter", "checkin", "photos"]);
+const HIDDEN_CHECKIN_KEYS = new Set(["wakeTiming", "routineTiming", "inProgress", "roughCheckin", "routineSkipped", "skipReason", "recordedAt", "loggedAfter", "checkin", "photos", "scoreBasis"]);
 
 // Thumbnails for a check-in's stored progress photos (placeholders such as
 // "skipped" or "deferred" are not files).
@@ -1789,15 +1789,22 @@ function MorningSection({ user }) {
     saveRoutine(scheduledTasks, dayGroups);
   }, [scheduledTasks, wakeTime, dayGroups, view, user]);
 
+  // created_at is only sent when today's row is first written, so later
+  // saves (autosave, finishing, redo) keep the original time.
+  const checkinRowSavedRef = useRef(null);
   const saveCheckin = async (data, score, { inProgress = false } = {}) => {
     if (!user) return;
-    return await supabase.from("morning_checkins").upsert({
+    const withBasis = { ...data, scoreBasis: data.scoreBasis || scoreBasisOf(allSteps) };
+    const rowExists = checkinRowSavedRef.current === today || history.some(entry => entry.date === today);
+    const result = await supabase.from("morning_checkins").upsert({
       user_id: user.id,
       date: today,
       score: score,
-      data: inProgress ? { ...data, inProgress: true } : data,
-      created_at: new Date().toISOString(),
+      data: inProgress ? { ...withBasis, inProgress: true } : withBasis,
+      ...(rowExists ? {} : { created_at: new Date().toISOString() }),
     }, { onConflict: "user_id,date" });
+    if (!result.error) checkinRowSavedRef.current = today;
+    return result;
   };
 
   // Mini-save: every time an answer lands in checkinData during the live
@@ -2230,11 +2237,14 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     setView("liveMorning");
   };
 
-  const morningScore = (data) => {
-    const total = allSteps.length;
+  // The steps a morning is scored against, saved with each check-in so that
+  // editing a past day later scores it against that day's routine, not today's.
+  const scoreBasisOf = steps => steps.map(step => ({ id: step.id || step.name, type: step.type }));
+  const morningScore = (data, steps = data?.scoreBasis || allSteps) => {
+    const total = steps.length;
     if (total === 0) return 0;
     let points = 0;
-    allSteps.forEach(step => {
+    steps.forEach(step => {
       const key = step.id || step.name;
       const val = data[key];
       if (step.type === "number" && val && val !== "") points++;
@@ -2445,13 +2455,26 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   };
   // Discard the current session. Only an unfinished saved row is deleted; a
   // finished morning (for example during "Do again") is left as it was.
+  // Removes a day's progress photos from storage once its check-in is
+  // deleted. Returns an error message, or "" when nothing failed.
+  const deleteDayPhotos = async date => {
+    const folder = `${user.id}/${date}`;
+    const { data: files, error: listError } = await supabase.storage.from("checkin-photos").list(folder);
+    if (listError) return listError.message;
+    if (!files?.length) return "";
+    const { error } = await supabase.storage.from("checkin-photos").remove(files.map(file => `${folder}/${file.name}`));
+    return error ? error.message : "";
+  };
   const deleteMorningSession = async () => {
     setMorningActionError("");
     const todayRow = history.find(entry => entry.date === today);
     if (todayRow?.data?.inProgress) {
       const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", today);
       if (error) { setMorningActionError(`Could not delete this session: ${error.message}`); return; }
+      const photoError = await deleteDayPhotos(today);
+      if (photoError) setMorningActionError(`The session was deleted, but its photos could not be removed: ${photoError}`);
     }
+    checkinRowSavedRef.current = null;
     resetMorningSession();
     setMorningConfirm(null);
     setView("home");
@@ -2461,6 +2484,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     setMorningActionError("");
     const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", date);
     if (error) { setMorningActionError(`Could not delete this day: ${error.message}`); return; }
+    const photoError = await deleteDayPhotos(date);
+    if (photoError) setMorningActionError(`The day was deleted, but its photos could not be removed: ${photoError}`);
+    if (date === today) checkinRowSavedRef.current = null;
     setMorningConfirm(null);
     setOpenHistoryDate(null);
     if (date === today) resetMorningSession();
@@ -2609,10 +2635,18 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             if (editSubmissionData.photos || PHOTO_ANGLES.some(angle => photoFiles[angle])) {
               updatedData.photos = updatedPhotos;
             }
+            // A past day is scored against the routine saved with it. Older
+            // entries saved before that keep their original score, because
+            // the routine they were scored against is not known.
+            const originalEntry = history.find(entry => entry.date === formDate);
+            if (!isPastEntry && !updatedData.scoreBasis) updatedData.scoreBasis = scoreBasisOf(allSteps);
+            const score = updatedData.scoreBasis
+              ? morningScore(updatedData)
+              : (originalEntry && !originalEntry.data?.inProgress ? originalEntry.score : morningScore(updatedData));
             const { error } = await supabase.from("morning_checkins").upsert({
               user_id: user.id,
               date: formDate,
-              score: morningScore(updatedData),
+              score,
               data: updatedData,
             }, { onConflict: "user_id,date" });
             if (error) throw error;
@@ -6425,7 +6459,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const loggedExercises = buildLoggedExercises(activeSession, completedSets);
     const newPbs = workoutPersonalBests(loggedExercises);
     const improvements = improvementsSinceLastTime(loggedExercises, (activeSession?.exercises || []).map(exercise => getLastSessionData(exercise, earlierLogs)));
-    const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId);
+    // A workout with nothing logged does not count towards the week.
+    const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId, { countCurrent: completionReview.completedSets > 0 });
     const highlightRow = { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "7px 0", borderTop: `1px solid ${BORDER}` };
     const highlightTitle = color => ({ fontFamily: "'Orbitron',monospace", fontSize: 10, color, letterSpacing: 2, marginBottom: 6 });
     return (
@@ -6746,6 +6781,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const loadImportFile = async file => {
     setImportError(""); setImportFileNote("");
     if (!file) return;
+    if (file.size > IMPORT_FILE_MAX_BYTES) {
+      setImportError(`That file is too large (${Math.round(file.size / 1024)} KB). The limit is ${Math.round(IMPORT_FILE_MAX_BYTES / 1024)} KB; paste the part with the plan instead.`);
+      return;
+    }
     if (!isSupportedImportFile(file.name)) {
       setImportError("That file type can't be read yet. Export a spreadsheet or Google Sheet as CSV, or copy the text from a PDF or Word document and paste it in.");
       return;
@@ -10019,6 +10058,7 @@ export default function App() {
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [habitsReady, setHabitsReady] = useState(false);
   const prevHabitsRef = useRef(null); // last-persisted snapshot, for diffing what changed
+  const pendingHabitDeletesRef = useRef(new Set()); // removed habits whose delete has not succeeded yet
   const [habitSaveError, setHabitSaveError] = useState("");
   const [fitnessSessions, setFitnessSessions] = useState([]);
   const homeTimeZone = resolveHomeTimeZone(user);
@@ -10062,6 +10102,9 @@ export default function App() {
     return () => { cancelled = true; };
   }, [user?.id, todayKey]);
 
+  const deleteHabitRow = id => supabase.from("habits").delete().eq("user_id", user.id).eq("id", id)
+    .then(result => { if (!result.error) pendingHabitDeletesRef.current.delete(id); return result; });
+
   // Mini-save: persist only what actually changed since the last render -
   // a new/renamed habit, a removed one, or today's tick/untick - the moment
   // it happens, rather than waiting for any kind of final submission.
@@ -10074,9 +10117,10 @@ export default function App() {
     const currentIds = new Set(habits.map(h => h.id));
     const writes = [];
 
-    previous.filter(h => !currentIds.has(h.id)).forEach(h => {
-      writes.push(supabase.from("habits").delete().eq("user_id", user.id).eq("id", String(h.id)));
-    });
+    previous.filter(h => !currentIds.has(h.id)).forEach(h => pendingHabitDeletesRef.current.add(String(h.id)));
+    // A habit that was added back is no longer waiting to be deleted.
+    habits.forEach(h => pendingHabitDeletesRef.current.delete(String(h.id)));
+    previous.filter(h => !currentIds.has(h.id)).forEach(h => writes.push(deleteHabitRow(String(h.id))));
 
     habits.forEach(h => {
       const prevMatch = previous.find(p => p.id === h.id);
@@ -10107,11 +10151,12 @@ export default function App() {
     }).catch(error => setHabitSaveError(`Your habits could not be saved: ${error?.message || "connection problem"}`));
   }, [habits, habitsReady, todayKey, user?.id]);
 
-  // Re-send every habit and today's ticks after a failed save.
+  // Re-send every habit, today's ticks and any delete that failed.
   const retryHabitSave = async () => {
     if (!user) return;
     setHabitSaveError("");
     const results = await Promise.all([
+      ...[...pendingHabitDeletesRef.current].map(deleteHabitRow),
       ...habits.map(h => supabase.from("habits").upsert({
         id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
         streak: habitStreak(h), updated_at: new Date().toISOString(),
