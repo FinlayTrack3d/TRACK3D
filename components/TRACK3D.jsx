@@ -8,7 +8,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
+import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
@@ -181,7 +181,9 @@ const css = `
   .t3d-dot { width: 8px; height: 8px; border-radius: 50%; background: #00FFB2; box-shadow: 0 0 8px #00FFB2; animation: t3dpulse 2s infinite; }
   @keyframes t3dpulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   @keyframes t3dfade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
-  .t3d-fade { animation: t3dfade .35s ease forwards; }
+  /* No "forwards" fill: a held transform makes fixed popups position against
+     the section instead of the screen, so they opened off-screen when scrolled. */
+  .t3d-fade { animation: t3dfade .35s ease; }
   .t3d-grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 14px; margin-bottom: 16px; }
   .t3d-grid12 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; margin-bottom: 16px; }
@@ -237,6 +239,8 @@ const css = `
   .t3d-ai-tag { font-family: 'Orbitron', monospace; font-size: 8px; letter-spacing: 2px; margin-bottom: 5px; }
   .t3d-ai-input { flex: 1; background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 12px; outline: none; transition: border-color .18s; }
   .t3d-ai-input:focus { border-color: rgba(0,255,178,.35); }
+  /* iOS zooms into inputs under 16px; keep coach inputs at 16px on phones. */
+  @media (max-width: 768px) { .t3d-ai-input { font-size: 16px; } }
   .t3d-ai-input::placeholder { color: #607784; }
   .t3d-compact-coach .t3d-ai-input::placeholder { color: #6F8792; }
   .t3d-compact-coach .t3d-ai-msg { padding: 8px 10px; margin-bottom: 6px; line-height: 1.6; font-size: 12px; }
@@ -411,6 +415,8 @@ ${dayContext || "- Nothing logged yet today"}`;
 
   const send = async (msg, { hidden = false } = {}) => {
     if (!msg.trim() || loading) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     setLoading(true);
     const updated = [...messages, { role: "user", content: msg, ...(hidden ? { hidden: true } : {}) }];
     setMessages(updated);
@@ -463,9 +469,27 @@ ${dayContext || "- Nothing logged yet today"}`;
     if (user) await supabase.from("coach_profiles").upsert({ user_id: user.id, personality: nextPersonality, updated_at: new Date().toISOString() });
   };
 
+  // Apply a coach change and report only what the app confirms happened.
+  const runAction = async (action, permanent) => {
+    let result;
+    try { result = await onAction(action, permanent); } catch (error) { result = { ok: false, message: `Not saved: ${error?.message || "something went wrong"}.` }; }
+    setMessages(previous => [...previous, { role: "assistant", content: result?.message || (result?.ok ? "Done." : "Nothing was changed.") }]);
+    setTimeout(scroll, 50);
+  };
+
   const decideStructuredAction = async (action, decision) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
+    // Apply (and for permanent changes, save) first; only mark the action
+    // applied once that has succeeded.
+    if (decision !== "reject") {
+      const result = await onStructuredAction?.(action);
+      if (result && !result.ok) {
+        setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
+        return;
+      }
+      if (result?.message) setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
+    }
     const response = await fetch("/api/coach-action", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
@@ -473,7 +497,6 @@ ${dayContext || "- Nothing logged yet today"}`;
     });
     if (!response.ok) return;
     setActions(current => current.map(item => item.id === action.id ? { ...item, status: decision === "reject" ? "rejected" : "applied" } : item));
-    if (decision !== "reject") onStructuredAction?.(action);
   };
 
   // A caller (e.g. the 1-week review banner) can hand this coach a message to
@@ -514,13 +537,17 @@ ${dayContext || "- Nothing logged yet today"}`;
               // Bigger, structured changes (a whole session/programme rewrite) travel as
               // JSON in a fenced block rather than the pipe-delimited marker above, which
               // can't safely hold arbitrary JSON (it contains "|" and "]" characters).
-              const jsonActionMatch = m.role === "assistant" ? m.content.match(/\[ACTION_JSON:(replace_session)\]([\s\S]*?)\[\/ACTION_JSON\]/i) : null;
-              let jsonActionPayload = null;
-              if (jsonActionMatch) { try { jsonActionPayload = JSON.parse(jsonActionMatch[2]); } catch { jsonActionPayload = null; } }
-              const visibleContent = cleanAiText(m.content
+              // Accept the block even when the closing tag is missing or the JSON is in a code fence.
+              const jsonActionMatch = m.role === "assistant" ? m.content.match(/\[ACTION_JSON:(replace_session)\]([\s\S]*?)(?:\[\/ACTION_JSON\]|\[MEMORY\]|$)/i) : null;
+              const jsonActionPayload = jsonActionMatch ? extractJsonObject(jsonActionMatch[2]) : null;
+              const strippedContent = m.content
                 .replace(/\[ACTION:[^\]]+\]/gi, "")
-                .replace(/\[ACTION_JSON:[^\]]+\][\s\S]*?\[\/ACTION_JSON\]/gi, "")
-                .replace(/\[MEMORY\][\s\S]*?\[\/MEMORY\]/gi, ""));
+                .replace(/\[ACTION_JSON:[^\]]+\][\s\S]*?(?:\[\/ACTION_JSON\]|(?=\[MEMORY\])|$)/gi, "")
+                .replace(/\[MEMORY\][\s\S]*?(?:\[\/MEMORY\]|$)/gi, "");
+              // Raw JSON is never shown in the chat; say plainly when a change could not be read.
+              const hadRawJson = /```json[\s\S]*?```/i.test(strippedContent) || (Boolean(jsonActionMatch) && !Array.isArray(jsonActionPayload?.exercises));
+              const visibleContent = cleanAiText(strippedContent.replace(/```json[\s\S]*?(?:```|$)/gi, "").trim())
+                + (hadRawJson && m.role === "assistant" ? "\n\n(The coach sent a change the app could not read, so nothing was changed. Ask again if you want it.)" : "");
               return (
               <div key={i} className="t3d-ai-msg" style={{
                 background: m.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2,
@@ -533,19 +560,19 @@ ${dayContext || "- Nothing logged yet today"}`;
                 {actionMatch && onAction && (
                   <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
                     {actionMatch[1] === "log_set" ? (
-                      <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false); setMessages(previous => [...previous, { role: "assistant", content: "Set logged." }]); }}>LOG THIS SET</button>
+                      <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false)}>LOG THIS SET</button>
                     ) : (
                       <>
-                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout only." }]); }}>THIS WORKOUT</button>
-                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, true); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout and future sessions." }]); }}>MAKE PERMANENT</button>
+                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, false)}>THIS WORKOUT</button>
+                        <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: actionMatch[1], exercise: actionMatch[2].trim(), value: actionMatch[3]?.trim() }, true)}>MAKE PERMANENT</button>
                       </>
                     )}
                   </div>
                 )}
-                {jsonActionPayload && onAction && (
+                {Array.isArray(jsonActionPayload?.exercises) && onAction && (
                   <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 7 }}>
-                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, false); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout only." }]); }}>THIS WORKOUT</button>
-                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => { onAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, true); setMessages(previous => [...previous, { role: "assistant", content: "Applied to this workout and future sessions." }]); }}>MAKE PERMANENT</button>
+                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, false)}>THIS WORKOUT</button>
+                    <button className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7 }} onClick={() => runAction({ type: jsonActionMatch[1], payload: jsonActionPayload }, true)}>MAKE PERMANENT</button>
                   </div>
                 )}
               </div>
@@ -671,6 +698,8 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
 
   const optimiseWithAI = async (feedback = "") => {
     if (aiRequestActive.current) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const message = feedback.trim() || "Optimise my routine now using what you know. Apply the best task order and briefly explain the main change. Do not wait for me to answer questions.";
     const updated = [...aiConversation, { role: "user", content: message, hidden: !feedback.trim() }];
     aiRequestActive.current = true;
@@ -1047,6 +1076,8 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
   // this lets the coach both restructure and retime the routine at once.
   const optimiseWithAI = async (feedback = "") => {
     if (aiRequestActive.current) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const message = feedback.trim() || "Look at my current routine and suggest a better order or timing. Explain the main change.";
     const updated = [...aiConversation, { role: "user", content: message, hidden: !feedback.trim() }];
     const editable = scheduledTasks.filter(t => t.id !== "checkin");
@@ -1534,6 +1565,8 @@ function MorningSection({ user }) {
   const today = useZonedDateKey(homeTimeZone);
   const previousTodayRef = useRef(today);
   const [view, setView] = useState("home");
+  // Each screen change starts at the top, not wherever the last screen was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [setupStep, setSetupStep] = useState(0);
   const [wakeTime, setWakeTime] = useState("06:00");
   const [selectedTasks, setSelectedTasks] = useState([]);
@@ -4747,6 +4780,8 @@ function Fitness({ user, isActive = true }) {
   const zonedToday = useZonedDateKey(homeTimeZone);
   const homeDate = { ...getZonedDateInfo(new Date(), homeTimeZone), dateKey: zonedToday };
   const [view, setView] = useState("home");
+  // Each screen change starts at the top, not wherever the last screen was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [split, setSplit] = useState(null);
   const [loading, setLoading] = useState(true);
   const [setupStep, setSetupStep] = useState(0);
@@ -5006,29 +5041,32 @@ function withPlanApproval(sessions, now = new Date()) {
     setLoading(false);
   };
 
+  // Returns { ok, error }. Callers must not report a change unless ok is true.
   const saveSplit = async (sessionsData, extra = {}) => {
-    if (!user) return;
+    if (!user) return { ok: false, error: "not signed in" };
     try {
       const normalizedSessions = normalizeFitnessSessions(sessionsData);
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
 
       // Upsert so a stale lookup can never turn a save into a duplicate insert.
+      // Read the row back so a save only counts once the database has it.
       const result = await supabase.from("workout_splits").upsert({
         user_id: user.id,
         sessions: normalizedSessions,
         ...(existing ? {} : { split_name: "My Split" }),
         ...extra,
-      }, { onConflict: "user_id" });
+      }, { onConflict: "user_id" }).select("sessions").single();
 
-      if (result.error) {
-        console.error("saveSplit error:", result.error);
-      } else {
-        setSessions(normalizedSessions);
-        setSplit(previous => ({ ...(previous || {}), sessions: normalizedSessions, ...extra }));
-        console.log("Split saved!");
+      if (result.error || !sameJson(result.data?.sessions, normalizedSessions)) {
+        console.error("saveSplit error:", result.error || "saved plan did not match");
+        return { ok: false, error: result.error?.message || "the saved plan could not be confirmed" };
       }
+      setSessions(normalizedSessions);
+      setSplit(previous => ({ ...(previous || {}), sessions: normalizedSessions, ...extra }));
+      return { ok: true };
     } catch (e) {
       console.error("saveSplit exception:", e);
+      return { ok: false, error: e?.message || "connection problem" };
     }
   };
 
@@ -5341,6 +5379,8 @@ function withPlanApproval(sessions, now = new Date()) {
   const askCompletionFollowUp = async () => {
     const question = completionQuestion.trim();
     if (!question || completionReplyLoading || !completionFeedback) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const updated = [...completionFollowUps, { role: "user", content: question }];
     setCompletionFollowUps(updated);
     setCompletionQuestion("");
@@ -5514,42 +5554,44 @@ Respond ONLY with valid JSON:
     </div></div>
   );
 
+  // Returns { ok, message } describing what really happened. A permanent
+  // change only reports success once saveSplit has confirmed it.
   const applyWorkoutCoachAction = async (action, permanent) => {
+    const notSaved = error => ({ ok: false, message: `Not saved: ${error}. Your plan has not changed.` });
     // Logging a set is a direct, immediate edit to the active workout only -
     // there's no "future sessions" version of a set that already happened.
     if (action.type === "log_set") {
       const match = String(action.value || "").match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
-      if (!match || !activeSession) return;
+      if (!match || !activeSession) return { ok: false, message: "Nothing was logged: the set could not be read." };
       const [, reps, weight] = match;
       const eIdx = activeSession.exercises.findIndex(exercise => exercise.name.toLowerCase() === action.exercise.toLowerCase());
-      if (eIdx === -1) return;
+      if (eIdx === -1) return { ok: false, message: `Nothing was logged: ${action.exercise} is not in this workout.` };
       const sIdx = getCurrentSetIdx(eIdx);
       const totalSets = activeSession.exercises[eIdx]?.sets || 0;
       const newSet = { weight, reps, setNum: sIdx + 1 };
       setCompletedSets(previous => ({ ...previous, [eIdx]: [...(previous[eIdx] || []), newSet] }));
       if (sIdx + 1 < totalSets) setSetProgress(previous => ({ ...previous, [eIdx]: sIdx + 1 }));
-      return;
+      return { ok: true, message: "Set logged." };
     }
     // A whole session rewrite (restructuring the day, swapping several
     // exercises at once) arrives as JSON rather than a single exercise tweak.
     if (action.type === "replace_session") {
       const payload = action.payload || {};
       const targetName = payload.sessionName || activeSession?.name;
-      if (!targetName || !Array.isArray(payload.exercises)) return;
+      if (!targetName || !Array.isArray(payload.exercises) || !payload.exercises.length) return { ok: false, message: "Nothing was changed: the coach's session could not be read." };
       const [normalized] = normalizeFitnessSessions([{ name: targetName, exercises: payload.exercises }]);
-      if (activeSession && activeSession.name.toLowerCase() === targetName.toLowerCase()) {
-        setActiveSession(previous => previous ? { ...previous, exercises: normalized.exercises } : previous);
-      }
       if (permanent) {
         const exists = sessions.some(session => session.name.toLowerCase() === targetName.toLowerCase());
         const updated = exists
           ? sessions.map(session => session.name.toLowerCase() === targetName.toLowerCase() ? { ...session, exercises: normalized.exercises } : session)
           : [...sessions, { name: targetName, exercises: normalized.exercises }];
-        setSessions(updated);
-        setSplit(previous => ({ ...previous, sessions: updated }));
-        await saveSplit(updated);
+        const saved = await saveSplit(updated);
+        if (!saved.ok) return notSaved(saved.error);
       }
-      return;
+      if (activeSession && activeSession.name.toLowerCase() === targetName.toLowerCase()) {
+        setActiveSession(previous => previous ? { ...previous, exercises: normalized.exercises } : previous);
+      }
+      return { ok: true, message: permanent ? `Saved: ${targetName} is updated in your plan.` : "Applied to this workout only." };
     }
     const changeSession = session => {
       if (!session) return session;
@@ -5572,13 +5614,19 @@ Respond ONLY with valid JSON:
       });
       return { ...session, exercises };
     };
-    setActiveSession(previous => changeSession(previous));
-    if (permanent && activeSession) {
-      const updated = sessions.map(session => session.name === activeSession.name ? changeSession(session) : session);
-      setSessions(updated);
-      setSplit(previous => ({ ...previous, sessions: updated }));
-      await saveSplit(updated);
+    if (!activeSession) return { ok: false, message: "Nothing was changed: no workout is open." };
+    const changedWorkout = changeSession(activeSession);
+    if (JSON.stringify(changedWorkout.exercises) === JSON.stringify(activeSession.exercises)) {
+      return { ok: false, message: `Nothing was changed: ${action.exercise} is not in this workout.` };
     }
+    if (permanent) {
+      const updated = sessions.map(session => session.name === activeSession.name ? changeSession(session) : session);
+      if (JSON.stringify(updated) === JSON.stringify(sessions)) return { ok: false, message: `Nothing was changed: ${action.exercise} is not in ${activeSession.name} in your saved plan.` };
+      const saved = await saveSplit(updated);
+      if (!saved.ok) return notSaved(saved.error);
+    }
+    setActiveSession(changedWorkout);
+    return { ok: true, message: permanent ? "Saved to your plan and applied to this workout." : "Applied to this workout only." };
   };
 
   // Structured active-workout state (exercise -> set -> weight/reps/done),
@@ -5596,12 +5644,13 @@ Respond ONLY with valid JSON:
   const applyStructuredCoachAction = async action => {
     if (action.scope === "permanent") {
       const updated = applyCoachActionToProgramme(sessions, action);
-      setSessions(updated);
-      setSplit(previous => ({ ...(previous || {}), sessions: updated }));
-      await saveSplit(updated);
-      return;
+      if (JSON.stringify(updated) === JSON.stringify(sessions)) return { ok: false, message: "Nothing was changed: that exercise is not in your saved plan." };
+      const saved = await saveSplit(updated);
+      if (!saved.ok) return { ok: false, message: `Not saved: ${saved.error}. Your plan has not changed.` };
+      return { ok: true, message: "Saved to your plan." };
     }
     setActiveSession(previous => applyCoachActionToWorkout(previous, action));
+    return { ok: true, message: "Applied to this workout only." };
   };
 
   const fitnessCoach = (
@@ -5635,6 +5684,43 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       />
     </div>
   );
+  // The plan coach card is shown with or without a saved plan.
+  const planCoachCard = (
+            <div className="t3d-card" style={{ marginBottom: 16 }}>
+              <div className="t3d-ctitle" style={{ color: NEON }}>AI COACH</div>
+              <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask about your current plan, progress, recovery or exercise choices.</p>
+              {coachMessages.length === 0 && (
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
+                  {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
+                    <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
+                  ))}
+                </div>
+              )}
+              {coachMessages.length > 0 && (
+                <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
+                  {coachMessages.map((message, index) => (
+                    <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
+                      <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
+                      <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
+                    </div>
+                  ))}
+                  {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
+                </div>
+              )}
+              {coachMessages.at(-1)?.role === "assistant" && isYesNoQuestion(coachMessages.at(-1)?.content) && (
+                <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  {["Yes", "No", "More detail"].map(reply => <button key={reply} className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach(reply)}>{reply.toUpperCase()}</button>)}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <input className="t3d-ai-input" placeholder="Ask a question about your current plan..." value={coachQuestion}
+                  onChange={event => setCoachQuestion(event.target.value)}
+                  onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanCoach(); } }} />
+                <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach()} disabled={coachLoading || !coachQuestion.trim()}>{coachLoading ? "ASKING..." : "ASK"}</button>
+              </div>
+            </div>
+  );
+
   const discardWorkoutDialog = discardWorkoutWarning ? (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
       <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="discard-workout-title" style={{ width: "100%", maxWidth: 360, borderColor: NEON3, textAlign: "center" }}>
@@ -6146,7 +6232,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const now = new Date();
     const approved = withPlanApproval(planSessions, now);
     const extra = { programme_started_at: now.toISOString(), week_reviewed_at: null };
-    await saveSplit(approved, extra);
+    const saved = await saveSplit(approved, extra);
+    if (!saved.ok) { window.alert(`Your plan could not be saved: ${saved.error}. Please try again.`); return; }
     setSplit({ sessions: approved, ...extra });
     setView("home");
   };
@@ -6389,6 +6476,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const askPlanChangeCoach = async (suggestedMessage) => {
     const message = String(suggestedMessage || planChangeInput).trim();
     if (!message || planChangeLoading) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const nextMessages = [...planChangeMessages, { role: "user", content: message }];
     setPlanChangeMessages(nextMessages);
     setPlanChangeInput("");
@@ -6421,9 +6510,17 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const changes = planChangeRecommendation?.changes || [];
     if (!changes.length) return;
     const updated = applyPlanChangeProposal(sessions, changes);
-    await saveSplit(updated);
+    if (JSON.stringify(updated) === JSON.stringify(sessions)) {
+      setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Nothing was changed: those exercises or sessions were not found in your saved plan." }]);
+      return;
+    }
+    const saved = await saveSplit(updated);
+    if (!saved.ok) {
+      setPlanChangeMessages(previous => [...previous, { role: "assistant", content: `Not saved: ${saved.error}. Your plan has not changed. Please try again.` }]);
+      return;
+    }
     setPlanChangeRecommendation(null);
-    setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Those targeted changes are now saved. Your completed workout and exercise history has not been removed." }]);
+    setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Saved: those changes are now in your plan. Your completed workout and exercise history has not been removed." }]);
   };
 
   // Go straight to the AI builder, pre-filling answers from the coach chat and
@@ -6643,6 +6740,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const askPlanCoach = async (suggestedQuestion) => {
     const question = (suggestedQuestion || coachQuestion).trim();
     if (!question || coachLoading) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
 
     const updatedMessages = [...coachMessages, { role: "user", content: question }];
     setCoachMessages(updatedMessages);
@@ -6681,6 +6780,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const askApprovalCoach = async () => {
     const question = approvalQuestion.trim();
     if (!question || approvalLoading) return;
+    // Close the phone keyboard so the screen returns to its normal size.
+    document.activeElement?.blur?.();
     const updated = [...approvalMessages, { role: "user", content: question }];
     const reviewedSessions = approvalReview === "all" ? sessions : [sessions[approvalReview]].filter(Boolean);
     setApprovalMessages(updated);
@@ -6785,6 +6886,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   return (
     <div className="t3d-fade">
       {!split ? (
+        <>
         <div className="t3d-card" style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 16 }}>⚡</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, letterSpacing: 3, color: NEON, marginBottom: 8 }}>FITNESS</div>
@@ -6802,6 +6904,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           </div>
           <div style={{ marginTop: 20, fontSize: 10, color: "#2A3A48", lineHeight: 1.6 }}>TRACK3D provides general fitness guidance. Consult a qualified professional before starting any new exercise programme. Not medical advice.</div>
         </div>
+        {planCoachCard}
+        </>
       ) : (
         <>
           {weekReviewDue && (
@@ -6974,39 +7078,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
             </div>
           </div>
 
-          <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle" style={{ color: NEON }}>AI COACH</div>
-            <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask about your current plan, progress, recovery or exercise choices.</p>
-            {coachMessages.length === 0 && (
-              <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
-                {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
-                  <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
-                ))}
-              </div>
-            )}
-            {coachMessages.length > 0 && (
-              <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
-                {coachMessages.map((message, index) => (
-                  <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
-                    <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-                    <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
-                  </div>
-                ))}
-                {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
-              </div>
-            )}
-            {coachMessages.at(-1)?.role === "assistant" && isYesNoQuestion(coachMessages.at(-1)?.content) && (
-              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                {["Yes", "No", "More detail"].map(reply => <button key={reply} className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach(reply)}>{reply.toUpperCase()}</button>)}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 8 }}>
-              <input className="t3d-ai-input" placeholder="Ask a question about your current plan..." value={coachQuestion}
-                onChange={event => setCoachQuestion(event.target.value)}
-                onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanCoach(); } }} />
-              <button className="t3d-btn t3d-btn-sm" onClick={() => askPlanCoach()} disabled={coachLoading || !coachQuestion.trim()}>{coachLoading ? "ASKING..." : "ASK"}</button>
-            </div>
-          </div>
+          {planCoachCard}
 
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -7519,6 +7591,8 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
 
 function Nutrition({ user, userSessions }) {
   const [view, setView] = useState("home");
+  // Each screen change starts at the top, not wherever the last screen was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(true);
   const [logs, setLogs] = useState([]);

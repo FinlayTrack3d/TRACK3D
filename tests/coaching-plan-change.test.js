@@ -11,12 +11,12 @@ const plan = [{
   ],
 }];
 
-test("targeted prescription changes preserve the exercise and invalidate plan approval", () => {
+test("targeted prescription changes preserve the exercise and keep the approved plan", () => {
   const updated = applyPlanChangeProposal(plan, [{ kind: "update_prescription", sessionName: "Push", exerciseName: "Bench Press", sets: 4, reps: "6-8" }]);
   assert.equal(updated[0].exercises[0].name, "Bench Press");
   assert.equal(updated[0].exercises[0].sets, 4);
   assert.deepEqual(updated[0].exercises[0].reps, ["6-8", "6-8", "6-8", "6-8"]);
-  assert.equal(updated[0].approval, null);
+  assert.deepEqual(updated[0].approval, { approved: true });
   assert.equal(plan[0].exercises[0].sets, 3);
 });
 
@@ -37,5 +37,5 @@ test("the coach can move a session without rebuilding its exercises", () => {
   const updated = applyPlanChangeProposal(plan, [{ kind: "update_session_days", sessionName: "Push", days: ["TUE", "SAT"], reason: "Availability changed" }]);
   assert.deepEqual(updated[0].days, ["TUE", "SAT"]);
   assert.deepEqual(updated[0].exercises, plan[0].exercises);
-  assert.equal(updated[0].approval, null);
+  assert.deepEqual(updated[0].approval, { approved: true });
 });
