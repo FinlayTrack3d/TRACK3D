@@ -40,8 +40,9 @@ test("editing a hybrid plan preserves flexible slots between its repeated meals"
 test("logged totals use planned macros for fixed meals and actual macros for flexible meals", () => {
   const meals = prepareNutritionMeals([{ name: "Breakfast", calories: 400, protein: 30, carbs: 50, fats: 10 }], "hybrid", 2, targets);
   const totals = calculateLoggedNutrition(meals, { 0: true, 1: { completed: true, calories: 650, protein: 42, carbs: 70, fats: 18 } }, 100);
-  assert.deepEqual(totals, { calories: 1150, protein: 72, carbs: 120, fats: 28, completedMeals: 2 });
-  assert.deepEqual(remainingNutritionTargets(targets, totals), { calories: 1050, protein: 88, carbs: 130, fats: 37 });
+  // The 100 off-plan kcal (no figures given) add a rough 4 g protein, 11 g carbs and 4 g fat.
+  assert.deepEqual(totals, { calories: 1150, protein: 76, carbs: 131, fats: 32, completedMeals: 2 });
+  assert.deepEqual(remainingNutritionTargets(targets, totals), { calories: 1050, protein: 84, carbs: 119, fats: 33 });
 });
 
 test("meal library merges repeat meals by name without duplicating them", () => {
