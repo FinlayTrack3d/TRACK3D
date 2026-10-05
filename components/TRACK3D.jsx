@@ -479,9 +479,15 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     setMessages(updated);
     setInput("");
     setTimeout(scroll, 50);
+    // A style or level change since the last reply goes with the message, so
+    // the coach answers in the new style instead of repeating its last answer.
+    const lastReply = messages.map(message => message.role).lastIndexOf("assistant");
+    const changes = messages.slice(lastReply + 1).filter(message => message.role === "note").map(message => message.content);
+    const sentMsg = changes.length ? `(${changes.join("; ")}. Answer in this style and level, in fresh words.)\n${msg}` : msg;
+    const apiHistory = [...messages, { role: "user", content: sentMsg }];
     try {
       if (coachingV12) {
-        const data = await streamCoachMessage(msg, conversationId, coachContext, partial => {
+        const data = await streamCoachMessage(sentMsg, conversationId, coachContext, partial => {
           setMessages([...updated, { role: "assistant", content: partial }]);
           scroll();
         });
@@ -497,7 +503,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
       const reply = await streamCoachText({
         area,
         context: context ?? `User data today:\n${dayContext || "- Nothing logged yet today"}`,
-        messages: recentChatMessages(updated.filter(message => message.role === "user" || message.role === "assistant")),
+        messages: recentChatMessages(apiHistory.filter(message => message.role === "user" || message.role === "assistant")),
       }, text => { setMessages([...updated, { role: "assistant", content: text }]); scroll(); });
       setMessages([...updated, { role: "assistant", content: reply }]);
       // A coach that carries a running memory ends every reply with a hidden
@@ -6272,6 +6278,12 @@ function withPlanApproval(sessions, now = new Date()) {
                     <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.15)" : "rgba(0,255,178,.1)"}` }}>
                       <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
                       <span style={{ color: message.role === "user" ? "#C0D8E8" : "#B7CAD2", whiteSpace: "pre-wrap" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
+                      {message.openChangePlan && <div><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8, fontSize: 8 }} onClick={() => {
+                        setPlanChangeInput("");
+                        setPlanChangeRecommendation(null);
+                        setPlanChangeOpen(true);
+                        askPlanChangeCoach(message.openChangePlan, planChangeIntro);
+                      }}>OPEN CHANGE PLAN</button></div>}
                     </div>
                   ))}
                   {coachLoading && <div style={{ fontSize: 11, color: "#3A5060" }}>Coach is thinking...</div>}
@@ -7534,12 +7546,8 @@ function withPlanApproval(sessions, now = new Date()) {
     // This chat cannot change the saved plan. Requests to change it go to the
     // Change Plan coach, which proposes the change for approval and saves it.
     if (split && isPlanChangeRequest(question)) {
-      setCoachMessages([...coachMessages, { role: "user", content: question }, { role: "assistant", content: "Plan changes are made in Change Plan, where you approve them before they are saved. I've opened it with your request." }]);
+      setCoachMessages([...coachMessages, { role: "user", content: question }, { role: "assistant", content: "Plan changes are made in Change Plan, where you see the exact change and approve it before it's saved. Tap OPEN CHANGE PLAN to send it your request.", openChangePlan: question }]);
       setCoachQuestion("");
-      setPlanChangeInput("");
-      setPlanChangeRecommendation(null);
-      setPlanChangeOpen(true);
-      askPlanChangeCoach(question, planChangeIntro);
       return;
     }
     // Close the phone keyboard so the screen returns to its normal size.

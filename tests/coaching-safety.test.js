@@ -60,3 +60,13 @@ test("the active-pain directive forbids loading the painful area", () => {
   assert.match(directive, /Never diagnose/);
   assert.equal(activePainDirective([]), "");
 });
+
+test("shoulder pain directive names what loads the shoulder and bans 'avoids it completely'", () => {
+  const directive = activePainDirective([{ report: "my shoulder hurts", body_area: "shoulder", exercise_key: "Dumbbell Shoulder Press" }]);
+  assert.match(directive, /planks/);
+  assert.match(directive, /goblet squats/);
+  assert.match(directive, /Never claim an exercise "avoids"/);
+  assert.match(directive, /leg press/);
+  const knee = activePainDirective([{ report: "knee pain on squats", body_area: null }]);
+  assert.match(knee, /The knee is loaded by squats, lunges/);
+});

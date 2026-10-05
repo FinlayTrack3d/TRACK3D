@@ -5,6 +5,7 @@ import { WORKOUT_COACH_INSTRUCTIONS, WORKOUT_RESPONSE_SHAPE as responseShape } f
 import { buildCoachSystemBlocks, cleanCoachReply, PLAN_CHANGE_FROM_CHAT } from "../../../lib/coaching/system.js";
 import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { openAnthropicStream, partialJsonStringField, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
+import { readCoachAnswer } from "../../../lib/coaching/coach-answer.js";
 
 
 function supabaseForRequest(request) {
@@ -18,9 +19,6 @@ function supabaseForRequest(request) {
   });
 }
 
-function extractJson(text) {
-  return JSON.parse(text.replace(/```json|```/g, "").trim());
-}
 
 export async function POST(request) {
   try {
@@ -112,10 +110,12 @@ export async function POST(request) {
 
     // Gets the model's JSON answer. With onPartial, the first attempt streams
     // and reports the "message" text as it is written. Retries once (with a
-    // bigger budget) when the reply is cut off or not valid JSON.
+    // bigger budget) when the reply is cut off or not valid JSON; after that
+    // the readable part of the reply is used rather than an error.
     const getAnswer = async (onPartial) => {
+      let lastText = "";
       for (let attempt = 0; attempt < 2; attempt++) {
-        const maxTokens = attempt === 0 ? 500 : 1200;
+        const maxTokens = attempt === 0 ? 900 : 2000;
         let text = "";
         if (onPartial && attempt === 0) {
           const opened = await openAnthropicStream(providerRequest(maxTokens));
@@ -131,9 +131,12 @@ export async function POST(request) {
           if (!providerResponse.ok) return { error: providerResponse.error };
           text = providerResponse.payload.content?.map((block) => block.text || "").join("") || "";
         }
-        try { return { answer: extractJson(text) }; } catch { /* retry with a bigger budget */ }
+        const parsed = readCoachAnswer(text);
+        if (parsed.complete) return { answer: parsed.answer };
+        lastText = text;
       }
-      return { error: "Coach returned an invalid response" };
+      const fallback = readCoachAnswer(lastText);
+      return fallback.answer ? { answer: fallback.answer } : { error: "The coach couldn't answer that just now. Please try again." };
     };
 
     // Actions, memory and the stored reply, once the full answer is in.
