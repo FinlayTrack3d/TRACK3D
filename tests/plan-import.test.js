@@ -65,3 +65,27 @@ test("two sessions on the same weekday are flagged", () => {
   ] });
   assert.match(result.flags.map((item) => item.issue).join(" "), /Push and Pull are both on MON/);
 });
+
+test("overlong fields are cut and flagged", () => {
+  const long = "x".repeat(900);
+  const result = normaliseImportedFitnessPlan({
+    plan_name: "P".repeat(200), notes: long.repeat(3),
+    sessions: Array.from({ length: 16 }, (_, i) => ({ name: i === 0 ? "S".repeat(120) : `Day ${i}`, days: [], notes: long,
+      exercises: Array.from({ length: i === 0 ? 35 : 1 }, (_, j) => ({ name: j === 0 ? "E".repeat(150) : `Ex ${j}`, sets: 3, reps: "10", notes: long, rest_seconds: 5000 })) })),
+  });
+  assert.equal(result.sessions.length, 14);
+  assert.equal(result.sessions[0].name.length, 80);
+  assert.equal(result.sessions[0].exercises.length, 30);
+  assert.equal(result.sessions[0].exercises[0].name.length, 80);
+  assert.equal(result.sessions[0].exercises[0].notes.length, 500);
+  assert.equal(result.sessions[0].exercises[0].rest_seconds, 900);
+  assert.equal(result.sessions[0].notes.length, 500);
+  assert.equal(result.planName.length, 80);
+  assert.ok(result.notes.length <= 2000);
+  const issues = result.flags.map((item) => item.issue).join("\n");
+  assert.match(issues, /only the first 14 were kept/);
+  assert.match(issues, /only the first 30 were kept/);
+  assert.match(issues, /session name was shortened/);
+  assert.match(issues, /exercise notes were shortened/);
+  assert.ok(result.flags.every((item) => item.issue.length <= 300 && item.where.length <= 300));
+});

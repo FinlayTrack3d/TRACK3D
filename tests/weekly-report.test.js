@@ -95,3 +95,13 @@ test("the coach summary round-trips through the stored text", () => {
   assert.equal(parseCoachSummary("Old style patterns paragraph"), null);
   assert.equal(parseCoachSummary(null), null);
 });
+
+test("a first week is labelled the baseline and implausible times are flagged", () => {
+  const metrics = buildWeeklyMetrics({ week, todayKey, sessions: [{ name: "A", days: ["MON", "TUE", "THU", "FRI"] }], workoutLogs: [
+    { date: "2026-09-29", total_volume: 1200, duration_mins: 1, exercises: [] },
+    { date: "2026-10-01", total_volume: 980, duration_mins: 0, exercises: [] },
+  ] });
+  const facts = weeklyFactsForCoach(metrics).join("\n");
+  assert.match(facts, /first tracked week of training: it is the baseline/);
+  assert.match(facts, /implausibly short \(1 min for 2 workouts\)/);
+});

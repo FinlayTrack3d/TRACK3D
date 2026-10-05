@@ -35,3 +35,20 @@ test("personality changes voice while safety and approval rules remain identical
   assert.notEqual(strict, supportive);
 });
 
+
+test("the workout coach sends this conversation's recent turns, not old messages", async () => {
+  const { conversationTurns } = await import("../lib/coaching/context.js");
+  const rows = [
+    { role: "user", content: "current question", created_at: "5" },
+    { role: "assistant", content: "answer 2", created_at: "4" },
+    { role: "user", content: "question 2", created_at: "3" },
+    { role: "assistant", content: "answer 1", created_at: "2" },
+    { role: "user", content: "question 1", created_at: "1" },
+  ];
+  assert.deepEqual(conversationTurns(rows, "current question"), [
+    { role: "user", content: "question 1" }, { role: "assistant", content: "answer 1" },
+    { role: "user", content: "question 2" }, { role: "assistant", content: "answer 2" },
+  ]);
+  assert.deepEqual(conversationTurns([{ role: "assistant", content: "stop message" }], "next"), [], "never starts with the assistant");
+  assert.ok(conversationTurns(Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `m${i}` })).reverse(), "x").length <= 10);
+});

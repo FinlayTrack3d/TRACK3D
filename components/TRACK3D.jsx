@@ -1,21 +1,23 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
-import { useSessionDraft } from "../lib/session-drafts";
+import { readDraft, useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
-import { sendCoachMessage } from "../lib/coaching/coach-client";
+import { resolveActivePain, streamCoachMessage } from "../lib/coaching/coach-client";
 import { COACH_PERSONALITIES } from "../lib/coaching/personality";
+import { normaliseExperience } from "../lib/coaching/system";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
+import { activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
+import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
-import { fitnessImportSystemPrompt, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
+import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
-import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, unloggedFoodFromLog, mealPlanTargetCheck, nextReviewStep, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
 async function chatHeaders() {
@@ -23,7 +25,43 @@ async function chatHeaders() {
   return { "Content-Type": "application/json", ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) };
 }
 
+// Streams a coach conversation reply from /api/chat, calling onText with the
+// text so far as it arrives. Falls back to a normal JSON reply. Throws on
+// failure, including a failure part-way through the stream.
+async function streamCoachText(payload, onText = () => {}) {
+  const res = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({ ...payload, stream: true }) });
+  if (!res.ok || !res.body || res.headers.get("X-Coach-Stream") !== "1") {
+    const text = await readCoachReply(res);
+    onText(text);
+    return text;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+    const errorAt = text.indexOf("\u0000ERROR:");
+    if (errorAt >= 0) throw new Error(text.slice(errorAt + 7) || "the coach reply was cut off");
+    onText(text);
+  }
+  if (!text.trim()) throw new Error("the coach sent an empty reply");
+  return text.trim();
+}
+
+// The text of a coach reply. Throws when the request failed or the reply is
+// empty, so a screen never shows canned text as if the coach had written it.
+async function readCoachReply(res) {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `the coach is unavailable (${res.status})`);
+  const text = (data.content || []).map(block => block.text || "").join("").trim();
+  if (!text) throw new Error("the coach sent an empty reply");
+  return text;
+}
+
 const NEON = "#00FFB2";
+const EXPERIENCE_OPTIONS = [["beginner", "BEGINNER"], ["intermediate", "INTERMEDIATE"], ["advanced", "ADVANCED"]];
 const NEON2 = "#00C8FF";
 const NEON3 = "#FF2D78";
 const BG = "#080C10";
@@ -55,6 +93,13 @@ const getZonedDateInfo = (date = new Date(), timeZone = DEFAULT_HOME_TIME_ZONE) 
     time: `${parts.hour}:${parts.minute}`,
   };
 };
+
+// Today's date (YYYY-MM-DD) in the user's home timezone, optionally shifted
+// by whole days. Use this rather than the device clock's local date.
+const homeDateKey = (user, offsetDays = 0) => shiftDateKey(getZonedDateInfo(new Date(), resolveHomeTimeZone(user)).dateKey, offsetDays);
+// Labels for a YYYY-MM-DD key, independent of the device timezone.
+const dateKeyLabel = (dateKey, options) => new Date(`${dateKey}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", ...options });
+const dateKeyDayCode = dateKey => ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${dateKey}T12:00:00Z`).getUTCDay()];
 
 function useZonedDateKey(timeZone) {
   const [dateKey, setDateKey] = useState(() => getZonedDateInfo(new Date(), timeZone).dateKey);
@@ -283,7 +328,7 @@ const css = `
 const taskIcon = task => task?.icon && task.icon !== "▸" ? `${task.icon} ` : "";
 
 // Check-in data keys that are flags or timing, not tasks.
-const HIDDEN_CHECKIN_KEYS = new Set(["wakeTiming", "routineTiming", "inProgress", "roughCheckin", "routineSkipped", "skipReason", "recordedAt", "loggedAfter", "checkin", "photos"]);
+const HIDDEN_CHECKIN_KEYS = new Set(["wakeTiming", "routineTiming", "inProgress", "roughCheckin", "routineSkipped", "skipReason", "recordedAt", "loggedAfter", "checkin", "photos", "scoreBasis"]);
 
 // Thumbnails for a check-in's stored progress photos (placeholders such as
 // "skipped" or "deferred" are not files).
@@ -380,7 +425,7 @@ function ScoreRing({ score, size = 108, max = 100 }) {
 }
 
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ dayContext, system, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
+function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -389,7 +434,11 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
   const [restored, setRestored] = useState(!storageKey);
   const [actions, setActions] = useState([]);
   const [conversationId, setConversationId] = useState(null);
+  const [painActive, setPainActive] = useState(false); // an unresolved pain report shapes the coach's replies
+  const [painNote, setPainNote] = useState("");
   const [personality, setPersonality] = useState("balanced");
+  const [experienceLevel, setExperienceLevel] = useState(null);
+  const [settingsError, setSettingsError] = useState("");
   const endRef = useRef(null);
   const messageListRef = useRef(null);
 
@@ -403,14 +452,15 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
     setRestored(true);
   }, [storageKey]);
 
+  // One coach style and level for every coach, stored in coach_profiles.
   useEffect(() => {
-    if (!coachingV12) return;
     supabase.auth.getUser().then(async ({ data: { user } }) => {
       if (!user) return;
-      const { data } = await supabase.from("coach_profiles").select("personality").eq("user_id", user.id).maybeSingle();
+      const { data } = await supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", user.id).maybeSingle();
       if (data?.personality) setPersonality(data.personality);
+      if (data?.experience_level) setExperienceLevel(data.experience_level);
     });
-  }, [coachingV12]);
+  }, []);
 
   useEffect(() => {
     if (!storageKey || !restored) return;
@@ -418,11 +468,6 @@ function AICoach({ dayContext, system, title, introduction, activationLabel, ope
   }, [storageKey, restored, started, messages]);
 
   const scroll = () => messageListRef.current?.scrollTo({ top: messageListRef.current.scrollHeight, behavior: "smooth" });
-
-  const defaultSystem = `You are TRACK3D's AI coach - sharp, direct, data-driven accountability partner. Keep responses to 2-4 sentences. Be real, not fluffy.
-Only use the numbers below. When a value is "not logged", say it has not been logged; never estimate or invent it.
-User data today:
-${dayContext || "- Nothing logged yet today"}`;
 
   const send = async (msg, { hidden = false } = {}) => {
     if (!msg.trim() || loading) return;
@@ -435,25 +480,24 @@ ${dayContext || "- Nothing logged yet today"}`;
     setTimeout(scroll, 50);
     try {
       if (coachingV12) {
-        const data = await sendCoachMessage(msg, conversationId, coachContext);
+        const data = await streamCoachMessage(msg, conversationId, coachContext, partial => {
+          setMessages([...updated, { role: "assistant", content: partial }]);
+          scroll();
+        });
         setConversationId(data.conversationId);
         setActions((data.actions || []).map(action => ({ ...action, type: action.type || action.action_type })));
-        setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet." }]);
+        setPainActive(Boolean(data.activePain));
+        setPainNote("");
+        setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet.", planChangeHint: Boolean(data.planChangeHint) }]);
         setLoading(false);
         setTimeout(scroll, 50);
         return;
       }
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: system || defaultSystem,
-          messages: updated.map(({ role, content }) => ({ role, content })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Coach is unavailable right now.");
-      const reply = data.content?.map(b => b.text || "").join("") || "Unable to connect.";
+      const reply = await streamCoachText({
+        area,
+        context: context ?? `User data today:\n${dayContext || "- Nothing logged yet today"}`,
+        messages: recentChatMessages(updated.filter(message => message.role === "user" || message.role === "assistant")),
+      }, text => { setMessages([...updated, { role: "assistant", content: text }]); scroll(); });
       setMessages([...updated, { role: "assistant", content: reply }]);
       // A coach that carries a running memory ends every reply with a hidden
       // updated summary - persist it so the next conversation (even on a
@@ -471,13 +515,30 @@ ${dayContext || "- Nothing logged yet today"}`;
   const activate = () => {
     setStarted(true);
     if (compact) setExpanded(true);
-    if (!openWithoutPrompt) send(openingMessage || (system ? "Suggest an optimal morning routine for me based on my goals. Give me 5-7 tasks in order with durations." : "Give me a quick assessment of my day so far and what I should focus on."), { hidden: true });
+    if (!openWithoutPrompt) send(openingMessage || "Give me a quick assessment of my day so far and what I should focus on.", { hidden: true });
   };
 
-  const choosePersonality = async nextPersonality => {
-    setPersonality(nextPersonality);
+  // A change mid-chat leaves a visible note so the new style is obvious.
+  const saveCoachSetting = async (field, value, note) => {
+    setSettingsError("");
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) await supabase.from("coach_profiles").upsert({ user_id: user.id, personality: nextPersonality, updated_at: new Date().toISOString() });
+    if (!user) return false;
+    const { error } = await supabase.from("coach_profiles").upsert({ user_id: user.id, [field]: value, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) { setSettingsError(`Couldn't save that setting: ${error.message}`); return false; }
+    if (messages.some(message => message.role === "user" || message.role === "assistant")) setMessages(current => [...current, { role: "note", content: note }]);
+    return true;
+  };
+  const choosePersonality = async nextPersonality => {
+    if (nextPersonality === personality) return;
+    const previous = personality;
+    setPersonality(nextPersonality);
+    if (!await saveCoachSetting("personality", nextPersonality, `Coach style: ${COACH_PERSONALITIES[nextPersonality]?.label || nextPersonality}`)) setPersonality(previous);
+  };
+  const chooseExperience = async level => {
+    if (level === experienceLevel) return;
+    const previous = experienceLevel;
+    setExperienceLevel(level);
+    if (!await saveCoachSetting("experience_level", level, `Level: ${level.toUpperCase()}`)) setExperienceLevel(previous);
   };
 
   // Apply a coach change and report only what the app confirms happened.
@@ -525,25 +586,39 @@ ${dayContext || "- Nothing logged yet today"}`;
   return (
     <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || (system ? "AI MORNING PLANNER" : "AI COACH")}</div>
+        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || "AI COACH"}</div>
         {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
-      {coachingV12 && (!compact || expanded) && <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>COACH STYLE</div>}
-      {coachingV12 && (!compact || expanded) && <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
-        {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
-      </div>}
+      {(!compact || expanded) && (
+        <div data-testid="coach-settings" style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>COACH STYLE</div>
+          <div style={{ display: "flex", gap: 5, marginBottom: 7 }}>
+            {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={personality === key} onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
+          </div>
+          <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>YOUR LEVEL</div>
+          <div style={{ display: "flex", gap: 5 }}>
+            {EXPERIENCE_OPTIONS.map(([key, label]) => <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={experienceLevel === key} onClick={() => chooseExperience(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: experienceLevel === key ? NEON : "#3A5060", borderColor: experienceLevel === key ? NEON : BORDER }}>{label}</button>)}
+          </div>
+          {settingsError && <div role="alert" style={{ fontSize: 9, color: "#FFB547", marginTop: 5 }}>{settingsError}</div>}
+        </div>
+      )}
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
           <div style={{ flex: 1, fontSize: compact ? 9 : 11, color: "#E0EAF0", marginBottom: compact ? 0 : 18, textAlign: compact ? "left" : "center", lineHeight: 1.5, letterSpacing: compact ? 0 : 1 }}>
-            {introduction || (system ? "Let AI build your optimal\nmorning routine." : "Ask your AI coach about your habits,\nworkouts and nutrition.")}
+            {introduction || "Ask your AI coach about your habits,\nworkouts and nutrition."}
           </div>
-          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (system ? "BUILD MY ROUTINE" : openingMessage || openWithoutPrompt ? "OPEN COACH CHAT" : "REVIEW MY DAY SO FAR")}</button>
+          <button className={`t3d-btn ${compact ? "t3d-btn-sm" : ""}`} onClick={activate}>{activationLabel || (openingMessage || openWithoutPrompt ? "OPEN COACH CHAT" : "REVIEW MY DAY SO FAR")}</button>
         </div>
       ) : (
         <>
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {(compact && !expanded ? messages.filter(m => !m.hidden).slice(-2) : messages.filter(m => !m.hidden)).map((m, i) => {
+              if (m.role === "note") return <div key={i} data-testid="coach-note" style={{ textAlign: "center", fontSize: 9, color: "#6F8792", letterSpacing: 1, margin: "6px 0" }}>{m.content}</div>;
+              const changePlanButton = m.planChangeHint && onOpenChangePlan ? <button key={`cp-${i}`} className="t3d-btn t3d-btn-sm" style={{ margin: "0 0 8px", fontSize: 8 }} onClick={onOpenChangePlan}>OPEN CHANGE PLAN</button> : null;
+              if (changePlanButton && i === messages.filter(message => !message.hidden).length - 1) {
+                return <div key={i}><div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}><div className="t3d-ai-tag" style={{ color: NEON }}>AI</div><span style={{ color: "#E0EAF0", fontSize: 11, whiteSpace: "pre-wrap" }}>{cleanAiText(m.content)}</span></div>{changePlanButton}</div>;
+              }
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets|add_sets|log_set)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
               // Bigger, structured changes (a whole session/programme rewrite) travel as
               // JSON in a fenced block rather than the pipe-delimited marker above, which
@@ -592,6 +667,16 @@ ${dayContext || "- Nothing logged yet today"}`;
               <div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}>
                 <div className="t3d-ai-tag" style={{ color: NEON }}>AI</div>
                 <span className="t3d-cursor" style={{ color: "#E0EAF0", fontSize: 11 }}>Thinking</span>
+              </div>
+            )}
+            {coachingV12 && (painActive || painNote) && (
+              <div role="status" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, border: "1px solid rgba(255,181,71,.35)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: "8px 10px", marginBottom: 8 }}>
+                <span style={{ fontSize: 10, color: "#FFB547", lineHeight: 1.4 }}>{painNote || "Pain noted — the coach won't load that area until you say it's better."}</span>
+                {painActive && <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, whiteSpace: "nowrap" }} onClick={async () => {
+                  const resolved = await resolveActivePain();
+                  if (resolved.ok) { setPainActive(false); setPainNote("Pain marked as resolved. Ease back in with light, pain-free sets."); }
+                  else setPainNote(`Couldn't update that: ${resolved.error}`);
+                }}>PAIN RESOLVED</button>}
               </div>
             )}
             {coachingV12 && actions.filter(action => !["rejected", "applied"].includes(action.status)).map(action => {
@@ -648,8 +733,8 @@ async function describeAppliedRoutine({ conversation, before, after, pendingRemo
       method: "POST",
       headers: await chatHeaders(),
       body: JSON.stringify({
-        system: `You are AI Coach. The app has just applied your routine change and recalculated the times. Tell the user what changed in at most 60 words, in 2-3 short sentences, with no headings or lists. Use only the facts below: quote task times and the finish time exactly as written, never calculate times yourself, and never describe tasks as locked or fixed unless the user said so. At most one optional follow-up question.
-Order changed: ${orderChanged ? "yes" : "no"}.
+        area: "routine_change_summary",
+        context: `Order changed: ${orderChanged ? "yes" : "no"}.
 Duration changes: ${durationChanges.join("; ") || "none"}.
 ${pendingRemovals.length ? `Proposed removals waiting for the user to confirm (not yet removed): ${pendingRemovals.map(item => item.name).join(", ")}.\n` : ""}Schedule now:
 ${schedule}
@@ -730,10 +815,8 @@ function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTim
         headers: await chatHeaders(),
         body: JSON.stringify({
           responseTokens: 2500,
-          system: `You help plan a realistic morning routine through conversation. Use the full conversation, especially the user's reasons for agreeing or disagreeing, responsibilities, preferences, and constraints. Acknowledge their reasoning and explain how it affects your recommendation. Give your best practical plan immediately using available context; do not require a conversation first. Do not invent personal context or change a sensible plan just to appear useful. Keep the explanation to at most 60 words, in 2-3 short sentences, with no headings or lists. At most one optional follow-up question, only after making a recommendation; never a questionnaire. Identify yourself as AI Coach.
-You can reorder the supplied tasks and change their durations (whole minutes, at least 1). Keep every task exactly once in "tasks", and the final check-in stays locked last. You cannot remove a task yourself: if the user's goal (for example a time limit) cannot be met by reordering and shortening, list the task(s) to drop in "proposeRemove" with a short reason and the user will confirm. Never propose removing a task marked locked. Timings are recalculated consecutively from wake-up; never claim a time or finish time yourself.
-Respond only with valid JSON with double-quoted keys: {"tasks":[{"key":"task key","duration":10}],"proposeRemove":[{"key":"task key","reason":"short reason"}],"explanation":"Your conversational reply"}. Use the keys from the CURRENT task list below, not earlier keys. Keep each duration equal to the current value unless you have a specific reason to change it.
-Wake-up: ${wakeTime}.
+          area: "routine_plan",
+          context: `Wake-up: ${wakeTime}.
 Current tasks: ${JSON.stringify(tasks)}.
 Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.duration })}.`,
           messages: updated.map(({ role, content }, index) => ({ role, content: attempt && index === updated.length - 1 ? content + "\nReturn a complete valid JSON object with every current task key once. Use string keys and a brief explanation. Your previous response could not be applied." : content })),
@@ -1107,9 +1190,8 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
           headers: await chatHeaders(),
           body: JSON.stringify({
             responseTokens: 2500,
-            system: `You help refine an existing morning routine through conversation. You can reorder tasks and adjust their durations, but you cannot add or remove tasks (the user does that with the routine controls) and the final check-in step always stays last. Use the conversation, especially reasons given for agreeing or disagreeing. Keep the explanation to at most 60 words, in 2-3 short sentences, no headings or lists, identify yourself as AI Coach, and explain the main concrete change. At most one optional follow-up question, only after making a recommendation.
-Respond only with valid JSON with double-quoted keys: {"tasks":[{"key":"task key","duration":10}],"explanation":"your reply"}. Include every task key from the current list exactly once, in your recommended order. Keep duration equal to the current value unless you have a specific reason to change it. Use the keys from the CURRENT task list below, not earlier keys.
-Wake-up: ${wakeTime}.
+            area: "routine_refine",
+            context: `Wake-up: ${wakeTime}.
 Current tasks: ${JSON.stringify(tasks)}.`,
             messages: updated.map(({ role, content }, index) => ({ role, content: attempt && index === updated.length - 1 ? content + "\nReturn a complete valid JSON object with every current task key once. Your previous response could not be applied." : content })),
           }),
@@ -1604,6 +1686,7 @@ function MorningSection({ user }) {
     try { localStorage.setItem("track3d-weight-unit", unit); } catch { /* Unit preference is a convenience only. */ }
   };
   const [routineSavedNotice, setRoutineSavedNotice] = useState(false);
+  const [routineSaveError, setRoutineSaveError] = useState("");
   const setupSnapshotRef = useRef(null);
   const [checkinStep, setCheckinStep] = useState(0);
   const [checkinData, setCheckinData] = useState({});
@@ -1750,15 +1833,25 @@ function MorningSection({ user }) {
     setLoading(false);
   };
 
+  // Returns { ok, error }. Callers must not report "saved" unless ok is true.
   const saveRoutine = async (tasks, groups = dayGroups) => {
-    if (!user) return;
-    await supabase.from("morning_routines").upsert({
-      user_id: user.id,
-      wake_time: wakeTime,
-      tasks: tasks,
-      day_groups: groups,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: "user_id" });
+    if (!user) return { ok: false, error: "not signed in" };
+    try {
+      const { error } = await supabase.from("morning_routines").upsert({
+        user_id: user.id,
+        wake_time: wakeTime,
+        tasks: tasks,
+        day_groups: groups,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+      if (error) throw error;
+      setRoutineSaveError("");
+      return { ok: true };
+    } catch (error) {
+      const message = error?.message || "connection problem";
+      setRoutineSaveError(`Your routine could not be saved: ${message}. Please try again.`);
+      return { ok: false, error: message };
+    }
   };
 
   // Mini-save: while the Edit Routine or Alternating Days screen is open,
@@ -1767,18 +1860,25 @@ function MorningSection({ user }) {
   // mid-edit doesn't lose the changes.
   useEffect(() => {
     if (!user || !["editRoutine", "rotationSetup"].includes(view)) return;
-    saveRoutine(scheduledTasks, dayGroups).catch(() => {});
+    saveRoutine(scheduledTasks, dayGroups);
   }, [scheduledTasks, wakeTime, dayGroups, view, user]);
 
+  // created_at is only sent when today's row is first written, so later
+  // saves (autosave, finishing, redo) keep the original time.
+  const checkinRowSavedRef = useRef(null);
   const saveCheckin = async (data, score, { inProgress = false } = {}) => {
     if (!user) return;
-    return await supabase.from("morning_checkins").upsert({
+    const withBasis = { ...data, scoreBasis: data.scoreBasis || scoreBasisOf(allSteps) };
+    const rowExists = checkinRowSavedRef.current === today || history.some(entry => entry.date === today);
+    const result = await supabase.from("morning_checkins").upsert({
       user_id: user.id,
       date: today,
       score: score,
-      data: inProgress ? { ...data, inProgress: true } : data,
-      created_at: new Date().toISOString(),
+      data: inProgress ? { ...withBasis, inProgress: true } : withBasis,
+      ...(rowExists ? {} : { created_at: new Date().toISOString() }),
     }, { onConflict: "user_id,date" });
+    if (!result.error) checkinRowSavedRef.current = today;
+    return result;
   };
 
   // Mini-save: every time an answer lands in checkinData during the live
@@ -1987,7 +2087,7 @@ function MorningSection({ user }) {
     if (step) return step.name;
     return String(key).startsWith("custom-") ? "Custom task (since removed)" : key;
   };
-  const morningCoachSystem = (data, score, routineTimingText) => {
+  const morningCoachContext = (data, score, routineTimingText) => {
     const tasks = allSteps.filter(step => step.id !== "checkin").map(step => {
       const value = data[step.id || step.name];
       if (step.type === "tick") return { name: step.name, done: value === true ? true : value === false ? false : "not answered" };
@@ -2000,9 +2100,7 @@ function MorningSection({ user }) {
       .map(entry => entry.data?.routineSkipped
         ? { date: entry.date, skipped: true }
         : { date: entry.date, score: entry.score, sleep: entry.data?.sleep || "not logged", weight: entry.data?.weight || "not logged" });
-    return `You are TRACK3D's morning coach. Be concise, friendly and practical. Use short bullets with no emojis. Never claim something was missed simply because the user answered no or skipped optional photos. Refer to tasks only by the names given below, and only mention tasks that appear in the list.
-Routine timing gives the real time taken. If it is implausibly short for the number of tasks (for example under a minute per task), say plainly that the timing looks too short to be real and do not praise the score.
-Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(data.wakeTiming)}. Routine timing: ${routineTimingText}.
+    return `Morning score: ${score}/10. Wake timing: ${wakeTimingSummary(data.wakeTiming)}. Routine timing: ${routineTimingText}.
 Today's tasks (${tasks.length}): ${JSON.stringify(tasks)}.
 Last ${recentCheckins.length} check-ins before today, newest first: ${recentCheckins.length ? JSON.stringify(recentCheckins) : "none recorded"}.`;
   };
@@ -2211,11 +2309,14 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     setView("liveMorning");
   };
 
-  const morningScore = (data) => {
-    const total = allSteps.length;
+  // The steps a morning is scored against, saved with each check-in so that
+  // editing a past day later scores it against that day's routine, not today's.
+  const scoreBasisOf = steps => steps.map(step => ({ id: step.id || step.name, type: step.type }));
+  const morningScore = (data, steps = data?.scoreBasis || allSteps) => {
+    const total = steps.length;
     if (total === 0) return 0;
     let points = 0;
-    allSteps.forEach(step => {
+    steps.forEach(step => {
       const key = step.id || step.name;
       const val = data[key];
       if (step.type === "number" && val && val !== "") points++;
@@ -2230,11 +2331,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
   // 7-day chart data
   const last7 = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const dateStr = shiftDateKey(today, -(6 - i));
     const entry = history.find(h => h.date === dateStr && !h.data?.inProgress);
-    return { date: dateStr, score: entry ? entry.score : null, label: d.toLocaleDateString("en-GB", { weekday: "short" }) };
+    return { date: dateStr, score: entry ? entry.score : null, label: dateKeyLabel(dateStr, { weekday: "short" }) };
   });
 
   // Inputs for sleep, number and photo steps. Shared by the check-in steps and
@@ -2428,13 +2527,26 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   };
   // Discard the current session. Only an unfinished saved row is deleted; a
   // finished morning (for example during "Do again") is left as it was.
+  // Removes a day's progress photos from storage once its check-in is
+  // deleted. Returns an error message, or "" when nothing failed.
+  const deleteDayPhotos = async date => {
+    const folder = `${user.id}/${date}`;
+    const { data: files, error: listError } = await supabase.storage.from("checkin-photos").list(folder);
+    if (listError) return listError.message;
+    if (!files?.length) return "";
+    const { error } = await supabase.storage.from("checkin-photos").remove(files.map(file => `${folder}/${file.name}`));
+    return error ? error.message : "";
+  };
   const deleteMorningSession = async () => {
     setMorningActionError("");
     const todayRow = history.find(entry => entry.date === today);
     if (todayRow?.data?.inProgress) {
       const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", today);
       if (error) { setMorningActionError(`Could not delete this session: ${error.message}`); return; }
+      const photoError = await deleteDayPhotos(today);
+      if (photoError) setMorningActionError(`The session was deleted, but its photos could not be removed: ${photoError}`);
     }
+    checkinRowSavedRef.current = null;
     resetMorningSession();
     setMorningConfirm(null);
     setView("home");
@@ -2444,6 +2556,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     setMorningActionError("");
     const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", date);
     if (error) { setMorningActionError(`Could not delete this day: ${error.message}`); return; }
+    const photoError = await deleteDayPhotos(date);
+    if (photoError) setMorningActionError(`The day was deleted, but its photos could not be removed: ${photoError}`);
+    if (date === today) checkinRowSavedRef.current = null;
     setMorningConfirm(null);
     setOpenHistoryDate(null);
     if (date === today) resetMorningSession();
@@ -2592,10 +2707,18 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             if (editSubmissionData.photos || PHOTO_ANGLES.some(angle => photoFiles[angle])) {
               updatedData.photos = updatedPhotos;
             }
+            // A past day is scored against the routine saved with it. Older
+            // entries saved before that keep their original score, because
+            // the routine they were scored against is not known.
+            const originalEntry = history.find(entry => entry.date === formDate);
+            if (!isPastEntry && !updatedData.scoreBasis) updatedData.scoreBasis = scoreBasisOf(allSteps);
+            const score = updatedData.scoreBasis
+              ? morningScore(updatedData)
+              : (originalEntry && !originalEntry.data?.inProgress ? originalEntry.score : morningScore(updatedData));
             const { error } = await supabase.from("morning_checkins").upsert({
               user_id: user.id,
               date: formDate,
-              score: morningScore(updatedData),
+              score,
               data: updatedData,
             }, { onConflict: "user_id,date" });
             if (error) throw error;
@@ -2842,7 +2965,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                               activationLabel="CHAT ABOUT THIS MORNING"
                               openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
                               storageKey={`morning-review-${user.id}-${today}`}
-                              system={morningCoachSystem(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
+                              area="morning_review"
+                              context={morningCoachContext(todayEntry.data, todayEntry.score || 0, routineTimingSummary(todayEntry.data.routineTiming))}
                             />
                           </div>
                         );
@@ -3121,6 +3245,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   if (view === "editRoutine") {
     return (
       <>
+      {routineSaveError && <div role="alert" style={{ margin: "0 0 14px", padding: "10px 12px", border: "1px solid rgba(255,45,120,.4)", background: "rgba(255,45,120,.07)", borderRadius: 6, color: "#FF8AAD", fontSize: 11, lineHeight: 1.5 }}>{routineSaveError}</div>}
       <MorningRoutineEditor
         wakeTime={wakeTime}
         setWakeTime={setWakeTime}
@@ -3131,8 +3256,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
         onCancel={() => setView("home")}
         onRebuild={() => setConfirmChangeRoutine(true)}
         onSave={async () => {
-          await saveRoutine(scheduledTasks);
+          const saved = await saveRoutine(scheduledTasks);
+          if (!saved.ok) return;
           setView("home");
+          setRoutineSavedNotice(true);
+          setTimeout(() => setRoutineSavedNotice(false), 4000);
         }}
       />
       {changeRoutineDialog}
@@ -3160,6 +3288,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
+          {routineSaveError && <div role="alert" style={{ margin: "0 0 14px", padding: "10px 12px", border: "1px solid rgba(255,45,120,.4)", background: "rgba(255,45,120,.07)", borderRadius: 6, color: "#FF8AAD", fontSize: 11, lineHeight: 1.5 }}>{routineSaveError}</div>}
           <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
             {["WAKE TIME", "TASKS", "REVIEW"].map((s, i) => (
               <div key={i} style={{
@@ -3624,7 +3753,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               onRemoveTask={taskId => setSelectedTasks(current => current.filter(task => (task.id || task.name) !== taskId))}
               onBack={() => setSetupStep(1)}
               onSave={async () => {
-                await saveRoutine(scheduledTasks);
+                const saved = await saveRoutine(scheduledTasks);
+                if (!saved.ok) { window.scrollTo({ top: 0, behavior: "smooth" }); return; }
                 setupSnapshotRef.current = null;
                 setIsSetup(true);
                 setView("home");
@@ -3997,7 +4127,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               activationLabel="CHAT ABOUT THIS MORNING"
               openingMessage="Give me a short, useful review of this morning. Lead with how I did against my planned timing, then one practical improvement for tomorrow. Do not ask me a generic question."
               storageKey={`morning-review-${user.id}-${today}`}
-              system={morningCoachSystem(checkinData, score, routineTimingText)}
+              area="morning_review"
+              context={morningCoachContext(checkinData, score, routineTimingText)}
             />
           </div>
           {submissionError && <div style={{ color: NEON3, fontSize: 11, marginBottom: 12, textAlign: "center" }}>{submissionError}</div>}
@@ -4025,6 +4156,7 @@ function EndOfDayCheckin({ user, onComplete }) {
   const [steps, setSteps] = useState("");
   const [futureYou, setFutureYou] = useState(null);
   const [aiRoundup, setAiRoundup] = useState("");
+  const [aiRoundupError, setAiRoundupError] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [goals, setGoals] = useState([]);
@@ -4034,11 +4166,7 @@ function EndOfDayCheckin({ user, onComplete }) {
   const [needsGoalsPrompt, setNeedsGoalsPrompt] = useState(false);
   const [newGoalText, setNewGoalText] = useState("");
 
-  const getLocalDate = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
-  const today = getLocalDate();
+  const today = homeDateKey(user);
 
   useEffect(() => {
     if (!user) return;
@@ -4081,9 +4209,10 @@ function EndOfDayCheckin({ user, onComplete }) {
 
   const getAIRoundup = async () => {
     setAiLoading(true);
+    setAiRoundupError("");
     try {
-      // Gather all today's data
-      const [morning, nutrition, fitness, calendar, debrief, eodHistory] = await Promise.all([
+      // Gather all today's data (same order as the queries below)
+      const [morning, nutrition, fitness, debrief, calendar, eodHistory] = await Promise.all([
         supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).single(),
         supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food").eq("user_id", user.id).eq("date", today).single(),
         supabase.from("workout_logs").select("session_name,total_volume,duration_mins").eq("user_id", user.id).eq("date", today).eq("in_progress", false).single(),
@@ -4107,10 +4236,8 @@ function EndOfDayCheckin({ user, onComplete }) {
         ? `${goals.filter(g => g.done).length} of ${goals.length} completed - ${goals.map(g => `"${g.text}" (${g.done ? "done" : "not done"})`).join(", ")}`
         : "no goals set for today";
 
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are TRACK3D's end of day coach. Give a concise, honest daily roundup in 4-6 sentences. Cover: morning routine, wake-up timing against the planned time when recorded, nutrition, fitness, calendar alignment, mood/energy, and whether the user's top goals for today got done. Treat the live start time as the recorded wake-up time, not independently verified waking. Do not assume missing wake-up data or praise earlier waking at the expense of sleep. Spot any patterns from history. End with one specific action for tomorrow. Be direct, encouraging, never preachy. Never give medical advice.`,
+      const text = await streamCoachText({
+          area: "end_of_day",
           messages: [{ role: "user", content: `Today's data:
 - Morning score: ${morningScore}/10
 - ${wakeTimingSummary(morning.data?.data?.wakeTiming)}
@@ -4126,12 +4253,12 @@ function EndOfDayCheckin({ user, onComplete }) {
 - Pattern history: ${patterns}
 
 Give me my daily roundup and spot any patterns.` }],
-        }),
-      });
-      const data = await res.json();
-      setAiRoundup(data.content?.map(b=>b.text||"").join("") || "Great effort today. Keep building the habits.");
+      }, setAiRoundup);
+      setAiRoundup(text);
     } catch (e) {
-      setAiRoundup("Keep pushing — every day you show up is progress.");
+      console.log("Roundup error:", e?.message);
+      setAiRoundup("");
+      setAiRoundupError("Couldn't write your roundup.");
     }
     setAiLoading(false);
   };
@@ -4275,6 +4402,11 @@ Give me my daily roundup and spot any patterns.` }],
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>AI DAILY ROUNDUP</div>
               <div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.7 }}>{aiRoundup}</div>
             </div>
+          ) : aiRoundupError ? (
+            <div role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
+              <span style={{ fontSize: 11, color: "#FFB547" }}>{aiRoundupError}</span>
+              <button className="t3d-btn t3d-btn-sm" onClick={getAIRoundup}>TRY AGAIN</button>
+            </div>
           ) : null}
 
           <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={saving || aiLoading}
@@ -4321,12 +4453,10 @@ Give me my daily roundup and spot any patterns.` }],
 // ─── Daily activity helper (shared by heatmap, history view & weekly report) ──
 const DAY_NAMES = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
 
-async function fetchDailyActivity(userId, days) {
-  const dates = Array.from({ length: days }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (days - 1 - i));
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  });
+async function fetchDailyActivity(user, days) {
+  const userId = user.id;
+  const today = homeDateKey(user);
+  const dates = Array.from({ length: days }, (_, i) => shiftDateKey(today, -(days - 1 - i)));
   const earliest = dates[0];
   const [morning, nutrition, workout, eod] = await Promise.all([
     supabase.from("morning_checkins").select("date,score").eq("user_id", userId).gte("date", earliest),
@@ -4438,7 +4568,7 @@ function DashboardHistory({ user, onBack }) {
 
   useEffect(() => {
     if (!user) return;
-    fetchDailyActivity(user.id, 90).then(a => { setActivity(a); setLoading(false); });
+    fetchDailyActivity(user, 90).then(a => { setActivity(a); setLoading(false); });
   }, [user]);
 
   if (loading) return (
@@ -4599,7 +4729,7 @@ function WeeklyRecap({ user, onBack }) {
     setData(null); setLoadError(""); setSummaryError("");
     loadWeeklyReportData(user, week)
       .then(result => { if (!cancelled) setData(result); })
-      .catch(error => { if (!cancelled) setLoadError(error?.message || "connection problem"); });
+      .catch(error => { console.log("Weekly report load error:", error?.message); if (!cancelled) setLoadError("Check your connection and try again."); });
     return () => { cancelled = true; };
   }, [user, week]);
 
@@ -4612,11 +4742,7 @@ function WeeklyRecap({ user, onBack }) {
       const res = await fetch("/api/chat", {
         method: "POST", headers: await chatHeaders(),
         body: JSON.stringify({
-          system: `You are TRACK3D's coach writing a short weekly recap. Use only the facts provided; never invent numbers, sessions or foods. Reply ONLY with JSON: {"biggest_win": "...", "focus": "...", "verdict": "..."}.
-biggest_win: one or two sentences on what genuinely went best this week, naming the specific number.
-focus: one clear, specific, actionable improvement for next week.
-verdict: two short sentences summarising the week honestly and encouragingly.
-If there is very little data, say so plainly instead of padding. No emojis, no markdown, no medical advice.`,
+          area: "weekly_summary",
           messages: [{ role: "user", content: `Week ${week.start} to ${week.end}${week.inProgress ? " (still in progress)" : ""}:\n- ${facts.join("\n- ")}` }],
         }),
       });
@@ -4630,9 +4756,13 @@ If there is very little data, say so plainly instead of padding. No emojis, no m
         user_id: user.id, report_date: week.end, week_start: week.start, week_end: week.end,
         patterns: formatCoachSummary(summary), diet_suggestions: null,
       }, { onConflict: "user_id,report_date" });
-      if (error) setSummaryError(`Shown below but not saved: ${error.message}`);
+      if (error) {
+        console.log("Weekly report save error:", error.message);
+        setSummaryError("Your coach summary is below, but it couldn't be saved, so it will be written again next time you open this week.");
+      }
     } catch (error) {
-      setSummaryError(`Coach summary unavailable: ${error?.message || "connection problem"}. Your numbers above are unaffected.`);
+      console.log("Weekly summary error:", error?.message);
+      setSummaryError("The coach summary couldn't be written just now. Your numbers above are unaffected — try again in a moment.");
     } finally {
       setGenerating(false);
     }
@@ -4674,7 +4804,7 @@ If there is very little data, say so plainly instead of padding. No emojis, no m
         )}
       </div>
 
-      {loadError && <div className="t3d-card" role="alert" style={{ color: "#FF8AAD", fontSize: 11 }}>Your report could not be loaded: {loadError}</div>}
+      {loadError && <div className="t3d-card" role="alert" style={{ color: "#FF8AAD", fontSize: 11 }}>Your report couldn&apos;t be loaded. {loadError}</div>}
       {!metrics && !loadError && <div className="t3d-card" style={{ textAlign: "center", fontSize: 11, color: "#8AABB8" }}>Loading your week...</div>}
       {metrics && !metrics.hasData && (
         <div className="t3d-card" style={{ textAlign: "center", padding: 24, fontSize: 12, color: "#C5D6DC", lineHeight: 1.7 }}>
@@ -4837,13 +4967,14 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
     if (!user) return;
     supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", today).maybeSingle()
       .then(({ data }) => { if (data) setEodDone(true); });
-    fetchDailyActivity(user.id, 7).then(setActivity7);
+    fetchDailyActivity(user, 7).then(setActivity7);
     Promise.all([
       supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
-      supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed").eq("user_id", user.id).eq("date", today).maybeSingle(),
+      supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food,off_plan_calories").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
       supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
-      supabase.from("workout_logs").select("session_name,date,in_progress,total_volume,duration_mins").eq("user_id", user.id).eq("date", today),
+      // This week's workouts (with sets), so the coach knows what was lifted.
+      supabase.from("workout_logs").select("id,session_name,date,in_progress,total_volume,duration_mins,exercises").eq("user_id", user.id).gte("date", shiftDateKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7))).lte("date", today),
       supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
     ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
       loaded: true,
@@ -4854,8 +4985,9 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
       nutritionPlan: nutritionPlan.data || null,
       sessions: split.data?.sessions || [],
       // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
-      workouts: (workouts.data || []).filter(log => !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
-      activeWorkout: (workouts.data || []).find(log => log.in_progress) || null,
+      workouts: (workouts.data || []).filter(log => log.date === today && !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
+      weekWorkouts: (workouts.data || []).filter(log => !log.in_progress),
+      activeWorkout: (workouts.data || []).find(log => log.date === today && log.in_progress) || null,
     }));
   }, [user, today]);
 
@@ -4878,7 +5010,18 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
   const coachDayContext = [
     `- Morning routine: ${morningSkipped ? "skipped today" : morningDone ? `done, score ${todayData.morning?.score ?? 0}/10` : morningInProgress ? "started, not finished" : "not logged"}`,
     `- Workout: ${activeWorkout ? `${activeWorkout.session_name} in progress` : completedWorkoutNames.length ? `completed ${completedWorkoutNames.join(" + ")}` : todaySession ? `${todaySession.name} scheduled, not logged yet` : todayData.sessions.length ? "no session scheduled today" : "no training plan set up"}`,
-    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (target ${calorieGoal} kcal${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
+    ...todayData.workouts.flatMap(log => {
+      const lines = bestSetsSummary(log.exercises || []);
+      const pbs = workoutPersonalBests(log.exercises || []);
+      return [
+        ...(lines.length ? [`- ${log.session_name} lifts: ${lines.join("; ")}`] : []),
+        `- ${log.session_name} PBs: ${pbs.length ? pbs.map(pb => `${pb.exercise} ${pb.weight}kg × ${pb.reps} (${pb.label})`).join("; ") : "none today"}`,
+      ];
+    }),
+    `- Workouts this week: ${(() => { const week = weeklyWorkoutProgress(todayData.weekWorkouts || [], today, todayData.sessions, null, { countCurrent: false }); return week.planned ? `${week.completed} of ${week.planned} planned` : `${week.completed}`; })()}`,
+    `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (app target ${calorieGoal} kcal${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
+    ...(todayData.nutrition?.off_plan_food && Number(todayData.nutrition.off_plan_calories) > 0 ? [`- Off-plan food: ${todayData.nutrition.off_plan_food} (${todayData.nutrition.off_plan_calories} kcal, included above)`] : []),
+    ...(unloggedFoodFromLog(todayData.nutrition).length ? [`- Food eaten with no calories entered (the calorie total above is incomplete): ${unloggedFoodFromLog(todayData.nutrition).join("; ")}`] : []),
     `- Habits: ${habits.length ? `${done}/${habits.length} done${habits.some(h => h.done) ? ` (done: ${habits.filter(h => h.done).map(h => h.name).join(", ")})` : ""}${habits.some(h => !h.done) ? ` (pending: ${habits.filter(h => !h.done).map(h => h.name).join(", ")})` : ""}` : "none set up"}`,
     `- Daily score: ${score}/100 (calculated from the items above)`,
   ].join("\n");
@@ -4942,6 +5085,7 @@ function Dashboard({ habits, setHabits, user, onNavigate }) {
           {calorieGoal ? <>
             <div className="t3d-sval" style={{ color: NEON2 }}>{caloriesEaten.toLocaleString()} <span style={{ fontSize: 12, letterSpacing: 1 }}>KCAL</span></div>
             <div className="t3d-slabel">EATEN OF {calorieGoal.toLocaleString()} TARGET</div>
+            {unloggedFoodFromLog(todayData.nutrition).length > 0 && <div data-testid="kcal-excludes" style={{ fontSize: 9, color: "#FFB547", marginTop: 4 }}>Excludes: {unloggedFoodFromLog(todayData.nutrition).join(", ")}</div>}
             <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${Math.min((caloriesEaten/calorieGoal)*100,100)}%`, background: "linear-gradient(90deg,#00C8FF,#0080FF)" }} /></div>
           </> : <>
             <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6 }}>Set your daily calorie target first.</div>
@@ -5200,9 +5344,11 @@ function Fitness({ user, isActive = true }) {
   const [numSessions, setNumSessions] = useState(3);
   const [sessions, setSessions] = useState([]);
   const [planPreview, setPlanPreview] = useState(null); // read-only plan sheet
+  const [setupExperience, setSetupExperience] = useState(null); // asked once during fitness setup
   const [importText, setImportText] = useState("");
   const [importResult, setImportResult] = useState(null); // interpreted plan awaiting review
   const [importError, setImportError] = useState("");
+  const [planSaveError, setPlanSaveError] = useState(""); // a plan change that did not save
   const [importFileNote, setImportFileNote] = useState("");
   const [importInterpreting, setImportInterpreting] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
@@ -5386,6 +5532,13 @@ function withPlanApproval(sessions, now = new Date()) {
     return () => clearInterval(timer);
   }, [aiBuilding]);
 
+  // The training level every coach uses (coach_profiles.experience_level).
+  const saveExperienceLevel = async level => {
+    if (!user || !level) return;
+    const { error } = await supabase.from("coach_profiles").upsert({ user_id: user.id, experience_level: level, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) console.log("Experience level not saved:", error.message);
+  };
+
   const openAiBuilder = () => {
     setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
   };
@@ -5407,11 +5560,17 @@ function withPlanApproval(sessions, now = new Date()) {
 
   // Only yesterday's abandoned workouts are finalized. A workout started
   // today remains resumable until the user ends it or the UK/home date rolls.
+  // The workout in progress is never finalised here, even when it started
+  // before midnight and the date has just rolled over.
   const finalizeStaleWorkouts = async () => {
     if (!user) return;
     try {
-      await supabase.from("workout_logs").update({ in_progress: false })
+      const draft = await readDraft(user.id, "fitness").catch(() => null);
+      const keep = activeWorkoutLogIds({ currentId: workoutLogIdRef.current, finalised: workoutFinalizedRef.current, draft });
+      let query = supabase.from("workout_logs").update({ in_progress: false })
         .eq("user_id", user.id).eq("in_progress", true).lt("date", today);
+      keep.forEach(id => { query = query.neq("id", id); });
+      await query;
     } catch (e) { console.log("Stale workout cleanup error:", e); }
   };
 
@@ -5490,7 +5649,8 @@ function withPlanApproval(sessions, now = new Date()) {
   };
 
   const buildWorkoutLogPayload = (setsToSave) => {
-    const dateStr = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
+    // A workout belongs to the day it started, even if it runs past midnight.
+    const dateStr = getZonedDateInfo(new Date(workoutStart || Date.now()), homeTimeZone).dateKey;
     const exerciseData = buildLoggedExercises(activeSession, setsToSave);
     const totalVol = workoutVolume(exerciseData);
     return {
@@ -5764,13 +5924,14 @@ function withPlanApproval(sessions, now = new Date()) {
       ...session,
       approval: { approved: true, approvedAt: now.toISOString(), reviewAfter: reviewDate.toISOString().slice(0, 10), commitmentWeeks: 8, cycleDays: 8 },
     } : session);
-    setSessions(updated);
-    setSplit(previous => ({ ...previous, sessions: updated }));
     // The first approval of any session in a split starts its 1-week review
     // clock; re-approving later (editing an existing, already-running plan)
     // doesn't reset it.
     const extra = !split?.programme_started_at ? { programme_started_at: now.toISOString(), week_reviewed_at: null } : {};
-    await saveSplit(updated, extra);
+    // saveSplit updates the screen only once the database confirms the save.
+    const saved = await saveSplit(updated, extra);
+    setPlanSaveError(saved.ok ? "" : `Approval not saved: ${saved.error}. Your plan has not changed.`);
+    return saved.ok;
   };
 
   const persistCompletionFeedback = async feedback => {
@@ -5788,7 +5949,6 @@ function withPlanApproval(sessions, now = new Date()) {
     setHistory(current => current.map(log => log.id === logId ? { ...log, ai_feedback: feedback } : log));
   };
 
-  const completionFeedbackSystem = "You are TRACK3D's fitness coach. Review the completed session in 3-5 short bullets with no emojis. WORKOUT REVIEW is authoritative: status completed means the set was performed using the exact reps and weightKg shown; status skipped means it was not recorded. Never say all sets or the session were skipped when completedSets is greater than zero. Lead with the most useful takeaway, note one progression or adherence pattern only when supported, and give one next-session action.\nCompare every completed set with its own targetReps range. If every completed set of an exercise reached the top of its range, recommend a small weight increase for that exercise next time. If a set fell below the bottom of its range, say so plainly (for example \"set 3: 7 reps, below the 8-12 target\") and never describe it as within target. Skipped sets are not evidence that the weight was too heavy: note them, but do not tell the user to reduce weight because of them.\ndurationMinutes is the real time from start to finish. If it is implausibly short for the work logged (well under 1 minute per completed set), say plainly that the timing looks too short to be a real session and do not review it as normal.\nPREVIOUS SAME SESSION lists earlier workouts with the same name only; compare with those and nothing else.\nFor follow-up questions, answer directly in 1-4 short bullets using the same data.";
   const completionFeedbackReview = () => {
     const review = buildWorkoutReview(activeSession, completedSets);
     const sameSession = history.filter(log => log.id !== workoutLogIdRef.current && String(log.session_name || "").toLowerCase() === String(activeSession?.name || "").toLowerCase());
@@ -5805,13 +5965,10 @@ function withPlanApproval(sessions, now = new Date()) {
     setCompletionQuestion("");
     setCompletionReplyLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: completionFeedbackSystem,
+      const reply = await streamCoachText({
+        area: "workout_review",
         messages: [{ role: "user", content: completionFeedbackReview() }, { role: "assistant", content: completionFeedback }, ...updated],
-      }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Coach request failed");
-      const reply = data.content?.map(block => block.text || "").join("").trim() || "I couldn't answer that just now. Please try again.";
+      }, text => setCompletionFollowUps([...updated, { role: "assistant", content: text }]));
       setCompletionFollowUps([...updated, { role: "assistant", content: reply }]);
     } catch {
       setCompletionFollowUps([...updated, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
@@ -5823,18 +5980,15 @@ function withPlanApproval(sessions, now = new Date()) {
     if (completionFeedbackLoading || completionFeedback) return;
     setCompletionFeedbackLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: completionFeedbackSystem,
+      const feedback = await streamCoachText({
+        area: "workout_review",
         messages: [{ role: "user", content: completionFeedbackReview() }],
-      }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Feedback request failed");
-      const feedback = data.content?.map(block => block.text || "").join("").trim();
-      if (!feedback) throw new Error("Feedback response was empty");
+      }, text => setCompletionFeedback(text));
       setCompletionFeedback(feedback);
       await persistCompletionFeedback(feedback);
     } catch (error) {
       console.error("Workout feedback error:", error.message);
+      setCompletionFeedback("");
       setWorkoutSaveError("Your workout is saved, but Coach feedback is temporarily unavailable. You can retry below.");
     }
     setCompletionFeedbackLoading(false);
@@ -5913,6 +6067,9 @@ function withPlanApproval(sessions, now = new Date()) {
 
   const buildAIPlan = async (answers = aiAnswers, chatContext = aiChatContext) => {
     if (aiBuilding) return;
+    const experienceQuestion = AI_QUESTIONS.find(question => question.id === "experience");
+    const builderLevel = experienceQuestion ? normaliseExperience(aiAnswerText(experienceQuestion, answers)) : null;
+    if (builderLevel) saveExperienceLevel(builderLevel);
     setAiPlanError("");
     setAiBuildStage(0);
     setAiBuilding(true);
@@ -5929,11 +6086,7 @@ function withPlanApproval(sessions, now = new Date()) {
           exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
           exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
           typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)));
-    const system = `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
-TIME LIMIT: Every session must fit the user's stated time for its day. The app times a session like this, and so must you: 5 minutes general warm-up; for each exercise, warmup_sets ramp-up sets (default 2) of about 8 reps × the tempo total in seconds plus 60 seconds each; each working set lasts the top of its rep range × the tempo total in seconds; rest_seconds between working sets (default 120, minimum 60); 90 seconds to change exercise. duration_mins must be that total, and must not exceed the user's limit. If it would, use fewer exercises or sets, shorter rest or fewer ramp-up sets.
-SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
-Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "duration_mins": 60, "reasoning": "short explanation", "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "rest_seconds": 90, "warmup_sets": 1, "notes": "string"}]}], "notes": "string"}`;
+    const builderContext = `Home timezone: ${homeTimeZone}. Authoritative local day: ${homeDate.weekday}, ${homeDate.dateKey}.`;
     try {
       // Up to two attempts: retry once if the reply cannot be read as a
       // complete programme, or if a session runs over the stated time.
@@ -5942,7 +6095,7 @@ Respond ONLY with valid JSON:
       for (let attempt = 0; attempt < 2; attempt++) {
         const res = await fetch("/api/chat", {
           method: "POST", headers: await chatHeaders(),
-          body: JSON.stringify({ responseTokens: 6000, system, messages }),
+          body: JSON.stringify({ responseTokens: 6000, area: "programme_builder", context: builderContext, messages }),
         });
         if (!res.ok) throw new Error("Could not build programme");
         const data = await res.json();
@@ -6087,19 +6240,16 @@ Respond ONLY with valid JSON:
         onMemoryUpdate={saveCoachMemory}
         pendingPrompt={weekReviewPrompt}
         onConsumedPrompt={() => setWeekReviewPrompt(null)}
-        coachContext={{ programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
+        coachContext={workoutInProgress && activeSession ? {
+          // Between sets: today's session and the last 2 workouts with the same name only.
+          programme: sessions.filter(session => session.name?.toLowerCase() === activeSession.name?.toLowerCase()),
+          workoutId: activeSession.trainingSessionId || null,
+          activeWorkout: structuredWorkoutState,
+          gymContext: activeSession.gymContext || null,
+          recentWorkoutsBySession: recentWorkoutsForCoach(history.filter(log => log.session_name?.toLowerCase() === activeSession.name?.toLowerCase()), { perSession: 2, maxSessions: 1 }),
+        } : { programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
-        system={`You are TRACK3D's fitness coach. Give quick, practical information using short bullet points and no emojis. Lead with the answer, then the action. Never open with a vague question such as "what would you like help with?" Use the saved programme, recent logs, current workout, available time and gym context below. Notice repeated missed exercises, stalled loads and user feedback, but describe uncertainty honestly. Ask only necessary questions. If the likely answer is a simple choice, ask one clear either/or question. Explain in more detail when the user repeatedly requests explanation. Respect the 8-week commitment: recommend small changes only when they improve adherence, safety or progression, and warn concisely against poor ideas. Do not diagnose injuries or encourage training through pain.
-STRUCTURED ACTIVE-WORKOUT STATE is the single source of truth for exactly what has been lifted this session, per exercise and per set. Always read it fresh for any question about reps, weight or completion - never rely on numbers mentioned earlier in this conversation, since the user has likely moved on to a different exercise since then and old messages may describe a different one.
-For a single small change, append exactly one machine-readable marker on its own line: [ACTION:rename_exercise|old exercise|new exercise], [ACTION:remove_exercise|exercise], [ACTION:remove_sets|exercise|number], or [ACTION:add_sets|exercise|number]. During an active workout you can also log a completed set directly for the exercise the user is currently on with [ACTION:log_set|exercise|reps x weight] (e.g. [ACTION:log_set|Bench Press|10x60]) when the user tells you what they just did instead of entering it themselves - use the exact exercise name from the structured state and only when isCurrentExercise is true for it.
-For a bigger change - restructuring a whole day's session, swapping several exercises at once, or building a session that doesn't exist yet - never write out JSON or a plan as plain chat text. Instead append exactly this fenced block on its own lines: [ACTION_JSON:replace_session]{"sessionName":"exact session name","exercises":[{"name":"Exercise","sets":3,"reps":"8-12","tempo":"3-0-1-0","rest_seconds":90}]}[/ACTION_JSON] - valid JSON only inside the fence, one exercise object per exercise in the new session, "reps" as a rep-range string (or "8-12/6-10" per set if it varies by set). Whichever kind of marker you use, never say the change has been applied - the user chooses whether it affects this workout only or future sessions too, and the app shows that choice as buttons.
-COACH MEMORY is a short running summary you maintain yourself, carried between separate conversations (even on a different day or device) - it is how you remember this user over time beyond what's in today's chat history. Read it below for anything relevant. At the very end of every reply, on its own line, append an updated version: [MEMORY]a concise 2-4 sentence running summary of durable facts worth carrying forward - goals, injuries or limitations, preferences, notable decisions or changes made, recurring patterns worth remembering. Carry forward anything from the memory below that's still true, fold in anything new from this conversation, and drop anything no longer relevant.[/MEMORY] - always include this, even for short replies; it is stripped from what the user sees.
-Coach memory so far: ${coachMemory || "None yet - this is the first conversation."}
- Home timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.
- Saved programme: ${JSON.stringify(split?.sessions || [])}
-Current programme shown in the app: ${JSON.stringify(sessions)}
-Recent workout logs: ${JSON.stringify(history.slice(0, 5))}
-Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
+        onOpenChangePlan={() => { setPlanChangeMessages([]); setPlanChangeInput(""); setPlanChangeRecommendation(null); setPlanChangeOpen(true); setView("home"); }}
       />
     </div>
   );
@@ -6399,7 +6549,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const loggedExercises = buildLoggedExercises(activeSession, completedSets);
     const newPbs = workoutPersonalBests(loggedExercises);
     const improvements = improvementsSinceLastTime(loggedExercises, (activeSession?.exercises || []).map(exercise => getLastSessionData(exercise, earlierLogs)));
-    const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId);
+    // A workout with nothing logged does not count towards the week.
+    const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId, { countCurrent: completionReview.completedSets > 0 });
     const highlightRow = { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "7px 0", borderTop: `1px solid ${BORDER}` };
     const highlightTitle = color => ({ fontFamily: "'Orbitron',monospace", fontSize: 10, color, letterSpacing: 2, marginBottom: 6 });
     return (
@@ -6543,15 +6694,12 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 // Saving is the approval: no second "review & approve" step.
                 const now = new Date();
                 const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions), now);
-                const programme = { sessions: approvedSessions, split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null };
-                // Upsert so an existing plan row is replaced rather than duplicated.
-                const { error } = await supabase.from("workout_splits").upsert({ user_id: user.id, ...programme }, { onConflict: "user_id" });
-                if (error) throw error;
-                setSessions(approvedSessions);
-                setSplit({ ...programme });
+                // saveSplit reads the row back and only updates the screen once it matches.
+                const saved = await saveSplit(approvedSessions, { split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null });
+                if (!saved.ok) throw new Error(saved.error);
                 setView("home");
-              } catch {
-                setAiPlanError("Your programme could not be saved. Please try again.");
+              } catch (error) {
+                setAiPlanError(`Your programme could not be saved: ${error?.message || "connection problem"}. Please try again.`);
               } finally { setAiPlanSaving(false); }
             }} disabled={aiPlanSaving}>{aiPlanSaving ? "SAVING..." : "SAVE PLAN"}</button>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={aiPlanSaving} onClick={() => setView("home")}>CANCEL</button>
@@ -6723,6 +6871,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const loadImportFile = async file => {
     setImportError(""); setImportFileNote("");
     if (!file) return;
+    if (file.size > IMPORT_FILE_MAX_BYTES) {
+      setImportError(`That file is too large (${Math.round(file.size / 1024)} KB). The limit is ${Math.round(IMPORT_FILE_MAX_BYTES / 1024)} KB; paste the part with the plan instead.`);
+      return;
+    }
     if (!isSupportedImportFile(file.name)) {
       setImportError("That file type can't be read yet. Export a spreadsheet or Google Sheet as CSV, or copy the text from a PDF or Word document and paste it in.");
       return;
@@ -6746,7 +6898,7 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
       for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
         const res = await fetch("/api/chat", {
           method: "POST", headers: await chatHeaders(),
-          body: JSON.stringify({ responseTokens: 6000, system: fitnessImportSystemPrompt(), messages }),
+          body: JSON.stringify({ responseTokens: 6000, area: "plan_import", messages }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `the coach service is unavailable (${res.status})`);
@@ -6868,6 +7020,14 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           {setupStep === 0 && (
             <div>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")}>← BACK</button>
+              <div className="t3d-ctitle">YOUR TRAINING EXPERIENCE</div>
+              <p style={{ fontSize: 10, color: "#8AABB8", margin: "0 0 8px" }}>The coach explains things to match. You can change this later in any coach chat.</p>
+              <div style={{ display: "flex", gap: 6, marginBottom: 22 }}>
+                {EXPERIENCE_OPTIONS.map(([key, label]) => (
+                  <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={setupExperience === key} style={{ flex: 1, fontSize: 8, background: setupExperience === key ? "rgba(0,255,178,.15)" : "transparent", borderColor: setupExperience === key ? NEON : BORDER, color: setupExperience === key ? NEON : "#E0EAF0" }}
+                    onClick={() => { setSetupExperience(key); saveExperienceLevel(key); }}>{label}</button>
+                ))}
+              </div>
               <div className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</div>
               <button className="t3d-btn t3d-btn-sm" onClick={openAiBuilder}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
@@ -7162,8 +7322,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           headers: await chatHeaders(),
           body: JSON.stringify({
             responseTokens: 1500,
-            system: `Read a conversation between a user and their fitness coach and fill in the user's answers to a training questionnaire. Use what the user said (and anything the coach proposed that the user accepted). Use null only for questions the conversation does not answer. Respond with one JSON object and nothing else, using exactly these keys:
-{"goal": [up to two of ${JSON.stringify(AI_QUESTIONS[0].options)}], "goal_custom": "any other goal in the user's words, or null", "experience": "text or null", "days_per_week": number 1-7 or null, "preferred_days": ["MON".."SUN"] or ["FLEXIBLE"] or null, "session_length": "time available per session, e.g. 45 minutes, or null", "equipment": "text or null", "split": "text or null", "favourites": "exercises they enjoy, or null", "priorities": "focus areas, or null", "limitations": "injuries or things to avoid, or null"}`,
+            area: "questionnaire_extract",
+            context: `GOAL OPTIONS: ${JSON.stringify(AI_QUESTIONS[0].options)}`,
             messages: [{ role: "user", content: `CONVERSATION\n${transcript}\n\nReturn the JSON object now.` }],
           }),
         });
@@ -7200,10 +7360,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
           Nothing changes until you approve it. Completed workouts and exercise records remain in your history.
         </div>
         <div role="log" aria-live="polite" style={{ maxHeight: 290, overflowY: "auto", marginBottom: 12 }}>
-          {planChangeMessages.map((message, index) => (
+          {(planChangeMessages.length ? planChangeMessages : planChangeIntro).map((message, index) => (
             <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.18)" : "rgba(0,255,178,.12)"}` }}>
               <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-              <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.content}</span>
+              <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
             </div>
           ))}
           {planChangeLoading && <div style={{ color: "#6F8792", fontSize: 10, padding: 8 }}>Coach is reviewing your plan and history...</div>}
@@ -7344,9 +7504,15 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const moveScheduledWorkout = async (sessionName, sourceDay, targetDay) => {
     const updated = moveWorkoutDay(sessions, sessionName, sourceDay, targetDay);
     if (updated === sessions) return;
-    setSessions(updated);
-    setSplit(previous => ({ ...(previous || {}), sessions: updated }));
-    await saveSplit(updated);
+    const previousSessions = sessions;
+    setSessions(updated); // show the move straight away, undo it if the save fails
+    const saved = await saveSplit(updated);
+    if (!saved.ok) {
+      setSessions(previousSessions);
+      setPlanSaveError(`${sessionName} was not moved: ${saved.error}. Your plan has not changed.`);
+    } else {
+      setPlanSaveError("");
+    }
   };
 
   const finishWorkoutDayDrag = async (targetDay) => {
@@ -7393,17 +7559,11 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     const recentWorkouts = recentWorkoutsForCoach(history);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are TRACK3D's fitness coach. Lead with the answer and use short bullet points with no emojis. Give quick, practical information, normally 3-6 bullets. Help with the existing plan and favour small adjustments during its 8-week commitment. Identify patterns such as repeatedly missed exercises or stalled progression, while stating when evidence is limited. Listen to feedback and concisely warn against unsafe volume, poor recovery or incompatible ideas. Ask only necessary questions; use one clear either/or question when suitable. Never diagnose injuries or give medical advice. If pain or injury is mentioned, recommend stopping the painful movement and speaking to a qualified professional.\nHome timezone: ${homeTimeZone}. The authoritative local date and time are ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}. Never infer today's weekday from server time.\nYou cannot change the saved plan from this chat: never say a change has been made, saved or applied. If the user wants a change, tell them to use Change Plan.\nRECENT WORKOUTS lists every set as reps × weight against its rep target, grouped by session name. Use these exact sets for questions about weights, reps or progress. Compare a session only with earlier sessions of the same name; never compare different sessions such as Pull A with Pull B.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
-          messages: updatedMessages,
-        }),
-      });
-      if (!response.ok) throw new Error("Coach request failed");
-      const data = await response.json();
-      const reply = data.content?.map(block => block.text || "").join("") || "I couldn't answer that just now. Please try again.";
+      const reply = await streamCoachText({
+        area: "plan_coach",
+        context: `Home timezone: ${homeTimeZone}. Local date and time: ${homeDate.weekday}, ${homeDate.dateKey} at ${homeDate.time}.\n\nCURRENT PLAN:\n${planSummary}\n\nRECENT WORKOUTS:\n${recentWorkouts}`,
+        messages: recentChatMessages(updatedMessages),
+      }, text => setCoachMessages([...updatedMessages, { role: "assistant", content: text }]));
       setCoachMessages([...updatedMessages, { role: "assistant", content: reply }]);
     } catch {
       setCoachMessages([...updatedMessages, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
@@ -7423,13 +7583,11 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
     setApprovalQuestion("");
     setApprovalLoading(true);
     try {
-      const response = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({
-        system: `You are TRACK3D's fitness coach helping a user decide whether to approve a programme. Answer directly in 2-5 short bullets with no emojis. Explain the purpose of the day selection, recovery spacing, duration, exercise order, sets and rep ranges. Listen to feedback and suggest reasonable adjustments, but warn clearly against unsafe or counterproductive requests. Approval is optional and means an 8-week commitment with review afterwards. Sessions may move within a rolling 8-day cycle. Home timezone: ${homeTimeZone}.`,
+      const reply = await streamCoachText({
+        area: "plan_approval",
+        context: `Home timezone: ${homeTimeZone}.`,
         messages: [{ role: "user", content: `Programme under review: ${JSON.stringify(reviewedSessions)}` }, ...updated],
-      }) });
-      if (!response.ok) throw new Error("Coach request failed");
-      const data = await response.json();
-      const reply = data.content?.map(block => block.text || "").join("") || "I could not answer that just now.";
+      }, text => setApprovalMessages([...updated, { role: "assistant", content: text }]));
       setApprovalMessages([...updated, { role: "assistant", content: reply }]);
     } catch { setApprovalMessages([...updated, { role: "assistant", content: "I could not connect just now. Please try again." }]); }
     setApprovalLoading(false);
@@ -7517,7 +7675,8 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
   const startWeekReview = async () => {
     const sessionsSince = history.filter(log => programmeStartedAt && new Date(log.created_at) >= programmeStartedAt).length;
     setWeekReviewPrompt(`It's been a week since I started this programme (${sessions.map(s => s.name).join(", ") || "current split"}). I've logged ${sessionsSince} session${sessionsSince === 1 ? "" : "s"} since then. Talk me through how the week's gone - adherence, progression, anything that felt off - and suggest any worthwhile changes.`);
-    await saveSplit(sessions, { week_reviewed_at: new Date().toISOString() });
+    const saved = await saveSplit(sessions, { week_reviewed_at: new Date().toISOString() });
+    if (!saved.ok) setPlanSaveError(`The week review could not be recorded: ${saved.error}. You may be asked again.`);
   };
 
   return (
@@ -7698,6 +7857,12 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
 
           {discardWorkoutDialog}
           {planChangeDialog}
+          {planSaveError && !editDaysModal && approvalReview === null && (
+            <div role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 16, padding: "10px 12px", border: "1px solid rgba(255,45,120,.4)", background: "rgba(255,45,120,.07)", borderRadius: 6, color: "#FF8AAD", fontSize: 11, lineHeight: 1.5 }}>
+              <span>{planSaveError}</span>
+              <button type="button" aria-label="Dismiss" onClick={() => setPlanSaveError("")} style={{ background: "none", border: 0, color: "#FF8AAD", cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
+            </div>
+          )}
           {planPreview && <PlanPreviewSheet {...planPreview} onClose={() => setPlanPreview(null)} />}
 
           {planCoachCard}
@@ -7807,9 +7972,10 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                   <input className="t3d-ai-input" placeholder="Ask why, question a day, or suggest a change..." value={approvalQuestion} onChange={event => setApprovalQuestion(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askApprovalCoach(); } }} />
                   <button className="t3d-btn t3d-btn-sm" onClick={askApprovalCoach} disabled={approvalLoading || !approvalQuestion.trim()}>{approvalLoading ? "ASKING..." : "ASK"}</button>
                 </div>
+                {planSaveError && <p role="alert" style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "12px 0 0" }}>{planSaveError}</p>}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
                   <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalReview(null); setEditDaysModal(true); }}>ADJUST PLAN FIRST</button>
-                  <button className="t3d-btn" style={{ flex: 1, borderColor: NEON, background: "rgba(0,255,178,.12)" }} onClick={async () => { await approveProgramme(approvalReview === "all" ? null : approvalReview); setApprovalReview(null); }}>APPROVE {approvalReview === "all" ? "FULL 8-WEEK SPLIT" : "THIS SESSION"}</button>
+                  <button className="t3d-btn" style={{ flex: 1, borderColor: NEON, background: "rgba(0,255,178,.12)" }} onClick={async () => { if (await approveProgramme(approvalReview === "all" ? null : approvalReview)) setApprovalReview(null); }}>APPROVE {approvalReview === "all" ? "FULL 8-WEEK SPLIT" : "THIS SESSION"}</button>
                 </div>
               </div>
             </div>
@@ -7886,11 +8052,13 @@ Structured active-workout state: ${JSON.stringify(structuredWorkoutState)}`}
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={cancelSessionEdits}>CANCEL</button>
                   <button className="t3d-btn" style={{ flex: 1 }} onClick={async () => {
-                    await saveSplit(sessions);
-                    setSplit(prev => ({ ...prev, sessions }));
+                    const saved = await saveSplit(sessions);
+                    if (!saved.ok) { setPlanSaveError(`Your changes were not saved: ${saved.error}. Please try again.`); return; }
+                    setPlanSaveError("");
                     setEditDaysModal(false);
                   }}>SAVE ✓</button>
                 </div>
+                {planSaveError && <p role="alert" style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "10px 0 0" }}>{planSaveError}</p>}
               </div>
             </div>
           )}
@@ -8090,32 +8258,50 @@ function calcMacros(weight, goal, activityLevel) {
 
 
 // ─── AI Tweaks Box ────────────────────────────────────────────────────────────
+// Asks the coach for a meal plan, adds it up in code and checks it against
+// its targets (calories within 5%, protein within 10%). If it is off, asks
+// once more with the gap stated. Returns { meals, check }; check.ok is false
+// when the plan is still off, so the screen can say so.
+async function requestMealPlan(area, content, targets) {
+  const messages = [{ role: "user", content }];
+  let best = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({ area, responseTokens: 2500, messages }) });
+    const reply = await readCoachReply(res);
+    const meals = extractJsonObject(reply)?.meals;
+    if (!Array.isArray(meals) || !meals.length) {
+      messages.push({ role: "assistant", content: reply }, { role: "user", content: "That could not be read. Return the full plan as JSON only." });
+      continue;
+    }
+    const check = mealPlanTargetCheck(meals, targets);
+    best = { meals, check };
+    if (check.ok) return best;
+    messages.push({ role: "assistant", content: reply }, { role: "user", content: `Your plan adds up to ${check.totals.calories} kcal and ${check.totals.protein} g protein, but the targets are ${targets.calories} kcal and ${targets.protein} g protein (${check.problems.join("; ")}). Adjust the portions so calories are within 5% and protein within 10%, and return the full plan as JSON only.` });
+  }
+  if (!best) throw new Error("the meal plan could not be read");
+  return best;
+}
+
+const mealPlanWarningText = (check, targets) => `This plan adds up to ${check.totals.calories.toLocaleString()} kcal and ${check.totals.protein} g protein, which is off your targets of ${Number(targets.calories).toLocaleString()} kcal and ${targets.protein} g. Adjust the portions or ask for a tweak before saving.`;
+
 function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDayPlan, macros, goal, mealsPerDay, aiNutritionAnswers }) {
   const [tweakInput, setTweakInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [restLoading, setRestLoading] = useState(false);
   const [tweakDone, setTweakDone] = useState(false);
   const [restDayDone, setRestDayDone] = useState(restDayMeals.length > 0);
+  const [planWarning, setPlanWarning] = useState("");
 
   const applyTweak = async () => {
     if (!tweakInput.trim() || loading) return;
     setLoading(true);
+    setPlanWarning("");
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are a nutrition expert. The user wants to tweak their meal plan. Apply their requested changes and return the full updated plan. Respond ONLY with valid JSON with no extra text: {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
-          messages: [{ role: "user", content: `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan keeping similar calories (${macros.calories} kcal target) and protein (${macros.protein}g target).` }],
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "";
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.meals) { setMeals(parsed.meals); setTweakDone(true); setTweakInput(""); }
-      }
-    } catch (e) { console.error(e); }
+      const targets = { calories: macros.calories, protein: macros.protein };
+      const result = await requestMealPlan("meal_plan_tweak", `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan. Targets: ${macros.calories} kcal and ${macros.protein} g protein.`, targets);
+      setMeals(result.meals); setTweakDone(true); setTweakInput("");
+      if (!result.check.ok) setPlanWarning(mealPlanWarningText(result.check, targets));
+    } catch (e) { console.error(e); setPlanWarning("Couldn't update the plan just now. Please try again."); }
     setLoading(false);
   };
 
@@ -8123,21 +8309,11 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
     setRestLoading(true);
     try {
       const restCals = Math.round(macros.calories * 0.85);
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are a nutrition expert. Build a rest day meal plan — slightly lower calories, fewer carbs. Respond ONLY with valid JSON: {"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
-          messages: [{ role: "user", content: `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${meals.map(m=>m.name).join(", ")}` }],
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "";
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.meals) { setRestDayMeals(parsed.meals); setRestDayDone(true); }
-      }
-    } catch (e) { console.error(e); }
+      const targets = { calories: restCals, protein: macros.protein };
+      const result = await requestMealPlan("rest_day_plan", `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${meals.map(m=>m.name).join(", ")}`, targets);
+      setRestDayMeals(result.meals); setRestDayDone(true);
+      setPlanWarning(result.check.ok ? "" : `Rest day: ${mealPlanWarningText(result.check, targets)}`);
+    } catch (e) { console.error(e); setPlanWarning("Couldn't build the rest day plan just now. Please try again."); }
     setRestLoading(false);
   };
 
@@ -8148,6 +8324,7 @@ function AiTweaksBox({ meals, setMeals, restDayMeals, setRestDayMeals, hasRestDa
         <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 8 }}>WANT TO CHANGE ANYTHING?</div>
         <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>e.g. "swap salmon for chicken", "remove eggs", "add more carbs at lunch"</div>
         {tweakDone && <div style={{ fontSize: 10, color: NEON, marginBottom: 8 }}>✓ Plan updated!</div>}
+        {planWarning && <div role="alert" data-testid="meal-plan-warning" style={{ fontSize: 10, color: "#FFB547", marginBottom: 8, lineHeight: 1.5 }}>{planWarning}</div>}
         <div style={{ display: "flex", gap: 8 }}>
           <input className="t3d-ai-input" placeholder="Describe your changes..." value={tweakInput}
             onChange={e => { setTweakInput(e.target.value); setTweakDone(false); }}
@@ -8186,27 +8363,25 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
   const [reply, setReply] = useState("");
   const [messages, setMessages] = useState([{ role: "assistant", content: feedback }]);
   const [loading, setLoading] = useState(false);
+  const [replyError, setReplyError] = useState("");
   const endRef = useRef(null);
 
   const send = async () => {
     if (!reply.trim() || loading) return;
     setLoading(true);
+    setReplyError("");
     const updated = [...messages, { role: "user", content: reply }];
     setMessages(updated);
     setReply("");
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are TRACK3D's nutrition coach. You already gave feedback on the user's day. Continue the conversation naturally. Keep answers concise — 2-4 sentences. Never give medical advice. Be direct and helpful.`,
-          messages: updated,
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "Unable to connect.";
-      setMessages(m => [...m, { role: "assistant", content: text }]);
-    } catch { setMessages(m => [...m, { role: "assistant", content: "Connection error." }]); }
+      const text = await streamCoachText({ area: "nutrition_chat", messages: recentChatMessages(updated) },
+        partial => setMessages([...updated, { role: "assistant", content: partial }]));
+      setMessages([...updated, { role: "assistant", content: text }]);
+    } catch (e) {
+      console.log("Nutrition chat error:", e?.message);
+      setReplyError("The coach couldn't reply. Your message is above — try sending it again.");
+    }
     setLoading(false);
     setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
   };
@@ -8222,6 +8397,7 @@ function AiReplyBlock({ feedback, plan, mealResults, isTrainingDay, offPlanFood,
           </div>
         ))}
         {loading && <div style={{ fontSize: 11, color: "#E0EAF0" }}>Thinking...</div>}
+        {replyError && <div role="alert" style={{ fontSize: 11, color: "#FFB547" }}>{replyError}</div>}
         <div ref={endRef} />
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -8281,6 +8457,11 @@ function Nutrition({ user, userSessions }) {
   const [offPlanCals, setOffPlanCals] = useState("");
   const [aiFeedback, setAiFeedback] = useState("");
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const [aiFeedbackError, setAiFeedbackError] = useState("");
+  const [mealPlanWarning, setMealPlanWarning] = useState(""); // AI meal plan off its own targets
+  const [reviewSkipAnswered, setReviewSkipAnswered] = useState(false); // DAY REVIEW skips meals already logged
+  const [foodEstimate, setFoodEstimate] = useState(null);
+  const [foodEstimateStatus, setFoodEstimateStatus] = useState("");
   const [todayLogged, setTodayLogged] = useState(false);
   const [editingHistoryIdx, setEditingHistoryIdx] = useState(null);
   const [planSaveError, setPlanSaveError] = useState(false);
@@ -8289,27 +8470,22 @@ function Nutrition({ user, userSessions }) {
   const [nutritionSaveError, setNutritionSaveError] = useState("");
   const [mealLibrary, setMealLibrary] = useState([]);
   const [weeklyMealPlan, setWeeklyMealPlan] = useState({});
-  const [plannerDate, setPlannerDate] = useState(() => { const date = new Date(); date.setDate(date.getDate() + 1); return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`; });
+  const [plannerDate, setPlannerDate] = useState(() => homeDateKey(user, 1));
   const [showLibraryForm, setShowLibraryForm] = useState(false);
   const [libraryMealDraft, setLibraryMealDraft] = useState({ name: "", calories: "", protein: "", carbs: "", fats: "" });
   const [nutritionPlanningStatus, setNutritionPlanningStatus] = useState("");
 
-  const getLocalDate = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  };
-  const today = getLocalDate();
+  const today = homeDateKey(user);
 
   useEffect(() => { if (!user) return; loadData(); }, [user]);
 
   // Auto detect training day from fitness split
   useEffect(() => {
     if (!userSessions?.length) return;
-    const todayNum = new Date().getDay();
-    const todayShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][todayNum];
+    const todayShort = dateKeyDayCode(today);
     const isTraining = userSessions.some(s => s.days?.includes(todayShort));
     setIsTrainingDay(isTraining);
-  }, [userSessions]);
+  }, [userSessions, today]);
 
   const loadData = async () => {
     setLoading(true);
@@ -8451,8 +8627,29 @@ function Nutrition({ user, userSessions }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mealResults, view]);
 
+  // Asks the coach for per-item ranges using the user's own amounts; the
+  // totals are added up in code.
+  const estimateUnloggedFood = async items => {
+    setFoodEstimateStatus("ESTIMATING...");
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: await chatHeaders(),
+        body: JSON.stringify({ area: "food_estimate", messages: [{ role: "user", content: `Estimate this food exactly as I described it:\n${items.map(item => `- ${item.food}`).join("\n")}` }] }),
+      });
+      const parsed = extractJsonObject(await readCoachReply(res));
+      const estimate = sumFoodEstimate(parsed?.items);
+      if (!estimate.items.length) throw new Error("no items in the estimate");
+      setFoodEstimate(estimate);
+      setFoodEstimateStatus("");
+    } catch (error) {
+      console.log("Food estimate error:", error?.message);
+      setFoodEstimateStatus("Couldn't estimate that just now. You can type the calories in the off-plan step instead.");
+    }
+  };
+
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
+    setAiFeedbackError("");
     const activeMeals = weeklyMealPlan[today]?.length ? weeklyMealPlan[today] : isTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals || plan?.meals || []);
     const totals = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
     const completedCount = totals.completedMeals;
@@ -8460,16 +8657,16 @@ function Nutrition({ user, userSessions }) {
     const calorieTarget = plan?.daily_calories || 2000;
     const diff = totalCals - calorieTarget;
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are TRACK3D's nutrition coach. Give honest, direct, motivating feedback in 2-3 sentences. Be real but encouraging. Never shame. Never give medical advice. If under 18 is mentioned be age-appropriate.`,
-          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${offPlanCals||0} extra kcal). Total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff}). Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
-        }),
-      });
-      const data = await res.json();
-      setAiFeedback(data.content?.map(b => b.text||"").join("") || "Keep pushing — consistency is everything.");
-    } catch (e) { setAiFeedback("Keep pushing — every day is a new opportunity."); }
+      const text = await streamCoachText({
+          area: "nutrition_day",
+          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; return result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${plan?.protein_target}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : "Rest day."} Give brief feedback.` }],
+      }, setAiFeedback);
+      setAiFeedback(text);
+    } catch (e) {
+      console.log("Nutrition feedback error:", e?.message);
+      setAiFeedback("");
+      setAiFeedbackError("Couldn't get feedback on your day.");
+    }
     setAiFeedbackLoading(false);
   };
 
@@ -8480,24 +8677,13 @@ function Nutrition({ user, userSessions }) {
       const q = AI_NUTRITION_QUESTIONS.find(q => q.id === k);
       return `${q?.q}: ${v}`;
     }).join("\n");
+    setMealPlanWarning("");
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are a nutrition expert. Build a daily meal plan. Never give medical advice. Respond ONLY with valid JSON with no extra text:
-{"meals": [{"name": "string", "time": "HH:MM", "ingredients": [{"name": "string", "weight": 100, "unit": "g"}], "calories": 400, "protein": 30, "carbs": 40, "fats": 10}]}`,
-          messages: [{ role: "user", content: `Build a ${mealsPerDay} meal daily plan. Targets: ${macros.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats. User preferences:\n${context}` }],
-        }),
-      });
-      const data = await res.json();
-      const text = data.content?.map(b => b.text||"").join("") || "";
-      // More robust JSON extraction
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        setPlanMeals(parsed.meals || []);
-      }
-    } catch (e) { console.error("AI meals error:", e); }
+      const targets = { calories: macros.calories, protein: macros.protein };
+      const result = await requestMealPlan("meal_plan_build", `Build a ${mealsPerDay} meal daily plan. Targets: ${macros.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats. User preferences:\n${context}`, targets);
+      setPlanMeals(result.meals);
+      if (!result.check.ok) setMealPlanWarning(mealPlanWarningText(result.check, targets));
+    } catch (e) { console.error("AI meals error:", e); setMealPlanWarning("Couldn't build your meal plan just now. Please try again."); }
     setAiMealLoading(false);
     setShowAiQuestions(false);
   };
@@ -8508,36 +8694,35 @@ function Nutrition({ user, userSessions }) {
   const loggedNutrition = calculateLoggedNutrition(activeMeals, mealResults, offPlanCals);
   const remainingNutrition = remainingNutritionTargets({ calories: plan?.daily_calories, protein: plan?.protein_target, carbs: plan?.carbs_target, fats: plan?.fats_target }, loggedNutrition);
   const planningDates = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() + index + 1);
-    const key = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
-    return { key, label: index === 0 ? "TOMORROW" : date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).toUpperCase() };
+    const key = shiftDateKey(today, index + 1);
+    return { key, label: index === 0 ? "TOMORROW" : dateKeyLabel(key, { weekday: "short", day: "numeric", month: "short" }).toUpperCase() };
   });
   const plannerMeals = weeklyMealPlan[plannerDate] || [];
-  const plannerDayCode = plannerDate ? ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${plannerDate}T12:00:00`).getDay()] : "";
+  const plannerDayCode = plannerDate ? dateKeyDayCode(plannerDate) : "";
   const plannerIsTrainingDay = userSessions?.some(session => session.days?.includes(plannerDayCode));
   const plannerTemplateMeals = plannerIsTrainingDay ? (plan?.meals || []) : (plan?.rest_day_meals?.length ? plan.rest_day_meals : plan?.meals || []);
 
   const last7Logs = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(); d.setDate(d.getDate() - (6-i));
-    const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-    return { date: ds, label: d.toLocaleDateString("en-GB", { weekday: "short" }), log: logs.find(l => l.date === ds) };
+    const ds = shiftDateKey(today, -(6 - i));
+    return { date: ds, label: dateKeyLabel(ds, { weekday: "short" }), log: logs.find(l => l.date === ds) };
   });
 
-  const weekLogs = logs.filter(l => { const d = new Date(l.date); const now = new Date(); const ws = new Date(now); ws.setDate(now.getDate()-now.getDay()); return d >= ws; });
+  // This week runs from Sunday, as before, but on the home-timezone date.
+  const weekStartKey = shiftDateKey(today, -new Date(`${today}T12:00:00Z`).getUTCDay());
+  const weekLogs = logs.filter(l => l.date >= weekStartKey && l.date <= today);
   const avgCals = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_calories||0),0)/weekLogs.length) : 0;
   const avgProtein = weekLogs.length ? Math.round(weekLogs.reduce((a,l) => a+(l.total_protein||0),0)/weekLogs.length) : 0;
   const nutritionLogOnTarget = log => nutritionDayOnTarget(log, plan);
   const onPlanDays = weekLogs.filter(nutritionLogOnTarget).length;
 
   const streak = (() => {
-    let s = 0; const d = new Date();
+    let s = 0;
     while (s < 100) {
-      const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      const ds = shiftDateKey(today, -s);
       const log = logs.find(l => l.date === ds);
       if (!log) break;
       if (!nutritionLogOnTarget(log)) break;
-      s++; d.setDate(d.getDate()-1);
+      s++;
     }
     return s;
   })();
@@ -8557,6 +8742,9 @@ function Nutrition({ user, userSessions }) {
       const targetCals = plan?.daily_calories || 2000;
       const diff = totalCals - targetCals;
       const completedMeals = totals.completedMeals;
+      // Food eaten without calories makes the total incomplete: never call
+      // that day under target.
+      const unlogged = unloggedFood(meals, mealResults, offPlanFood, offPlanCals);
 
       return (
         <div className="t3d-fade">
@@ -8568,23 +8756,46 @@ function Nutrition({ user, userSessions }) {
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: Math.abs(diff)<100?NEON:diff>0?NEON3:"#FF8C00" }}>{totalCals}</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>KCAL TOTAL</div></div>
               <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: totalProtein>=plan?.protein_target?NEON:"#FF8C00" }}>{totalProtein}g</div><div style={{ fontSize: 9, color: "#E0EAF0" }}>PROTEIN</div></div>
             </div>
+            {unlogged.length > 0 ? (
+              <div data-testid="total-excludes" style={{ background: "rgba(255,181,71,.06)", border: "1px solid rgba(255,181,71,.3)", borderRadius: 8, padding: 16, marginBottom: 20, textAlign: "left" }}>
+                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: "#FFB547", letterSpacing: 2, marginBottom: 8 }}>TOTAL IS INCOMPLETE</div>
+                <div style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>Total excludes: {unlogged.map(item => item.food).join(", ")}. Add calories for it, or let the coach estimate it.</div>
+                {foodEstimate && (
+                  <div data-testid="food-estimate" style={{ marginTop: 10, fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>
+                    {foodEstimate.items.map(item => <div key={item.name}>- {item.name}{item.amount ? ` (${item.amount})` : ""}: {item.caloriesLow}–{item.caloriesHigh} kcal, {item.proteinLow}–{item.proteinHigh} g protein</div>)}
+                    <div style={{ color: "#FFB547", marginTop: 4 }}>Estimate: {foodEstimate.caloriesLow.toLocaleString()}–{foodEstimate.caloriesHigh.toLocaleString()} kcal, {foodEstimate.proteinLow}–{foodEstimate.proteinHigh} g protein</div>
+                    <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8 }} onClick={() => {
+                      setOffPlanFood([offPlanFood, ...unlogged.filter(item => item.meal !== "Off plan").map(item => item.food)].filter(Boolean).join("; "));
+                      setOffPlanCals(String((Number(offPlanCals) || 0) + foodEstimate.caloriesMid));
+                      setFoodEstimate(null);
+                      setFoodEstimateStatus(`Added ${foodEstimate.caloriesMid.toLocaleString()} kcal (the middle of the estimate).`);
+                    }}>ADD ~{foodEstimate.caloriesMid.toLocaleString()} KCAL TO TODAY</button>
+                  </div>
+                )}
+                {!foodEstimate && <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} disabled={foodEstimateStatus === "ESTIMATING..."} onClick={() => estimateUnloggedFood(unlogged)}>{foodEstimateStatus === "ESTIMATING..." ? "ESTIMATING..." : "ESTIMATE IT"}</button>}
+                {foodEstimateStatus && foodEstimateStatus !== "ESTIMATING..." && <div role="status" style={{ fontSize: 10, color: "#FFB547", marginTop: 6 }}>{foodEstimateStatus}</div>}
+              </div>
+            ) : (
             <div style={{ background: diff>200?"rgba(255,45,120,.06)":diff<-200?"rgba(255,140,0,.06)":"rgba(0,255,178,.06)", border: `1px solid ${diff>200?"rgba(255,45,120,.2)":diff<-200?"rgba(255,140,0,.2)":"rgba(0,255,178,.2)"}`, borderRadius: 8, padding: 16, marginBottom: 20 }}>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: diff>200?NEON3:diff<-200?"#FF8C00":NEON, letterSpacing: 2, marginBottom: 8 }}>
                 {diff>200?"OVER TARGET":diff<-200?"UNDER TARGET":"ON TARGET"} {diff>0?`+${diff}`:diff} KCAL
               </div>
               <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
-                {diff>200?`${diff} extra kcal. Over 7 days this pattern = ~${Math.round(diff*7/7700*10)/10}kg gained per week.`:diff<-200?`${Math.abs(diff)} kcal under target. Consistent undereating can slow metabolism and impact muscle.`:"Great calorie control today! Consistency drives results."}
+                {diff>200?`${diff} extra kcal. Over 7 days this pattern = ~${Math.round(diff*7/7700*10)/10}kg gained per week.`:diff<-200?`${Math.abs(diff)} kcal under target. Regularly eating well under target makes it harder to keep muscle and train well.`:"Close to your calorie target today."}
               </div>
             </div>
+            )}
+            {foodEstimateStatus && unlogged.length === 0 && <div role="status" style={{ fontSize: 10, color: NEON, marginBottom: 12 }}>{foodEstimateStatus}</div>}
             {offPlanFood && (
               <div style={{ background: "rgba(255,140,0,.05)", border: "1px solid rgba(255,140,0,.2)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", textAlign: "left" }}>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#FF8C00", letterSpacing: 2, marginBottom: 4 }}>OFF PLAN — EXTRA ON TOP</div>
                 {offPlanFood}{offPlanCals ? ` — +${offPlanCals} extra kcal added to total` : " — no calories estimated"}
               </div>
             )}
-            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>GET AI FEEDBACK</button>}
-            {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
-            {aiFeedback && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
+            {aiFeedbackError && !aiFeedbackLoading && <p role="alert" style={{ fontSize: 11, color: "#FFB547", margin: "0 0 8px" }}>{aiFeedbackError}</p>}
+            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={getAIFeedback}>{aiFeedbackError ? "TRY AGAIN" : "GET AI FEEDBACK"}</button>}
+            {aiFeedbackLoading && <div style={{ fontSize: 11, color: aiFeedback ? "#8AABB8" : "#E0EAF0", marginBottom: 16, lineHeight: 1.6, whiteSpace: "pre-wrap", textAlign: "left" }}>{aiFeedback ? cleanAiText(aiFeedback) : "AI analysing your day..."}</div>}
+            {aiFeedback && !aiFeedbackLoading && <AiReplyBlock feedback={aiFeedback} plan={plan} mealResults={mealResults} isTrainingDay={isTrainingDay} offPlanFood={offPlanFood} offPlanCals={offPlanCals} activeMeals={activeMeals} />}
             {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>Could not save: {nutritionSaveError}</div>}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { const saved = await saveLog(); if (!saved) return; setTodayLogged(true); await loadData(); setView("home"); }}>SAVE & FINISH</button>
           </div>
@@ -8602,7 +8813,15 @@ function Nutrition({ user, userSessions }) {
             <div style={{ textAlign: "center", padding: "16px 0" }}>
               <div style={{ fontSize: 32, marginBottom: 12 }}>🍕</div>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0", letterSpacing: 2, marginBottom: 16 }}>BE HONEST</div>
-              <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>Did you eat anything off plan today?</div>
+              {(() => {
+                const noted = unloggedFood(meals, mealResults, "", 0);
+                return noted.length ? (
+                  <div data-testid="already-noted" style={{ fontSize: 11, color: "#8AABB8", marginBottom: 14, lineHeight: 1.6, textAlign: "left" }}>
+                    Already noted: {noted.map(item => `${item.meal} — ${item.food}`).join("; ")}.
+                  </div>
+                ) : null;
+              })()}
+              <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>{unloggedFood(meals, mealResults, "", 0).length ? "Anything else off plan today?" : "Did you eat anything off plan today?"}</div>
 
               {/* Off plan input first */}
               <div style={{ background: SURFACE2, borderRadius: 8, padding: 16, marginBottom: 16, textAlign: "left" }}>
@@ -8614,7 +8833,7 @@ function Nutrition({ user, userSessions }) {
               <div style={{ display: "flex", gap: 10 }}>
                 <button className="t3d-btn" style={{ flex: 1, padding: 14, background: "rgba(0,255,178,.1)", borderColor: NEON, color: NEON }}
                   onClick={() => { setOffPlanFood(""); setOffPlanCals(""); setReviewStep(s => s+1); }}>
-                  ✓ Clean day
+                  {unloggedFood(meals, mealResults, "", 0).length ? "✓ Nothing else" : "✓ Clean day"}
                 </button>
                 <button className="t3d-btn" style={{ flex: 1, padding: 14 }} disabled={!offPlanFood}
                   onClick={() => setReviewStep(s => s+1)}>
@@ -8649,8 +8868,8 @@ function Nutrition({ user, userSessions }) {
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: "Skipped" } })); setReviewStep(step => step + 1); }}>SKIPPED</button>
-                <button className="t3d-btn" style={{ flex: 2 }} disabled={!flexibleResult.calories} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: true } })); setReviewStep(step => step + 1); }}>LOG MEAL →</button>
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: "Skipped" } })); setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered)); }}>SKIPPED</button>
+                <button className="t3d-btn" style={{ flex: 2 }} disabled={!flexibleResult.calories} onClick={() => { setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: true } })); setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered)); }}>LOG MEAL →</button>
               </div>
             </div>
           </div>
@@ -8682,7 +8901,7 @@ function Nutrition({ user, userSessions }) {
             </div>
             <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 16 }}>Did you have this exactly as planned?</div>
             <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
-              <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(s => s+1); }}>✓</button>
+              <button className="t3d-tick-btn" onClick={() => { setMealResults(r => ({ ...r, [reviewStep]: true })); setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered)); }}>✓</button>
               <button className="t3d-cross-btn" onClick={() => setMealResults(r => ({ ...r, [reviewStep]: { completed: false, note: typeof r[reviewStep] === "object" ? r[reviewStep].note || "" : "" } }))}>✗</button>
             </div>
             {mealWasMissed(mealResults[reviewStep]) && (
@@ -8690,7 +8909,7 @@ function Nutrition({ user, userSessions }) {
                 <label style={{ fontSize: 10, color: "#8AABB8" }}>HOW DID IT NOT GO TO PLAN?
                   <textarea className="t3d-input" rows={3} autoFocus placeholder="e.g. ate something different, skipped it, portion changed..." value={typeof mealResults[reviewStep] === "object" ? mealResults[reviewStep].note || "" : ""} onChange={event => setMealResults(results => ({ ...results, [reviewStep]: { completed: false, note: event.target.value } }))} style={{ marginTop: 7 }} />
                 </label>
-                <button className="t3d-btn" style={{ width: "100%", marginTop: 9 }} onClick={() => setReviewStep(step => step + 1)}>CONTINUE →</button>
+                <button className="t3d-btn" style={{ width: "100%", marginTop: 9 }} onClick={() => setReviewStep(step => nextReviewStep(activeMeals, mealResults, step, reviewSkipAnswered))}>CONTINUE →</button>
               </div>
             )}
           </div>
@@ -8930,6 +9149,7 @@ function Nutrition({ user, userSessions }) {
 
                   {aiMealLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#E0EAF0" }}>🤖 Building your meal plan...</div>}
                   {/* AI tweaks box */}
+                  {mealPlanWarning && <div role="alert" data-testid="meal-plan-warning" style={{ fontSize: 11, color: "#FFB547", margin: "10px 0", lineHeight: 1.5 }}>{mealPlanWarning}</div>}
                   {mealBuildMode === "ai" && currentMeals.length > 0 && !aiMealLoading && (
                     <AiTweaksBox
                       meals={currentMeals}
@@ -9263,14 +9483,14 @@ function Nutrition({ user, userSessions }) {
                 <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 2, marginBottom: 4 }}>TODAY LOGGED</div>
                 <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12 }}>{todayLog?.total_calories} kcal · {todayLog?.total_protein}g protein</div>
-                <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => { setMealResults(todayLog?.meals_completed||{}); setOffPlanFood(todayLog?.off_plan_food||""); setOffPlanCals(String(todayLog?.off_plan_calories||"")); setReviewStep(0); setAiFeedback(""); setView("review"); }}>EDIT TODAY</button>
+                <button className="t3d-btn t3d-btn-sm" style={{ opacity: 0.6 }} onClick={() => { setMealResults(todayLog?.meals_completed||{}); setOffPlanFood(todayLog?.off_plan_food||""); setOffPlanCals(String(todayLog?.off_plan_calories||"")); setReviewSkipAnswered(false); setFoodEstimate(null); setFoodEstimateStatus(""); setReviewStep(0); setAiFeedback(""); setView("review"); }}>EDIT TODAY</button>
               </>
             ) : (
               <>
                 <div style={{ fontSize: 12, color: "#E0EAF0", marginBottom: 20, letterSpacing: 1 }}>READY TO REVIEW YOUR DAY?</div>
                 <button className="t3d-big-btn"
                   style={{ background: "linear-gradient(90deg, rgba(0,255,178,.15), rgba(0,200,255,.15))", border: `1px solid ${NEON}`, color: NEON, fontSize: 14, letterSpacing: 3 }}
-                  onClick={() => { setReviewStep(0); setAiFeedback(""); setView("review"); }}>
+                  onClick={() => { setReviewSkipAnswered(true); setFoodEstimate(null); setFoodEstimateStatus(""); setReviewStep(nextReviewStep(activeMeals, mealResults, -1, true)); setAiFeedback(""); setView("review"); }}>
                   🥗 DAY REVIEW
                 </button>
               </>
@@ -9367,6 +9587,8 @@ function Nutrition({ user, userSessions }) {
                             setMealResults(log.meals_completed||{});
                             setOffPlanFood(log.off_plan_food||"");
                             setOffPlanCals(String(log.off_plan_calories||""));
+                            setReviewSkipAnswered(false);
+                            setFoodEstimate(null);
                             setReviewStep(plan.meals.length+1);
                             setView("review");
                           }}>EDIT</button>
@@ -9398,7 +9620,7 @@ function Nutrition({ user, userSessions }) {
 function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: defaultTrainingDay }) {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [selectedDate, setSelectedDate] = useState(getCalendarDate(new Date()));
+  const [selectedDate, setSelectedDate] = useState(() => homeDateKey(user));
   const [addModal, setAddModal] = useState(null);
   const [newTask, setNewTask] = useState({ title: "", startTime: "", endTime: "", addDaily: false });
   const [library, setLibrary] = useState([]);
@@ -9410,6 +9632,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   const [taskResults, setTaskResults] = useState({});
   const [aiFeedback, setAiFeedback] = useState("");
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const [aiFeedbackError, setAiFeedbackError] = useState("");
   const [todayDebriefed, setTodayDebriefed] = useState(false);
   const [dragTask, setDragTask] = useState(null);
   const [editingTask, setEditingTask] = useState(null);
@@ -9417,11 +9640,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   const [nutritionMeals, setNutritionMeals] = useState([]);
   const [fitnessData, setFitnessData] = useState(null);
 
-  function getCalendarDate(d) {
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  }
-
-  const today = getCalendarDate(new Date());
+  const today = homeDateKey(user);
   const isToday = selectedDate === today;
   const HOURS = Array.from({ length: 18 }, (_, i) => i + 6);
 
@@ -9437,8 +9656,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     ]).then(([morning, nutrition, fitness]) => {
       if (morning.data?.tasks) setMorningRoutine(morning.data.tasks);
       if (nutrition.data) {
-        const todayNum = new Date(selectedDate).getDay();
-        const todayShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][todayNum];
+        const todayShort = dateKeyDayCode(selectedDate);
         const isTraining = fitness.data?.sessions?.some(s => s.days?.includes(todayShort));
         const meals = isTraining ? (nutrition.data.meals || []) : (nutrition.data.rest_day_meals || nutrition.data.meals || []);
         setNutritionMeals(meals);
@@ -9464,9 +9682,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   };
 
   const navigateDay = (dir) => {
-    const d = new Date(selectedDate);
-    d.setDate(d.getDate() + dir);
-    setSelectedDate(getCalendarDate(d));
+    setSelectedDate(shiftDateKey(selectedDate, dir));
   };
 
   const addTask = async (taskData) => {
@@ -9475,11 +9691,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
     if (taskData.addDaily) {
       // Add for next 7 days
-      const inserts = Array.from({ length: 7 }, (_, i) => {
-        const d = new Date(selectedDate);
-        d.setDate(d.getDate() + i);
-        return { ...baseTask, date: getCalendarDate(d) };
-      });
+      const inserts = Array.from({ length: 7 }, (_, i) => ({ ...baseTask, date: shiftDateKey(selectedDate, i) }));
       await supabase.from("calendar_tasks").insert(inserts);
     } else {
       await supabase.from("calendar_tasks").insert({ ...baseTask, date: selectedDate });
@@ -9530,20 +9742,21 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
   const getAIDebrief = async (results, score) => {
     setAiFeedbackLoading(true);
+    setAiFeedbackError("");
     const done = Object.values(results).filter(v => v==="done").length;
     const half = Object.values(results).filter(v => v==="half").length;
     const missed = Object.values(results).filter(v => v==="none").length;
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          system: `You are TRACK3D's daily accountability coach. Give honest, direct feedback in 3-4 sentences. Find one pattern and give one actionable suggestion for tomorrow. Never give medical advice.`,
+      const text = await streamCoachText({
+          area: "daily_debrief",
           messages: [{ role: "user", content: `Day review: ${done} tasks done, ${half} partial, ${missed} missed. Score: ${score}/10. Tasks: ${tasks.map(t=>`${t.title} (${t.start_time}) — ${results[t.id]||"pending"}`).join(", ")}. Give feedback.` }],
-        }),
-      });
-      const data = await res.json();
-      setAiFeedback(data.content?.map(b=>b.text||"").join("") || "Keep building the habit — consistency compounds.");
-    } catch { setAiFeedback("Keep pushing — every day is progress."); }
+      }, setAiFeedback);
+      setAiFeedback(text);
+    } catch (e) {
+      console.log("Debrief feedback error:", e?.message);
+      setAiFeedback("");
+      setAiFeedbackError("Couldn't get feedback on your day.");
+    }
     setAiFeedbackLoading(false);
   };
 
@@ -9569,8 +9782,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
   // Auto blocks from other sections
   const getAutoBlocks = () => {
     const blocks = [];
-    const dateDay = new Date(selectedDate).getDay();
-    const dateShort = ["SUN","MON","TUE","WED","THU","FRI","SAT"][dateDay];
+    const dateShort = dateKeyDayCode(selectedDate);
 
     morningRoutine.forEach(t => {
       if (t.scheduledTime) blocks.push({ time: t.scheduledTime, title: t.name, type: "morning", icon: t.icon||"☀️" });
@@ -9628,7 +9840,8 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
                 );
               })}
             </div>
-            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={() => getAIDebrief(taskResults, score)}>GET AI FEEDBACK</button>}
+            {aiFeedbackError && !aiFeedbackLoading && <p role="alert" style={{ fontSize: 11, color: "#FFB547", margin: "0 0 8px" }}>{aiFeedbackError}</p>}
+            {!aiFeedback && !aiFeedbackLoading && <button className="t3d-btn" style={{ width: "100%", marginBottom: 16 }} onClick={() => getAIDebrief(taskResults, score)}>{aiFeedbackError ? "TRY AGAIN" : "GET AI FEEDBACK"}</button>}
             {aiFeedbackLoading && <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 16 }}>AI analysing your day...</div>}
             {aiFeedback && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 14, marginBottom: 20, textAlign: "left" }}><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2, marginBottom: 6 }}>AI COACH</div><div style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.65 }}>{aiFeedback}</div></div>}
             <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={async () => { await saveDebrief(taskResults, score); setDebriefView(false); }}>SAVE & FINISH</button>
@@ -9998,6 +10211,7 @@ export default function App() {
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [habitsReady, setHabitsReady] = useState(false);
   const prevHabitsRef = useRef(null); // last-persisted snapshot, for diffing what changed
+  const pendingHabitDeletesRef = useRef(new Set()); // removed habits whose delete has not succeeded yet
   const [habitSaveError, setHabitSaveError] = useState("");
   const [fitnessSessions, setFitnessSessions] = useState([]);
   const homeTimeZone = resolveHomeTimeZone(user);
@@ -10041,6 +10255,9 @@ export default function App() {
     return () => { cancelled = true; };
   }, [user?.id, todayKey]);
 
+  const deleteHabitRow = id => supabase.from("habits").delete().eq("user_id", user.id).eq("id", id)
+    .then(result => { if (!result.error) pendingHabitDeletesRef.current.delete(id); return result; });
+
   // Mini-save: persist only what actually changed since the last render -
   // a new/renamed habit, a removed one, or today's tick/untick - the moment
   // it happens, rather than waiting for any kind of final submission.
@@ -10053,9 +10270,10 @@ export default function App() {
     const currentIds = new Set(habits.map(h => h.id));
     const writes = [];
 
-    previous.filter(h => !currentIds.has(h.id)).forEach(h => {
-      writes.push(supabase.from("habits").delete().eq("user_id", user.id).eq("id", String(h.id)));
-    });
+    previous.filter(h => !currentIds.has(h.id)).forEach(h => pendingHabitDeletesRef.current.add(String(h.id)));
+    // A habit that was added back is no longer waiting to be deleted.
+    habits.forEach(h => pendingHabitDeletesRef.current.delete(String(h.id)));
+    previous.filter(h => !currentIds.has(h.id)).forEach(h => writes.push(deleteHabitRow(String(h.id))));
 
     habits.forEach(h => {
       const prevMatch = previous.find(p => p.id === h.id);
@@ -10086,11 +10304,12 @@ export default function App() {
     }).catch(error => setHabitSaveError(`Your habits could not be saved: ${error?.message || "connection problem"}`));
   }, [habits, habitsReady, todayKey, user?.id]);
 
-  // Re-send every habit and today's ticks after a failed save.
+  // Re-send every habit, today's ticks and any delete that failed.
   const retryHabitSave = async () => {
     if (!user) return;
     setHabitSaveError("");
     const results = await Promise.all([
+      ...[...pendingHabitDeletesRef.current].map(deleteHabitRow),
       ...habits.map(h => supabase.from("habits").upsert({
         id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
         streak: habitStreak(h), updated_at: new Date().toISOString(),

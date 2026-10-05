@@ -51,6 +51,9 @@ create table if not exists weekly_reports (
   created_at timestamptz not null default now(),
   unique (user_id, report_date)
 );
+alter table weekly_reports enable row level security;
+create policy "weekly_reports: users manage their own rows" on weekly_reports
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- Fix: nutrition_plans table was missing columns the app expects.
 alter table nutrition_plans add column if not exists carbs_target integer;

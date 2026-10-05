@@ -1,13 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { prepareAction } from "../../../lib/coaching/actions.js";
-import { needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
-import { buildCoachSystemInstructions } from "../../../lib/coaching/playbook.js";
-import { safetyDirective } from "../../../lib/coaching/safety.js";
-import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
+import { conversationTurns, needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
+import { WORKOUT_COACH_INSTRUCTIONS, WORKOUT_RESPONSE_SHAPE as responseShape } from "../../../lib/coaching/playbook.js";
+import { buildCoachSystemBlocks, cleanCoachReply, PLAN_CHANGE_FROM_CHAT } from "../../../lib/coaching/system.js";
+import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
+import { openAnthropicStream, partialJsonStringField, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
 
-const responseShape = `Return only JSON matching:
-{"message":"concise answer","insights":[{"kind":"progress|recovery|form|consistency|safety","text":"..."}],"actions":[],"memoryCandidates":[]}.
-Allowed actions are temporary_exercise_swap, temporary_reorder, temporary_reduce_sets, propose_permanent_exercise_swap, propose_permanent_set_change, set_inline_cue, record_memory_candidate, and record_pain_report. Use the exact camelCase fields required by the requested action. Temporary changes require a workoutId and scope today or this_week. Permanent proposals require a programmeExerciseId and scope permanent. Do not emit an action when the supplied identifiers are missing.`;
 
 function supabaseForRequest(request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
@@ -46,21 +44,47 @@ export async function POST(request) {
 
     await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "user", content: message });
 
+    const inWorkout = Array.isArray(body?.clientContext?.activeWorkout) && body.clientContext.activeWorkout.length > 0;
+
+    // Pain reported in the last 48 hours and not marked resolved.
+    const { data: painRows } = await supabase.from("pain_reports")
+      .select("id,report,body_area,exercise_key,severity,status,reported_at")
+      .eq("user_id", user.id).neq("status", "resolved")
+      .gte("reported_at", new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString())
+      .order("reported_at", { ascending: false }).limit(5);
+    let activePain = activePainReports(painRows || []);
+
+    // The instant stop reply is for a first pain report and for red flags.
+    // Later messages while pain is active go to the coach with the
+    // active-pain directive, so it can actually adapt the session.
     const safety = safetyDirective(message);
-    if (safety) {
-      const payload = { message: safety.message, insights: [{ kind: "safety", text: safety.message }], actions: [] };
+    if (safety && (safety.severity === "concerning" || !activePain.length)) {
+      const payload = { message: safety.message, insights: [{ kind: "safety", text: safety.message }], actions: [], activePain: true, safetyStop: true };
+      const currentExercise = body?.clientContext?.activeWorkout?.find?.((item) => item?.isCurrentExercise)?.exercise || null;
       await Promise.all([
-        supabase.from("pain_reports").insert({ user_id: user.id, report: message, severity: safety.severity === "concerning" ? "concerning" : "unspecified" }),
+        supabase.from("pain_reports").insert({ user_id: user.id, report: message.slice(0, 1000), body_area: safety.bodyArea, exercise_key: currentExercise, severity: safety.severity === "concerning" ? "concerning" : "unspecified" }),
         supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: safety.message, structured_payload: payload }),
       ]);
       return Response.json({ ...payload, conversationId });
     }
+    if (safety && activePain.length) {
+      // A further pain mention while pain is active: keep it in the directive.
+      activePain = [{ report: message, body_area: safety.bodyArea, status: "active", reported_at: new Date().toISOString() }, ...activePain];
+    }
 
-    const [{ data: context, error: contextError }, { data: profile }] = await Promise.all([
-      supabase.rpc("get_coach_recent_context", { window_days: 14 }),
-      supabase.from("coach_profiles").select("personality").eq("user_id", user.id).maybeSingle(),
+    const [{ data: rawContext, error: contextError }, { data: profile }, { data: recentTurns }] = await Promise.all([
+      // Between sets a week of context is enough; history questions fetch more below.
+      supabase.rpc("get_coach_recent_context", { window_days: inWorkout && !needsHistoricalRetrieval(message) ? 7 : 14 }),
+      supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", user.id).maybeSingle(),
+      supabase.from("coach_messages").select("role,content,created_at").eq("user_id", user.id).eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false }).limit(11),
     ]);
     if (contextError) return Response.json({ error: "Could not load Coach context" }, { status: 500 });
+    // Old coach messages are left out of the context: the model copied its
+    // earlier answers and voice from them. Only this conversation's recent
+    // turns are sent, as real messages.
+    const { messages: _oldMessages, ...context } = rawContext || {};
+    const turns = conversationTurns(recentTurns || [], message);
 
     let olderHistory = [];
     const usedHistoricalRetrieval = needsHistoricalRetrieval(message);
@@ -69,59 +93,130 @@ export async function POST(request) {
       olderHistory = data || [];
     }
 
-    // Retry once when the model's reply is not valid JSON before reporting an error.
-    let answer;
-    for (let attempt = 0; attempt < 2 && !answer; attempt++) {
-      const providerResponse = await postAnthropicMessages({
-          model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
-          max_tokens: 1200,
-          system: `${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
-          messages: [{ role: "user", content: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}\n\nUSER\n${message}` }],
-        });
-      if (!providerResponse.ok) return Response.json({ error: providerResponse.error }, { status: 502 });
-      const providerPayload = providerResponse.payload;
-      const text = providerPayload.content?.map((block) => block.text || "").join("") || "";
-      try { answer = extractJson(text); } catch { answer = undefined; }
-    }
-    if (!answer) return Response.json({ error: "Coach returned an invalid response" }, { status: 502 });
-
-    const preparedActions = [];
-    for (const raw of answer.actions || []) {
-      try { preparedActions.push(prepareAction(raw)); } catch { /* Reject unrecognised or malformed model actions. */ }
-    }
-
-    const actionRows = preparedActions.map(({ action, status }) => ({
-      user_id: user.id,
-      conversation_id: conversationId,
-      action_type: action.type,
-      scope: action.scope || "temporary",
-      payload: action,
-      rationale: action.reason || action.evidence,
-      status,
-    }));
-    const { data: storedActions } = actionRows.length
-      ? await supabase.from("coach_actions").insert(actionRows).select("id,action_type,scope,payload,status")
-      : { data: [] };
-
-    const allowedMemoryCategories = new Set(["goal", "priority", "exercise_preference", "equipment", "availability", "schedule", "communication"]);
-    const memoryRows = (answer.memoryCandidates || []).flatMap((candidate) => {
-      if (!allowedMemoryCategories.has(candidate?.category) || !candidate?.key || candidate?.value === undefined) return [];
-      return [{
-        user_id: user.id,
-        category: candidate.category,
-        memory_key: String(candidate.key).slice(0, 100),
-        value: typeof candidate.value === "object" ? candidate.value : { value: candidate.value },
-        evidence: String(candidate.evidence || message).slice(0, 500),
-        confidence: Math.max(0, Math.min(1, Number(candidate.confidence) || 0.7)),
-        status: candidate.explicit === true ? "active" : "candidate",
-        last_confirmed_at: candidate.explicit === true ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-      }];
+    const providerRequest = (maxTokens) => ({
+      // ANTHROPIC_WORKOUT_MODEL lets a faster model be compared on the coach
+      // test set before switching; it defaults to the main model.
+      model: process.env.ANTHROPIC_WORKOUT_MODEL || process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
+      // Replies are read between sets: a short budget, raised only if cut off.
+      max_tokens: maxTokens,
+      system: buildCoachSystemBlocks({
+        areaInstructions: `${WORKOUT_COACH_INSTRUCTIONS}\n\n${responseShape}`,
+        kind: "conversation",
+        personality: profile?.personality,
+        experienceLevel: profile?.experience_level,
+        activePain,
+        context: `${inWorkout ? "7" : "14"}-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}`,
+      }),
+      messages: [...turns, { role: "user", content: message }],
     });
-    if (memoryRows.length) await supabase.from("coach_memories").upsert(memoryRows, { onConflict: "user_id,category,memory_key" });
 
-    const result = { message: String(answer.message || ""), insights: (answer.insights || []).slice(0, 3), actions: storedActions || [] };
-    await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: result.message, structured_payload: result });
+    // Gets the model's JSON answer. With onPartial, the first attempt streams
+    // and reports the "message" text as it is written. Retries once (with a
+    // bigger budget) when the reply is cut off or not valid JSON.
+    const getAnswer = async (onPartial) => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const maxTokens = attempt === 0 ? 500 : 1200;
+        let text = "";
+        if (onPartial && attempt === 0) {
+          const opened = await openAnthropicStream(providerRequest(maxTokens));
+          if (!opened.ok) return { error: opened.error };
+          const streamed = await readAnthropicStream(opened.response, (_delta, soFar) => {
+            const partial = partialJsonStringField(soFar, "message");
+            if (partial) onPartial(partial);
+          });
+          if (!streamed.ok) return { error: streamed.error };
+          text = streamed.text;
+        } else {
+          const providerResponse = await postAnthropicMessages(providerRequest(maxTokens));
+          if (!providerResponse.ok) return { error: providerResponse.error };
+          text = providerResponse.payload.content?.map((block) => block.text || "").join("") || "";
+        }
+        try { return { answer: extractJson(text) }; } catch { /* retry with a bigger budget */ }
+      }
+      return { error: "Coach returned an invalid response" };
+    };
+
+    // Actions, memory and the stored reply, once the full answer is in.
+    const finish = async (answer) => {
+    const preparedActions = [];
+      // While pain is active only temporary, load-free actions are allowed.
+      const proposed = (answer.actions || []).filter((raw) => !activePain.length || SAFE_ACTIONS_DURING_PAIN.has(raw?.type));
+      for (const raw of proposed) {
+        try { preparedActions.push(prepareAction(raw)); } catch { /* Reject unrecognised or malformed model actions. */ }
+      }
+
+      const actionRows = preparedActions.map(({ action, status }) => ({
+        user_id: user.id,
+        conversation_id: conversationId,
+        action_type: action.type,
+        scope: action.scope || "temporary",
+        payload: action,
+        rationale: action.reason || action.evidence,
+        status,
+      }));
+      const { data: storedActions } = actionRows.length
+        ? await supabase.from("coach_actions").insert(actionRows).select("id,action_type,scope,payload,status")
+        : { data: [] };
+
+      const allowedMemoryCategories = new Set(["goal", "priority", "exercise_preference", "equipment", "availability", "schedule", "communication"]);
+      const memoryRows = (answer.memoryCandidates || []).flatMap((candidate) => {
+        if (!allowedMemoryCategories.has(candidate?.category) || !candidate?.key || candidate?.value === undefined) return [];
+        return [{
+          user_id: user.id,
+          category: candidate.category,
+          memory_key: String(candidate.key).slice(0, 100),
+          value: typeof candidate.value === "object" ? candidate.value : { value: candidate.value },
+          evidence: String(candidate.evidence || message).slice(0, 500),
+          confidence: Math.max(0, Math.min(1, Number(candidate.confidence) || 0.7)),
+          status: candidate.explicit === true ? "active" : "candidate",
+          last_confirmed_at: candidate.explicit === true ? new Date().toISOString() : null,
+          updated_at: new Date().toISOString(),
+        }];
+      });
+      if (memoryRows.length) await supabase.from("coach_memories").upsert(memoryRows, { onConflict: "user_id,category,memory_key" });
+
+      const cleaned = cleanCoachReply(answer.message);
+      // A permanent change the coach could not propose (no ids in the data) gets
+      // the plain CHANGE PLAN answer and a button.
+      const askedForPermanent = /\b(permanent(ly)?|for good|every (week|time)|from now on|in my plan|to my plan)\b/i.test(message) && !preparedActions.some(({ action }) => action.scope === "permanent");
+      const result = {
+        message: cleaned.message,
+        insights: (answer.insights || []).filter((insight) => !cleanCoachReply(insight?.text).planChangeHint).slice(0, 3),
+        actions: storedActions || [],
+        activePain: activePain.length > 0,
+        planChangeHint: cleaned.planChangeHint || askedForPermanent,
+      };
+      if (askedForPermanent && !cleaned.planChangeHint && !result.message.includes("CHANGE PLAN")) result.message = `${result.message} ${PLAN_CHANGE_FROM_CHAT}`.trim();
+      await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: result.message, structured_payload: result });
+      return result;
+    };
+
+    // Streaming: newline-delimited JSON events ({type:"partial"|"final"|"error"}).
+    if (body?.stream === true) {
+      const encoder = new TextEncoder();
+      const send = (controller, event) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            let lastSent = "";
+            const outcome = await getAnswer((partial) => {
+              if (partial !== lastSent && !cleanCoachReply(partial).planChangeHint) { lastSent = partial; send(controller, { type: "partial", message: partial }); }
+            });
+            if (outcome.error) send(controller, { type: "error", error: outcome.error });
+            else send(controller, { type: "final", ...(await finish(outcome.answer)), conversationId, usedHistoricalRetrieval });
+          } catch (error) {
+            console.error("Coach stream error:", error.message);
+            send(controller, { type: "error", error: "Coach is unavailable" });
+          }
+          controller.close();
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+
+    const outcome = await getAnswer();
+    if (outcome.error) return Response.json({ error: outcome.error }, { status: 502 });
+    const result = await finish(outcome.answer);
     return Response.json({ ...result, conversationId, usedHistoricalRetrieval });
   } catch (error) {
     console.error("Coach route error:", error.message);

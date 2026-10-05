@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recoverWorkoutState, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session.js";
+import { activeWorkoutLogIds, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recoverWorkoutState, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session.js";
 
 test("an in-progress server log restores the remaining prescribed workout", () => {
   const planned = { name: "Push", exercises: [{ name: "Bench Press", sets: 3, reps: ["8", "8", "8"] }, { name: "Cable Fly", sets: 2, reps: ["12", "12"] }] };
@@ -118,4 +118,22 @@ test("weekly workout progress counts this week's real workouts plus the one just
   const sessions = [{ name: "Push", days: ["MON", "THU"] }, { name: "Pull", days: ["TUE"] }, { name: "Legs", days: ["sat"] }];
   assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", sessions, 9), { completed: 3, planned: 4 });
   assert.deepEqual(weeklyWorkoutProgress([], "2026-10-07", [], null), { completed: 1, planned: 0 });
+});
+
+test("the stale-workout cleanup never finalises the workout in progress", () => {
+  const now = Date.parse("2026-10-06T00:30:00Z");
+  assert.deepEqual(activeWorkoutLogIds({ currentId: 7, now }), [7]);
+  assert.deepEqual(activeWorkoutLogIds({ currentId: 7, finalised: true, now }), [], "a finished workout can be finalised");
+  const draft = { activeWorkoutLogId: 7, workoutStart: Date.parse("2026-10-05T23:40:00Z") };
+  assert.deepEqual(activeWorkoutLogIds({ currentId: null, draft, now }), [7], "reload after midnight keeps the draft's workout open");
+  assert.deepEqual(activeWorkoutLogIds({ currentId: 7, draft, now }), [7]);
+  const abandoned = { activeWorkoutLogId: 3, workoutStart: Date.parse("2026-10-03T18:00:00Z") };
+  assert.deepEqual(activeWorkoutLogIds({ draft: abandoned, now }), [], "an old abandoned draft is not protected");
+  assert.deepEqual(activeWorkoutLogIds({ now }), []);
+});
+
+test("an empty finished workout is not counted towards the week", () => {
+  const history = [{ id: 1, date: "2026-10-05", total_volume: 3000 }];
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9, { countCurrent: false }), { completed: 1, planned: 0 });
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9), { completed: 2, planned: 0 });
 });
