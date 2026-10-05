@@ -9,7 +9,7 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, setsRepsSummary, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
+import { activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -17,9 +17,37 @@ import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/wor
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
+import { nextUpItems } from "../lib/next-up";
 import { EXPERIENCE_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
 import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel } from "../lib/nutrition-setup";
-import { calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, unloggedFoodFromLog, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { addOffPlanMacros, calculateLoggedNutrition, countCompletedMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+
+// ─── Shared reads ─────────────────────────────────────────────────────────────
+// On start the dashboard, the hidden Morning and Fitness tabs and the weekly
+// report all load at once. A read made while the same read is still in
+// flight shares that request, so each row is fetched once per load.
+const readsInFlight = new Map();
+const cloneData = value => (value == null ? value : typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value)));
+function sharedRead(key, run) {
+  let request = readsInFlight.get(key);
+  if (!request) {
+    request = Promise.resolve().then(run);
+    readsInFlight.set(key, request);
+    const clear = () => { if (readsInFlight.get(key) === request) readsInFlight.delete(key); };
+    request.then(clear, clear);
+  }
+  // Each screen gets its own copy, so one can't change another's data.
+  return request.then(result => ({ ...result, data: cloneData(result?.data) }));
+}
+// One row per user; maybeSingle, so a missing row is null rather than a 406.
+const readOwnRow = (table, userId) => sharedRead(`${table}:${userId}`, () => supabase.from(table).select("*").eq("user_id", userId).maybeSingle());
+const readWorkoutSplit = userId => readOwnRow("workout_splits", userId);
+const readMorningRoutine = userId => readOwnRow("morning_routines", userId);
+const readNutritionPlan = userId => readOwnRow("nutrition_plans", userId);
+const readCoachProfile = userId => readOwnRow("coach_profiles", userId);
+const readUserProfile = userId => readOwnRow("user_profiles", userId);
+const readHabits = userId => sharedRead(`habits:${userId}`, () => supabase.from("habits").select("*").eq("user_id", userId).order("created_at", { ascending: true }));
+const readHabitCompletions = (userId, from, to) => sharedRead(`habit_completions:${userId}:${from}:${to}`, () => supabase.from("habit_completions").select("habit_id,date").eq("user_id", userId).gte("date", from).lte("date", to));
 
 // /api/chat requires the signed-in user's Supabase session token.
 async function chatHeaders() {
@@ -438,8 +466,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   const [conversationId, setConversationId] = useState(null);
   const [painActive, setPainActive] = useState(false); // an unresolved pain report shapes the coach's replies
   const [painNote, setPainNote] = useState("");
-  const [personality, setPersonality] = useState("balanced");
-  const [settingsError, setSettingsError] = useState("");
+
   const endRef = useRef(null);
   const messageListRef = useRef(null);
 
@@ -453,14 +480,12 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     setRestored(true);
   }, [storageKey]);
 
-  // One coach style for every coach, stored in coach_profiles. Training
-  // experience is set in the profile, not here.
+  // Coach style and training experience are set once, in the profile. A
+  // change there mid-chat leaves a note here and goes with the next message.
   useEffect(() => {
-    supabase.auth.getUser().then(async ({ data: { user } }) => {
-      if (!user) return;
-      const { data } = await supabase.from("coach_profiles").select("personality").eq("user_id", user.id).maybeSingle();
-      if (data?.personality) setPersonality(data.personality);
-    });
+    const changed = event => setMessages(current => (current.some(message => message.role === "user" || message.role === "assistant") ? [...current, { role: "note", content: event.detail?.note || "Coach settings changed" }] : current));
+    window.addEventListener("track3d-coach-settings", changed);
+    return () => window.removeEventListener("track3d-coach-settings", changed);
   }, []);
 
   useEffect(() => {
@@ -525,23 +550,6 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     if (!openWithoutPrompt) send(openingMessage || "Give me a quick assessment of my day so far and what I should focus on.", { hidden: true });
   };
 
-  // A change mid-chat leaves a visible note so the new style is obvious.
-  const saveCoachSetting = async (field, value, note) => {
-    setSettingsError("");
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return false;
-    const { error } = await supabase.from("coach_profiles").upsert({ user_id: user.id, [field]: value, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
-    if (error) { setSettingsError(`Couldn't save that setting: ${error.message}`); return false; }
-    if (messages.some(message => message.role === "user" || message.role === "assistant")) setMessages(current => [...current, { role: "note", content: note }]);
-    return true;
-  };
-  const choosePersonality = async nextPersonality => {
-    if (nextPersonality === personality) return;
-    const previous = personality;
-    setPersonality(nextPersonality);
-    if (!await saveCoachSetting("personality", nextPersonality, `Coach style: ${COACH_PERSONALITIES[nextPersonality]?.label || nextPersonality}`)) setPersonality(previous);
-  };
-
   // Apply a coach change and report only what the app confirms happened.
   const runAction = async (action, permanent) => {
     let result;
@@ -590,15 +598,6 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
         <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || "AI COACH"}</div>
         {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
-      {(!compact || expanded) && (
-        <div data-testid="coach-settings" style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1, marginBottom: 5 }}>COACH STYLE</div>
-          <div style={{ display: "flex", gap: 5, marginBottom: 7 }}>
-            {Object.entries(COACH_PERSONALITIES).map(([key, option]) => <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={personality === key} onClick={() => choosePersonality(key)} style={{ flex: 1, padding: "6px 4px", fontSize: 7, color: personality === key ? NEON : "#3A5060", borderColor: personality === key ? NEON : BORDER }}>{option.label}</button>)}
-          </div>
-          {settingsError && <div role="alert" style={{ fontSize: 9, color: "#FFB547", marginTop: 5 }}>{settingsError}</div>}
-        </div>
-      )}
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
           {!compact && <div style={{ fontSize: 30, marginBottom: 10 }}>🤖</div>}
@@ -1782,12 +1781,9 @@ function MorningSection({ user }) {
   const loadData = async () => {
     setLoading(true);
     try {
-      // Load routine
-      const { data: routineData } = await supabase
-        .from("morning_routines")
-        .select("*")
-        .eq("user_id", user.id)
-        .single();
+      // The routine and the training plan load together, so each shares the
+      // identical read the dashboard and Fitness make at the same moment.
+      const [{ data: routineData }, { data: planData }] = await Promise.all([readMorningRoutine(user.id), readWorkoutSplit(user.id)]);
 
       if (routineData) {
         setWakeTime(routineData.wake_time || "06:00");
@@ -1798,7 +1794,6 @@ function MorningSection({ user }) {
       }
 
       // Training plan days, so alternating days can follow the plan.
-      const { data: planData } = await supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle();
       setTrainingDays([...new Set((planData?.sessions || []).flatMap(session => session.days || []).map(day => String(day).toUpperCase()))]);
 
       // Load checkins
@@ -2477,6 +2472,37 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     if (gap > 180) setPendingLiveStart(() => start);
     else start();
   };
+  const startMyMorning = () => confirmLiveStart(() => {
+    setLiveTaskIndex(0);
+    startLiveTimer(liveRoutineSteps[0]);
+    setLiveInputActive(false);
+    setLiveStartedAt(Date.now());
+    recordLiveWakeTime();
+    setView("liveMorning");
+  });
+  // "Next up" on the dashboard starts (or finishes) this morning in one tap.
+  // A tap made while this tab is still loading runs once it has loaded.
+  const startMorningRef = useRef(null);
+  const pendingMorningStartRef = useRef(false);
+  useEffect(() => {
+    startMorningRef.current = () => {
+      if (loading) { pendingMorningStartRef.current = true; return; }
+      if (view !== "home" || !isSetup) return;
+      const todayEntry = history.find(entry => entry.date === today);
+      if (todayEntry?.data?.inProgress) openCheckinForm("log", { data: { ...todayEntry.data } });
+      else if (!todayEntry) startMyMorning();
+    };
+  });
+  useEffect(() => {
+    if (loading || !pendingMorningStartRef.current) return;
+    pendingMorningStartRef.current = false;
+    startMorningRef.current?.();
+  }, [loading]);
+  useEffect(() => {
+    const start = event => { if (event.detail?.kind === "morning") startMorningRef.current?.(); };
+    window.addEventListener("track3d-start", start);
+    return () => window.removeEventListener("track3d-start", start);
+  }, []);
   const liveStartDialog = pendingLiveStart ? (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
       <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="live-start-title" style={{ width: "100%", maxWidth: 360, borderColor: "#FFB547", textAlign: "center" }}>
@@ -3020,14 +3046,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                         fontSize: 13,
                         letterSpacing: 2
                       }}
-                      onClick={() => confirmLiveStart(() => {
-                        setLiveTaskIndex(0);
-                        startLiveTimer(liveRoutineSteps[0]);
-                        setLiveInputActive(false);
-                        setLiveStartedAt(Date.now());
-                        recordLiveWakeTime();
-                        setView("liveMorning");
-                      })}
+                      onClick={startMyMorning}
                     >
                       ▶ START MY MORNING NOW
                       <span style={{ display: "block", fontFamily: "'Inter',sans-serif", fontSize: 10, letterSpacing: 0, fontWeight: 400, marginTop: 6, color: "#C0D4DE" }}>Guides you through each task with a timer</span>
@@ -4210,10 +4229,11 @@ function EndOfDayCheckin({ user, onComplete }) {
     try {
       // Gather all today's data (same order as the queries below)
       const [morning, nutrition, fitness, debrief, calendar, eodHistory] = await Promise.all([
-        supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).single(),
-        supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food").eq("user_id", user.id).eq("date", today).single(),
-        supabase.from("workout_logs").select("session_name,total_volume,duration_mins").eq("user_id", user.id).eq("date", today).eq("in_progress", false).single(),
-        supabase.from("daily_debrief").select("overall_score,task_scores").eq("user_id", user.id).eq("date", today).single(),
+        supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
+        supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food").eq("user_id", user.id).eq("date", today).maybeSingle(),
+        // Every workout finished today (there can be more than one).
+        supabase.from("workout_logs").select("session_name,total_volume,duration_mins").eq("user_id", user.id).eq("date", today).eq("in_progress", false),
+        supabase.from("daily_debrief").select("overall_score,task_scores").eq("user_id", user.id).eq("date", today).maybeSingle(),
         supabase.from("calendar_tasks").select("title,status").eq("user_id", user.id).eq("date", today),
         supabase.from("end_of_day").select("mood,energy,steps,future_you,date").eq("user_id", user.id).order("date", { ascending: false }).limit(7),
       ]);
@@ -4221,7 +4241,8 @@ function EndOfDayCheckin({ user, onComplete }) {
       // Build context
       const morningScore = morning.data?.score ?? "not completed";
       const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${countCompletedMeals(nutrition.data.meals_completed)} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
-      const fitnessData = fitness.data ? `${fitness.data.session_name}, ${fitness.data.duration_mins} mins, ${Math.round(fitness.data.total_volume||0)}kg volume` : "no workout logged";
+      const workoutsToday = (fitness.data || []).filter(log => Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2);
+      const fitnessData = workoutsToday.length ? workoutsToday.map(log => `${log.session_name}, ${log.duration_mins} mins, ${Math.round(log.total_volume || 0)}kg volume`).join("; ") : "no workout logged";
       const calendarTasks = debrief.data ? `calendar score ${debrief.data.overall_score}/10` : calendar.data?.length ? `${calendar.data.filter(t=>t.status==="done").length}/${calendar.data.length} tasks done` : "no tasks";
 
       // Pattern detection from last 7 days
@@ -4613,21 +4634,21 @@ async function loadWeeklyReportData(user, week) {
   const historyFrom = shiftDateKey(todayKey, -366);
   const previousStart = shiftDateKey(week.start, -7);
   const [workouts, split, habits, completions, checkins, routine, nutritionLogs, nutritionPlan, stored] = await Promise.all([
-    supabase.from("workout_logs").select("id,date,total_volume,duration_mins,exercises,in_progress").eq("user_id", user.id).gte("date", previousStart).lte("date", week.end).eq("in_progress", false),
-    supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
-    supabase.from("habits").select("id,name,created_at").eq("user_id", user.id),
-    supabase.from("habit_completions").select("habit_id,date").eq("user_id", user.id).gte("date", historyFrom).lte("date", todayKey),
+    supabase.from("workout_logs").select("id,date,total_volume,duration_mins,exercises,in_progress").eq("user_id", user.id).gte("date", previousStart).lte("date", week.end).or(`in_progress.eq.false,date.lt.${todayKey}`),
+    readWorkoutSplit(user.id),
+    readHabits(user.id),
+    readHabitCompletions(user.id, historyFrom, todayKey),
     supabase.from("morning_checkins").select("date,score,data").eq("user_id", user.id).gte("date", historyFrom).order("date", { ascending: false }),
-    supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
+    readMorningRoutine(user.id),
     supabase.from("nutrition_logs").select("date,total_calories,total_protein").eq("user_id", user.id).gte("date", week.start).lte("date", week.end),
-    supabase.from("nutrition_plans").select("daily_calories,protein_target").eq("user_id", user.id).maybeSingle(),
+    readNutritionPlan(user.id),
     supabase.from("weekly_reports").select("*").eq("user_id", user.id).eq("week_start", week.start).order("created_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
   const failed = [workouts, habits, completions, checkins, nutritionLogs].find(result => result.error);
   if (failed) throw failed.error;
   const metrics = buildWeeklyMetrics({
     week, todayKey,
-    workoutLogs: workouts.data || [],
+    workoutLogs: (workouts.data || []).map(log => ({ ...log, in_progress: !isFinishedWorkout(log, todayKey) })),
     sessions: split.data?.sessions || [],
     habits: habits.data || [],
     habitCompletions: completions.data || [],
@@ -4900,6 +4921,13 @@ function WeeklyRecap({ user, onBack }) {
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
+// One line on what each coach style sounds like.
+const COACH_STYLE_SUMMARIES = {
+  strict: "Short and firm: the gap, then the next step",
+  balanced: "Clear reasoning, then the next step",
+  supportive: "Encouraging: what went well, then one small step",
+};
+
 // ─── Profile form (dashboard "Complete your profile" to-do) ──────────────────
 // Height, date of birth and sex in one short form. Date of birth is saved
 // rather than age, so age stays right. Only what is filled in is saved.
@@ -4908,6 +4936,7 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   const [dateOfBirth, setDateOfBirth] = useState(profile?.dateOfBirth || "");
   const [sex, setSex] = useState(sexLabel(profile?.sex));
   const [experienceLevel, setExperienceLevel] = useState(profile?.experienceLevel || "");
+  const [personality, setPersonality] = useState(profile?.personality || "balanced");
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
   const problem = profileProblem({ heightCm, dateOfBirth, sex, experienceLevel }, today, { requireExperience: true });
@@ -4921,7 +4950,7 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
     // Training experience is read by every coach from coach_profiles.
     const [profileResult, coachResult] = await Promise.all([
       supabase.from("user_profiles").upsert({ user_id: user.id, ...values, updated_at: updatedAt }, { onConflict: "user_id" }),
-      supabase.from("coach_profiles").upsert({ user_id: user.id, experience_level: experienceLevel, updated_at: updatedAt }, { onConflict: "user_id" }),
+      supabase.from("coach_profiles").upsert({ user_id: user.id, experience_level: experienceLevel, personality, updated_at: updatedAt }, { onConflict: "user_id" }),
     ]);
     setSaving(false);
     const error = profileResult.error || coachResult.error;
@@ -4930,7 +4959,12 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
       setStatus(profileSaveError(error));
       return;
     }
-    onSaved(normaliseProfile(values, experienceLevel));
+    const changes = [
+      personality !== (profile?.personality || "balanced") && `Coach style: ${COACH_PERSONALITIES[personality]?.label || personality}`,
+      experienceLevel !== profile?.experienceLevel && profile?.experienceLevel && `Level: ${experienceLevel.toUpperCase()}`,
+    ].filter(Boolean);
+    if (changes.length) window.dispatchEvent(new CustomEvent("track3d-coach-settings", { detail: { note: changes.join("; ") } }));
+    onSaved({ ...normaliseProfile(values, experienceLevel), personality });
   };
   return (
     <div data-testid="profile-form" style={{ padding: "12px 0 4px" }}>
@@ -4958,6 +4992,16 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
             style={{ textAlign: "left", whiteSpace: "normal", padding: "8px 10px", fontSize: 9, background: experienceLevel === choice.id ? "rgba(0,255,178,.12)" : "transparent", borderColor: experienceLevel === choice.id ? NEON : BORDER, color: experienceLevel === choice.id ? NEON : "#8AABB8" }}>
             {choice.label.toUpperCase()}
             <span style={{ display: "block", marginTop: 2, color: "#8AABB8", fontFamily: "'Inter',sans-serif", fontSize: 10, fontWeight: 400, letterSpacing: 0 }}>{choice.description}</span>
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, margin: "12px 0 6px" }}>COACH STYLE <span style={{ color: "#8AABB8", letterSpacing: 0 }}>· used by every coach</span></div>
+      <div style={{ display: "grid", gap: 6, marginBottom: 6 }}>
+        {Object.entries(COACH_PERSONALITIES).map(([key, option]) => (
+          <button key={key} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={personality === key} onClick={() => setPersonality(key)}
+            style={{ textAlign: "left", whiteSpace: "normal", padding: "8px 10px", fontSize: 9, background: personality === key ? "rgba(0,255,178,.12)" : "transparent", borderColor: personality === key ? NEON : BORDER, color: personality === key ? NEON : "#8AABB8" }}>
+            {option.label}
+            <span style={{ display: "block", marginTop: 2, color: "#8AABB8", fontFamily: "'Inter',sans-serif", fontSize: 10, fontWeight: 400, letterSpacing: 0 }}>{COACH_STYLE_SUMMARIES[key]}</span>
           </button>
         ))}
       </div>
@@ -5062,14 +5106,15 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
       supabase.from("nutrition_logs").select("*").eq("user_id", user.id).eq("date", today).maybeSingle(),
       // The whole plan, for the dashboard's log-as-you-go list.
-      supabase.from("nutrition_plans").select("*").eq("user_id", user.id).maybeSingle(),
-      supabase.from("workout_splits").select("sessions").eq("user_id", user.id).maybeSingle(),
+      readNutritionPlan(user.id),
+      readWorkoutSplit(user.id),
       // This week's workouts (with sets), so the coach knows what was lifted.
       supabase.from("workout_logs").select("id,session_name,date,in_progress,total_volume,duration_mins,exercises").eq("user_id", user.id).gte("date", shiftDateKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7))).lte("date", today),
-      supabase.from("morning_routines").select("user_id").eq("user_id", user.id).maybeSingle(),
+      readMorningRoutine(user.id),
     ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
       loaded: true,
       hasRoutine: Boolean(routine.data),
+      wakeTime: routine.data?.wake_time || "",
       hasPlan: Boolean(split.data?.sessions?.length),
       morning: morning.data || null,
       nutrition: nutrition.data || null,
@@ -5077,7 +5122,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       sessions: split.data?.sessions || [],
       // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
       workouts: (workouts.data || []).filter(log => log.date === today && !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
-      weekWorkouts: (workouts.data || []).filter(log => !log.in_progress),
+      weekWorkouts: (workouts.data || []).filter(log => isFinishedWorkout(log, today)).map(log => ({ ...log, in_progress: false })),
       activeWorkout: (workouts.data || []).find(log => log.date === today && log.in_progress) || null,
     }));
   }, [user, today]);
@@ -5087,6 +5132,11 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   // (if the Nutrition page set it), otherwise whether a workout is scheduled.
   const dashboardTrainingDay = typeof todayData.nutrition?.is_training_day === "boolean" ? todayData.nutrition.is_training_day : Boolean(todaySession);
   const dashboardMeals = mealsForDay(todayData.nutritionPlan, today, dashboardTrainingDay);
+  const dashMeals = useDashboardMealLog({
+    user, today, meals: dashboardMeals, log: todayData.nutrition, loaded: todayData.loaded, isTrainingDay: dashboardTrainingDay,
+    onLogged: log => setTodayData(current => ({ ...current, nutrition: log })),
+  });
+  const mealLogRef = useRef(null);
   // Any workout completed today counts, even if the plan (and its session
   // names) changed after it was done.
   const fitnessDone = Boolean(todaySession && todayData.workouts.length > 0);
@@ -5124,16 +5174,73 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (view === "weekly") return <WeeklyRecap user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
+  const nextUp = nextUpItems({
+    hour: Number(homeDate.time.slice(0, 2)),
+    morning: { hasRoutine: todayData.hasRoutine, done: morningDone, inProgress: morningInProgress, wakeTime: todayData.wakeTime },
+    workout: { inProgressName: activeWorkout?.session_name || null, scheduledName: todaySession?.name || null, done: fitnessDone },
+    meals: dashboardMeals.map((meal, index) => ({ name: meal.name, time: meal.time, index, logged: isMealAnswered(dashMeals.results[index]), flexible: isFlexibleMeal(meal) })),
+    habits,
+    endOfDayDone: eodDone,
+  }).map(item => (item.id === "meal" && dashboardMeals[item.mealIndex] && isFlexibleMeal(dashboardMeals[item.mealIndex]) ? { ...item, action: "ENTER IT →" } : item));
+  // One tap: start the morning or workout on its tab, log the meal, tick the
+  // habit, or open the end-of-day check-in.
+  const runNextUp = item => {
+    if (item.id === "morning" || item.id === "workout") {
+      onNavigate(item.id === "morning" ? "morning" : "fitness");
+      window.dispatchEvent(new CustomEvent("track3d-start", { detail: { kind: item.id } }));
+    } else if (item.id === "meal") {
+      if (isFlexibleMeal(dashboardMeals[item.mealIndex])) mealLogRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      else dashMeals.markEaten(item.mealIndex);
+    } else if (item.id === "habit") {
+      setHabits(current => current.map(habit => (habit.id === item.habitId ? { ...habit, done: true } : habit)));
+    } else if (item.id === "endOfDay") {
+      setShowEod(true);
+    }
+  };
   const firstRunSteps = [
     { label: "Complete your profile", done: isProfileComplete(profile), profile: true },
     { label: "Set up your morning", done: todayData.hasRoutine, section: "morning" },
     { label: "Build your training plan", done: todayData.hasPlan, section: "fitness" },
     { label: "Set your calorie target", done: Boolean(calorieGoal), section: "nutrition" },
   ];
+  const showGetStarted = todayData.loaded && profile && firstRunSteps.some(step => !step.done);
   return (
     <div className="t3d-fade">
       {weeklyIsNew && weeklyCard}
-      {todayData.loaded && profile && firstRunSteps.some(step => !step.done) && (
+      {/* Next up: the next thing due today, one tap to start it. A new user
+          with nothing due yet sees GET STARTED first instead. */}
+      {!(showGetStarted && !nextUp.length) && <div className="t3d-card" data-testid="next-up" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)", background: "linear-gradient(160deg, rgba(0,255,178,.06), transparent 70%)" }}>
+        <div className="t3d-ctitle">NEXT UP</div>
+        {!todayData.loaded ? (
+          <div style={{ fontSize: 11, color: "#8AABB8" }}>Loading your day...</div>
+        ) : nextUp.length ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                <div data-testid="next-up-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#E0EAF0", letterSpacing: 1, overflowWrap: "anywhere" }}>{nextUp[0].title}</div>
+                <div style={{ fontSize: 11, color: "#8AABB8", marginTop: 4 }}>{nextUp[0].detail}</div>
+              </div>
+              <button className="t3d-big-btn" data-testid="next-up-action" style={{ flex: "0 1 220px", margin: 0, background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 12, fontWeight: 900, letterSpacing: 2 }} onClick={() => runNextUp(nextUp[0])}>{nextUp[0].action}</button>
+            </div>
+            {nextUp.length > 1 && (
+              <div style={{ marginTop: 12, paddingTop: 8, borderTop: `1px solid ${BORDER}` }}>
+                <div style={{ fontSize: 8, color: "#6F8792", letterSpacing: 1.5, marginBottom: 2 }}>THEN</div>
+                {nextUp.slice(1).map(item => (
+                  <div key={`${item.id}-${item.mealIndex ?? item.habitId ?? ""}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+                    <div style={{ flex: 1, minWidth: 0, fontSize: 11, color: "#C5D6DC" }}>{item.title} <span style={{ color: "#6F8792" }}>· {item.detail}</span></div>
+                    <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 36 }} onClick={() => runNextUp(item)}>{item.action}</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6 }}>
+            All caught up for now.{!eodDone && <> <button type="button" onClick={() => setShowEod(true)} style={{ background: "none", border: 0, color: NEON2, cursor: "pointer", fontSize: 12, padding: 0, textDecoration: "underline" }}>End-of-day check-in</button> when you&apos;re done for the day.</>}
+          </div>
+        )}
+      </div>}
+      {showGetStarted && (
         <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
           <div className="t3d-ctitle">GET STARTED</div>
           <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
@@ -5154,6 +5261,56 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           </ol>
         </div>
       )}
+      <div style={{ marginBottom: 16 }}>
+        <div className="t3d-card" style={{ marginBottom: 14 }}>
+          <div className="t3d-ctitle">TOP GOALS FOR TODAY</div>
+          {goals.length === 0 ? (
+            <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6, marginBottom: 10 }}>
+              What are the 3 most important things you want to get done today?
+            </div>
+          ) : null}
+          {goals.map(g => (
+            <div key={g.id} className="t3d-hrow">
+              <div className={`t3d-hcheck ${g.done ? "done" : ""}`} style={{ cursor: "pointer" }}
+                onClick={() => setGoals(gs => gs.map(x => x.id === g.id ? { ...x, done: !x.done } : x))}>{g.done ? "✓" : ""}</div>
+              <input className="t3d-input" value={g.text} style={{ flex: 1, background: "transparent", border: 0, padding: "4px 6px", color: g.done ? "#E0EAF0" : "#4A6070", textDecoration: g.done ? "line-through" : "none" }}
+                onChange={e => setGoals(gs => gs.map(x => x.id === g.id ? { ...x, text: e.target.value } : x))} />
+              <button type="button" onClick={() => setGoals(gs => gs.filter(x => x.id !== g.id))} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 14, padding: 4 }}>×</button>
+            </div>
+          ))}
+          {goals.length < 3 && (
+            <div style={{ display: "flex", gap: 8, marginTop: goals.length ? 10 : 0 }}>
+              <input className="t3d-input" placeholder={goals.length === 0 ? "e.g. Finish the client proposal" : "Add another goal..."} value={newGoalText}
+                onChange={e => setNewGoalText(e.target.value)} onKeyDown={e => e.key === "Enter" && addGoal()} style={{ flex: 1 }} />
+              <button className="t3d-btn t3d-btn-sm" disabled={!newGoalText.trim()} onClick={addGoal}>+ ADD</button>
+            </div>
+          )}
+        </div>
+        <div className="t3d-card" style={{ marginBottom: 14 }}>
+          <div className="t3d-ctitle">DO YOUR DAILY HABITS</div>
+          {habits.length === 0 && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
+          {habits.map(h => (
+            <div key={h.id} className="t3d-hrow" onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}>
+              <div className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</div>
+              <div className="t3d-hname" style={{ color: h.done ? "#E0EAF0" : "#4A6070" }}>{h.name}</div>
+              <div className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</div>
+            </div>
+          ))}
+        </div>
+        {todayData.loaded && dashboardMeals.length > 0 && (
+          <div className="t3d-card" data-testid="dashboard-meal-log" ref={mealLogRef} style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <div className="t3d-ctitle" style={{ margin: 0 }}>LOG AS YOU GO</div>
+              <span style={{ fontSize: 8, color: dashboardTrainingDay ? NEON : NEON2, letterSpacing: 1 }}>{dashboardTrainingDay ? "TRAINING DAY" : "REST DAY"} MEALS</span>
+            </div>
+            <MealLogList meals={dashboardMeals} results={dashMeals.results} onResultsChange={dashMeals.setResults} onSave={dashMeals.save} compact />
+            {dashMeals.error && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{dashMeals.error}</div>}
+            <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("nutrition")}>{todayData.nutrition?.meals_completed && todayData.nutrition.meals_completed._review_complete !== false ? "OPEN NUTRITION →" : "DAY REVIEW IN NUTRITION →"}</button>
+          </div>
+        )}
+        <AICoach dayContext={coachDayContext} />
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14, marginBottom: 16 }}>
         <div className="t3d-card">
           <div className="t3d-ctitle">DAILY SCORE</div>
@@ -5196,77 +5353,6 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
         </div>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <div className="t3d-card" style={{ marginBottom: 14 }}>
-          <div className="t3d-ctitle">TOP GOALS FOR TODAY</div>
-          {goals.length === 0 ? (
-            <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6, marginBottom: 10 }}>
-              What are the 3 most important things you want to get done today?
-            </div>
-          ) : null}
-          {goals.map(g => (
-            <div key={g.id} className="t3d-hrow">
-              <div className={`t3d-hcheck ${g.done ? "done" : ""}`} style={{ cursor: "pointer" }}
-                onClick={() => setGoals(gs => gs.map(x => x.id === g.id ? { ...x, done: !x.done } : x))}>{g.done ? "✓" : ""}</div>
-              <input className="t3d-input" value={g.text} style={{ flex: 1, background: "transparent", border: 0, padding: "4px 6px", color: g.done ? "#E0EAF0" : "#4A6070", textDecoration: g.done ? "line-through" : "none" }}
-                onChange={e => setGoals(gs => gs.map(x => x.id === g.id ? { ...x, text: e.target.value } : x))} />
-              <button type="button" onClick={() => setGoals(gs => gs.filter(x => x.id !== g.id))} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 14, padding: 4 }}>×</button>
-            </div>
-          ))}
-          {goals.length < 3 && (
-            <div style={{ display: "flex", gap: 8, marginTop: goals.length ? 10 : 0 }}>
-              <input className="t3d-input" placeholder={goals.length === 0 ? "e.g. Finish the client proposal" : "Add another goal..."} value={newGoalText}
-                onChange={e => setNewGoalText(e.target.value)} onKeyDown={e => e.key === "Enter" && addGoal()} style={{ flex: 1 }} />
-              <button className="t3d-btn t3d-btn-sm" disabled={!newGoalText.trim()} onClick={addGoal}>+ ADD</button>
-            </div>
-          )}
-        </div>
-        <div className="t3d-card" style={{ marginBottom: 14 }}>
-          <div className="t3d-ctitle">DO YOUR DAILY HABITS</div>
-          {habits.length === 0 && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
-          {habits.map(h => (
-            <div key={h.id} className="t3d-hrow" onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}>
-              <div className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</div>
-              <div className="t3d-hname" style={{ color: h.done ? "#E0EAF0" : "#4A6070" }}>{h.name}</div>
-              <div className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</div>
-            </div>
-          ))}
-        </div>
-        {todayData.loaded && dashboardMeals.length > 0 && (
-          <div className="t3d-card" data-testid="dashboard-meal-log" style={{ marginBottom: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>LOG AS YOU GO</div>
-              <span style={{ fontSize: 8, color: dashboardTrainingDay ? NEON : NEON2, letterSpacing: 1 }}>{dashboardTrainingDay ? "TRAINING DAY" : "REST DAY"} MEALS</span>
-            </div>
-            <DashboardMealLog key={`${today}-${dashboardTrainingDay}`} user={user} today={today} plan={todayData.nutritionPlan} log={todayData.nutrition} isTrainingDay={dashboardTrainingDay}
-              onLogged={log => setTodayData(current => ({ ...current, nutrition: log }))} />
-            <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("nutrition")}>{todayData.nutrition?.meals_completed && todayData.nutrition.meals_completed._review_complete !== false ? "OPEN NUTRITION →" : "DAY REVIEW IN NUTRITION →"}</button>
-          </div>
-        )}
-        <AICoach dayContext={coachDayContext} />
-      </div>
-
-      <ProgressPhotos user={user} />
-      {!weeklyIsNew && weeklyCard}
-
-      <div className="t3d-card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <div className="t3d-ctitle" style={{ margin: 0 }}>LAST 7 DAYS</div>
-          <button className="t3d-btn t3d-btn-sm" onClick={() => setView("history")}>VIEW MORE →</button>
-        </div>
-        <div className="t3d-hmap">
-          {activity7.map((d, i) => (
-            <div key={i} style={{ textAlign: "center" }}>
-              <div className="t3d-hcell" title={d.date} style={{ background: heatColor(d.activity) }} />
-              <div style={{ fontSize: 8, marginTop: 4, letterSpacing: .5, color: d.date === today ? NEON : "#6F8792" }}>
-                {new Date(`${d.date}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" }).toUpperCase()}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div style={{ fontSize: 9, color: "#6F8792", marginTop: 10, lineHeight: 1.5 }}>Brighter = more logged that day (morning, nutrition, workout, end of day).</div>
-      </div>
-
       {/* End of Day Check-in */}
       <div className="t3d-card" style={{ textAlign: "center", padding: 28 }}>
         {eodDone ? (
@@ -5287,6 +5373,27 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           </>
         )}
       </div>
+      {!weeklyIsNew && weeklyCard}
+
+      <div className="t3d-card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div className="t3d-ctitle" style={{ margin: 0 }}>LAST 7 DAYS</div>
+          <button className="t3d-btn t3d-btn-sm" onClick={() => setView("history")}>VIEW MORE →</button>
+        </div>
+        <div className="t3d-hmap">
+          {activity7.map((d, i) => (
+            <div key={i} style={{ textAlign: "center" }}>
+              <div className="t3d-hcell" title={d.date} style={{ background: heatColor(d.activity) }} />
+              <div style={{ fontSize: 8, marginTop: 4, letterSpacing: .5, color: d.date === today ? NEON : "#6F8792" }}>
+                {new Date(`${d.date}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short" }).toUpperCase()}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 9, color: "#6F8792", marginTop: 10, lineHeight: 1.5 }}>Brighter = more logged that day (morning, nutrition, workout, end of day).</div>
+      </div>
+
+      <ProgressPhotos user={user} />
     </div>
   );
 }
@@ -5558,6 +5665,7 @@ function Fitness({ user, isActive = true }) {
   const workoutLogIdRef = useRef(null);
   const workoutSaveChainRef = useRef(Promise.resolve());
   const workoutFinalizedRef = useRef(false);
+  const serverSetsRef = useRef(null); // the active workout's sets as last read from or written to the server
   useEffect(() => { workoutLogIdRef.current = activeWorkoutLogId; }, [activeWorkoutLogId]);
 
   useEffect(() => {
@@ -5581,8 +5689,10 @@ function Fitness({ user, isActive = true }) {
       // 2-hour resume window) even though the local draft still thinks
       // it's live - don't reopen a workout that's already been logged.
       const { data: logRow } = await supabase.from("workout_logs")
-        .select("in_progress").eq("id", draft.activeWorkoutLogId).eq("user_id", user.id).single();
+        .select("in_progress,exercises").eq("id", draft.activeWorkoutLogId).eq("user_id", user.id).maybeSingle();
       if (!logRow || !logRow.in_progress) return;
+      // What the server holds, so restoring the same sets writes nothing.
+      serverSetsRef.current = loggedSetsSignature(logRow.exercises);
     }
     setActiveSession(draft.activeSession);
     setExerciseIdx(draft.exerciseIdx || 0);
@@ -5671,27 +5781,27 @@ function withPlanApproval(sessions, now = new Date()) {
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", update); };
   }, [restActive, restDeadline]);
 
-  // Only yesterday's abandoned workouts are finalized. A workout started
-  // today remains resumable until the user ends it or the UK/home date rolls.
-  // The workout in progress is never finalised here, even when it started
-  // before midnight and the date has just rolled over.
+  // Unfinished workouts from earlier days are closed when a new workout is
+  // started (never just by opening the app), and only those rows. The
+  // workout in progress is never closed here, even when it started before
+  // midnight and the date has just rolled over. Until then they are shown
+  // as finished (isFinishedWorkout).
   const finalizeStaleWorkouts = async () => {
     if (!user) return;
     try {
       const draft = await readDraft(user.id, "fitness").catch(() => null);
       const keep = activeWorkoutLogIds({ currentId: workoutLogIdRef.current, finalised: workoutFinalizedRef.current, draft });
-      let query = supabase.from("workout_logs").update({ in_progress: false })
+      const { data: stale } = await supabase.from("workout_logs").select("id")
         .eq("user_id", user.id).eq("in_progress", true).lt("date", today);
-      keep.forEach(id => { query = query.neq("id", id); });
-      await query;
+      const ids = (stale || []).map(row => row.id).filter(id => !keep.includes(id));
+      if (ids.length) await supabase.from("workout_logs").update({ in_progress: false }).eq("user_id", user.id).in("id", ids);
     } catch (e) { console.log("Stale workout cleanup error:", e); }
   };
 
   const loadData = async () => {
     setLoading(true);
     try {
-      await finalizeStaleWorkouts();
-      const { data: splitData } = await supabase.from("workout_splits").select("*").eq("user_id", user.id).single();
+      const { data: splitData } = await readWorkoutSplit(user.id);
       let normalizedSessions = [];
       if (splitData) {
         normalizedSessions = normalizeFitnessSessions(splitData.sessions || []);
@@ -5719,14 +5829,20 @@ function withPlanApproval(sessions, now = new Date()) {
           setActiveWorkoutLogId(recovered.workoutLogId);
           workoutLogIdRef.current = recovered.workoutLogId;
           workoutFinalizedRef.current = false;
+          serverSetsRef.current = loggedSetsSignature(activeLog.exercises);
           setWorkoutInProgress(true);
         }
       }
       // A generous window so an exercise's history still surfaces ("last time")
       // even after a session gets restructured or an exercise sits unused for a while.
-      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).eq("in_progress", false).order("created_at", { ascending: false }).limit(250);
-      if (logs) setHistory(logs.map(log => ({ ...log, ai_feedback: log.ai_feedback || log.exercises?.find(exercise => exercise.ai_feedback)?.ai_feedback || "" })));
-      const { data: memoryRow } = await supabase.from("coach_memory").select("summary").eq("user_id", user.id).single();
+      // Finished workouts, plus unfinished ones from earlier days (shown as
+      // finished), except one still being continued on this device.
+      const draft = await readDraft(user.id, "fitness").catch(() => null);
+      const keep = activeWorkoutLogIds({ currentId: workoutLogIdRef.current, finalised: workoutFinalizedRef.current, draft });
+      const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).or(`in_progress.eq.false,date.lt.${today}`).order("created_at", { ascending: false }).limit(250);
+      if (logs) setHistory(logs.filter(log => !keep.includes(log.id)).map(log => ({ ...log, in_progress: false, ai_feedback: log.ai_feedback || log.exercises?.find(exercise => exercise.ai_feedback)?.ai_feedback || "" })));
+      // maybeSingle: a new user has no coach memory yet (single() would 406).
+      const { data: memoryRow } = await supabase.from("coach_memory").select("summary").eq("user_id", user.id).maybeSingle();
       if (memoryRow?.summary) setCoachMemory(memoryRow.summary);
     } catch (e) { console.log("Load error:", e); }
     setLoading(false);
@@ -5737,7 +5853,7 @@ function withPlanApproval(sessions, now = new Date()) {
     if (!user) return { ok: false, error: "not signed in" };
     try {
       const normalizedSessions = normalizeFitnessSessions(sessionsData);
-      const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).single();
+      const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).maybeSingle();
 
       // Upsert so a stale lookup can never turn a save into a duplicate insert.
       // Read the row back so a save only counts once the database has it.
@@ -5796,6 +5912,7 @@ function withPlanApproval(sessions, now = new Date()) {
         setActiveWorkoutLogId(data.id);
       }
       if (finalize) workoutFinalizedRef.current = true;
+      serverSetsRef.current = loggedSetsSignature(payload.exercises);
       setWorkoutSaveError("");
       return { id: workoutLogIdRef.current, payload };
     };
@@ -5825,10 +5942,13 @@ function withPlanApproval(sessions, now = new Date()) {
     return saved;
   };
 
-  // Autosave every time a set is confirmed or an already-logged set is edited.
+  // Autosave every time a set is confirmed or an already-logged set is
+  // edited. Sets restored on load already match the server, so restoring
+  // writes nothing.
   useEffect(() => {
     if (!workoutInProgress || !activeSession) return;
     if (!Object.values(completedSets).some(sets => sets?.length)) return;
+    if (loggedSetsSignature(buildLoggedExercises(activeSession, completedSets)) === serverSetsRef.current) return;
     persistWorkoutLog(completedSets).catch(() => {});
   }, [completedSets, workoutInProgress, activeSession]);
 
@@ -5930,6 +6050,7 @@ function withPlanApproval(sessions, now = new Date()) {
   };
 
   const startWorkout = async (session, options = { minutes: availableMinutes, context: gymContext, name: gymName }) => {
+    await finalizeStaleWorkouts();
     const minuteLimit = parseInt(options.minutes, 10);
     const sessionToStart = fitSessionToMinutes(normalizeFitnessSessions([session])[0], minuteLimit);
     sessionToStart.gymContext = { type: options.context, name: String(options.name || "").trim() };
@@ -5990,6 +6111,29 @@ function withPlanApproval(sessions, now = new Date()) {
     setGymName("");
     startWorkout(session, { minutes: "", context: "usual", name: "" });
   };
+  // "Next up" on the dashboard: continue or start today's workout in one tap.
+  // A tap made while this tab is still loading runs once it has loaded, so
+  // an unfinished workout is continued rather than a new one started.
+  const startTodayRef = useRef(null);
+  const pendingWorkoutStartRef = useRef(false);
+  useEffect(() => {
+    startTodayRef.current = () => {
+      if (loading) { pendingWorkoutStartRef.current = true; return; }
+      if (workoutInProgress && activeSession) { setView("workout"); return; }
+      const session = sessionForDay(sessions, homeDate.dayCode);
+      if (session) requestStartWorkout(session);
+    };
+  });
+  useEffect(() => {
+    if (loading || !pendingWorkoutStartRef.current) return;
+    pendingWorkoutStartRef.current = false;
+    startTodayRef.current?.();
+  }, [loading]);
+  useEffect(() => {
+    const start = event => { if (event.detail?.kind === "workout") startTodayRef.current?.(); };
+    window.addEventListener("track3d-start", start);
+    return () => window.removeEventListener("track3d-start", start);
+  }, []);
   const openWorkoutOptions = session => {
     setPendingSession(session);
     setAvailableMinutes("");
@@ -6144,11 +6288,32 @@ function withPlanApproval(sessions, now = new Date()) {
     setEditingSet(null);
   };
 
+  // The reps and weight shown in the set logger: what the user typed, else
+  // the pre-filled target reps and last weight (setLoggerDefaults).
+  const setInputsFor = eIdx => {
+    const exercise = activeSession?.exercises?.[eIdx];
+    if (!exercise) return { weight: "", reps: "" };
+    const setIdx = getCurrentSetIdx(eIdx);
+    const ranges = Array.isArray(exercise.reps) ? exercise.reps : String(exercise.reps || "8-12").split("/").map(value => value.trim()).filter(Boolean);
+    const lastSets = getLastSessionData(exercise);
+    const defaults = setLoggerDefaults({
+      repRange: ranges[setIdx] || ranges.at(-1) || "8-12",
+      previousSet: (completedSets[eIdx] || []).at(-1) || null,
+      lastSet: lastSets?.[setIdx] || lastSets?.at(-1) || null,
+      suggestedWeight: getWeightGuidance(exercise, setIdx)?.weight,
+    });
+    const typed = currentInputs[eIdx] || {};
+    return { weight: typed.weight ?? defaults.weight, reps: typed.reps ?? defaults.reps };
+  };
+  const stepSetInput = (field, delta) => {
+    const current = setInputsFor(exerciseIdx);
+    setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], [field]: stepSetValue(current[field], delta) } }));
+  };
+
   const confirmSet = () => {
     const eIdx = exerciseIdx;
     const sIdx = getCurrentSetIdx(eIdx);
-    const weight = currentInputs[eIdx]?.weight || "";
-    const reps = currentInputs[eIdx]?.reps || "";
+    const { weight, reps } = setInputsFor(eIdx);
     if (!weight || !reps) return;
 
     const priorSets = getExerciseHistory(activeSession.exercises[eIdx]).flatMap(exposure => exposure.sets || []);
@@ -6157,8 +6322,8 @@ function withPlanApproval(sessions, now = new Date()) {
     const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision };
     const newCompleted = { ...completedSets, [eIdx]: [...(completedSets[eIdx] || []), newSet] };
     setCompletedSets(newCompleted);
-    // Keep the last weight for the next set; only reps are re-entered.
-    setCurrentInputs(prev => ({ ...prev, [eIdx]: { weight, reps: "" } }));
+    // The next set starts from this weight and its own target reps.
+    setCurrentInputs(prev => ({ ...prev, [eIdx]: {} }));
 
     const totalSets = activeSession.exercises[eIdx]?.sets || 0;
 
@@ -6437,8 +6602,7 @@ function withPlanApproval(sessions, now = new Date()) {
     const weightGuidance = getWeightGuidance(currentExercise, sIdx);
     const suggestedWeight = weightGuidance?.weight;
     const lastSets = getLastSessionData(currentExercise);
-    const weight = currentInputs[exerciseIdx]?.weight || "";
-    const reps = currentInputs[exerciseIdx]?.reps || "";
+    const { weight, reps } = setInputsFor(exerciseIdx);
     const valuesLookSwapped = Number(reps) >= 30 && Number(weight) > 0 && Number(weight) <= 30;
     const exerciseIsComplete = exerciseCompletedSets.length >= totalSets;
     const plannedSetCount = activeSession.exercises.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0);
@@ -6518,24 +6682,36 @@ function withPlanApproval(sessions, now = new Date()) {
           {!restActive && (
             <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
               <div className="workout-set-fields">
-                <label style={{ display: "block", textAlign: "center" }}>
-                  <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
-                  <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps}
-                    onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
-                    placeholder="0"
-                    style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
-                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST TIME: {Number(lastSets[sIdx].reps) > 0 ? lastSets[sIdx].reps : "—"}</div>}
-                </label>
+                <div className="workout-field">
+                  <label style={{ display: "block", textAlign: "center" }}>
+                    <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
+                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps}
+                      onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
+                      placeholder="0"
+                      style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
+                  </label>
+                  <div className="workout-steppers">
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label="One rep fewer" onClick={() => stepSetInput("reps", -1)}>−1</button>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label="One rep more" onClick={() => stepSetInput("reps", 1)}>+1</button>
+                  </div>
+                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8", textAlign: "center" }}>LAST TIME: {Number(lastSets[sIdx].reps) > 0 ? lastSets[sIdx].reps : "—"}</div>}
+                </div>
                 <button className="workout-log-set" aria-label="Log set" onClick={confirmSet} disabled={!weight || !reps}
                   style={{ background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 10, cursor: weight && reps ? "pointer" : "not-allowed", color: "#080C10", fontWeight: 800, boxShadow: weight && reps ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>LOG SET</button>
-                <label style={{ display: "block", textAlign: "center" }}>
-                  <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
-                  <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight}
-                    onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
-                    placeholder={suggestedWeight || "0"}
-                    style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontSize: suggestedWeight && !weight ? 22 : undefined, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
-                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8" }}>LAST TIME: {lastSets[sIdx].weight}kg</div>}
-                </label>
+                <div className="workout-field">
+                  <label style={{ display: "block", textAlign: "center" }}>
+                    <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
+                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight}
+                      onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
+                      placeholder={suggestedWeight || "0"}
+                      style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
+                  </label>
+                  <div className="workout-steppers">
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label="2.5 kg less" onClick={() => stepSetInput("weight", -2.5)}>−2.5</button>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label="2.5 kg more" onClick={() => stepSetInput("weight", 2.5)}>+2.5</button>
+                  </div>
+                  {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8", textAlign: "center" }}>LAST TIME: {lastSets[sIdx].weight}kg</div>}
+                </div>
               </div>
 
               {/* Rep range and tempo for this set, directly below the inputs */}
@@ -8494,18 +8670,20 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false 
   );
 }
 
-// Dashboard version: ticks today's planned meals and saves them to the same
-// nutrition_logs row the Nutrition page uses, without touching off-plan food
-// or the day review.
-function DashboardMealLog({ user, today, plan, log, isTrainingDay, onLogged }) {
-  const meals = mealsForDay(plan, today, isTrainingDay);
-  const [results, setResults] = useState(() => log?.meals_completed || {});
+// Today's meal ticks on the dashboard (LOG AS YOU GO and Next up), saved to
+// the same nutrition_logs row as the Nutrition page, one save at a time so
+// quick ticks never create two rows. Off-plan food and the day review are
+// left alone.
+function useDashboardMealLog({ user, today, meals, log, loaded, isTrainingDay, onLogged }) {
+  const [results, setResults] = useState({});
   const [error, setError] = useState("");
   const logRef = useRef(log);
   useEffect(() => { logRef.current = log; }, [log]);
+  // Start from what is saved once today's data has loaded (or a row was created).
+  const syncKey = `${loaded ? 1 : 0}:${today}:${log?.id || ""}`;
+  useEffect(() => { setResults(logRef.current?.meals_completed || {}); }, [syncKey]);
   const saving = useRef(Promise.resolve());
   const save = updated => {
-    // One save at a time, so quick ticks never create two rows for today.
     const run = saving.current.then(async () => {
       setError("");
       const current = logRef.current;
@@ -8533,12 +8711,12 @@ function DashboardMealLog({ user, today, plan, log, isTrainingDay, onLogged }) {
     saving.current = run.catch(() => false);
     return run;
   };
-  return (
-    <>
-      <MealLogList meals={meals} results={results} onResultsChange={setResults} onSave={save} compact />
-      {error && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{error}</div>}
-    </>
-  );
+  const markEaten = index => {
+    const updated = { ...results, [index]: true };
+    setResults(updated);
+    return save(updated);
+  };
+  return { results, setResults, save, markEaten, error };
 }
 
 // ─── AI Reply Block ───────────────────────────────────────────────────────────
@@ -8688,7 +8866,7 @@ function Nutrition({ user, userSessions }) {
   const loadData = async () => {
     setLoading(true);
     try {
-      const { data: planData } = await supabase.from("nutrition_plans").select("*").eq("user_id", user.id).single();
+      const { data: planData } = await readNutritionPlan(user.id);
       if (planData) {
         setPlan(planData);
         setNutritionStyle(inferNutritionStyle(planData.meals || []));
@@ -8698,9 +8876,9 @@ function Nutrition({ user, userSessions }) {
       }
       // Wake-up time for meal times, and the last weigh-in to start the weight field.
       const [{ data: routineRow }, { data: weighIns }, { data: profileRow }] = await Promise.all([
-        supabase.from("morning_routines").select("wake_time").eq("user_id", user.id).maybeSingle(),
+        readMorningRoutine(user.id),
         supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(14),
-        supabase.from("user_profiles").select("height_cm,date_of_birth,sex").eq("user_id", user.id).maybeSingle(),
+        readUserProfile(user.id),
       ]);
       setProfile(normaliseProfile(profileRow));
       setRoutineWakeTime(routineRow?.wake_time || "");
@@ -8758,7 +8936,7 @@ function Nutrition({ user, userSessions }) {
       updated_at: new Date().toISOString(),
     };
     try {
-      const { data: existing } = await supabase.from("nutrition_plans").select("id").eq("user_id", user.id).single();
+      const { data: existing } = await supabase.from("nutrition_plans").select("id").eq("user_id", user.id).maybeSingle();
       const write = values => (existing
         ? supabase.from("nutrition_plans").update(values).eq("user_id", user.id)
         : supabase.from("nutrition_plans").insert({ user_id: user.id, ...values }));
@@ -8897,9 +9075,12 @@ function Nutrition({ user, userSessions }) {
     if (!user) return false;
     setNutritionSaveError("");
     const activeMeals = mealsForDay({ ...plan, weekly_meal_plan: weeklyMealPlan }, today, isTrainingDay);
-    const totals = calculateLoggedNutrition(activeMeals, resultsOverride, offPlanCals);
+    // Off-plan macros only apply while there are off-plan calories.
+    const { _off_plan: offPlanMacros, ...mealOnlyResults } = resultsOverride || {};
+    const results = Number(offPlanCals) > 0 && offPlanMacros ? { ...mealOnlyResults, _off_plan: offPlanMacros } : mealOnlyResults;
+    const totals = calculateLoggedNutrition(activeMeals, results, offPlanCals);
     const row = {
-      meals_completed: { ...resultsOverride, _review_complete: reviewComplete },
+      meals_completed: { ...results, _review_complete: reviewComplete },
       off_plan_food: offPlanFood, off_plan_calories: parseInt(offPlanCals)||0,
       total_calories: totals.calories, total_protein: totals.protein,
       ai_feedback: aiFeedback, is_training_day: isTrainingDay,
@@ -9086,12 +9267,14 @@ function Nutrition({ user, userSessions }) {
                 {foodEstimate && (
                   <div data-testid="food-estimate" style={{ marginTop: 10, fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>
                     {foodEstimate.items.map(item => <div key={item.name}>- {item.name}{item.amount ? ` (${item.amount})` : ""}: {item.caloriesLow}–{item.caloriesHigh} kcal, {item.proteinLow}–{item.proteinHigh} g protein</div>)}
-                    <div style={{ color: "#FFB547", marginTop: 4 }}>Estimate: {foodEstimate.caloriesLow.toLocaleString()}–{foodEstimate.caloriesHigh.toLocaleString()} kcal, {foodEstimate.proteinLow}–{foodEstimate.proteinHigh} g protein</div>
+                    <div style={{ color: "#FFB547", marginTop: 4 }}>Estimate: {foodEstimate.caloriesLow.toLocaleString()}–{foodEstimate.caloriesHigh.toLocaleString()} kcal, {foodEstimate.proteinLow}–{foodEstimate.proteinHigh} g protein · about {foodEstimate.carbsMid} g carbs, {foodEstimate.fatsMid} g fat</div>
                     <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8 }} onClick={() => {
                       setOffPlanFood([offPlanFood, ...unlogged.filter(item => item.meal !== "Off plan").map(item => item.food)].filter(Boolean).join("; "));
                       setOffPlanCals(String((Number(offPlanCals) || 0) + foodEstimate.caloriesMid));
+                      // The protein, carbs and fat count towards today too, not just the calories.
+                      setMealResults(current => addOffPlanMacros(current, foodEstimate));
                       setFoodEstimate(null);
-                      setFoodEstimateStatus(`Added ${foodEstimate.caloriesMid.toLocaleString()} kcal (the middle of the estimate).`);
+                      setFoodEstimateStatus(`Added ${foodEstimate.caloriesMid.toLocaleString()} kcal, ${foodEstimate.proteinMid} g protein, ${foodEstimate.carbsMid} g carbs and ${foodEstimate.fatsMid} g fat (the middle of the estimate).`);
                     }}>ADD ~{foodEstimate.caloriesMid.toLocaleString()} KCAL TO TODAY</button>
                   </div>
                 )}
@@ -9253,6 +9436,8 @@ function Nutrition({ user, userSessions }) {
     const allergyList = parseAllergies(aiNutritionAnswers.allergies);
     const currentConflicts = mealAllergyConflicts(currentMeals, allergyList);
     const reviewConflicts = mealAllergyConflicts([...preparedPlanMeals, ...preparedRestDayMeals], allergyList);
+    const reviewTargets = { calories: getFinalMacros().calories, protein: getFinalMacros().protein };
+    const reviewPlanGap = mealPlanGapText(mealPlanTargetCheck(preparedPlanMeals, reviewTargets), reviewTargets);
     const age = ageFromDateOfBirth(dateOfBirth, today);
     const stats = { weight: bodyWeight, height, age, sex, activityLevel, goal };
     // Fields the profile already holds are shown as one line with EDIT;
@@ -9727,6 +9912,11 @@ function Nutrition({ user, userSessions }) {
                   ))}
                 </div>
               )}
+              {reviewPlanGap && (
+                <div role="alert" data-testid="review-target-gap" style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 12, marginTop: 12, fontSize: 11, color: "#FFD08A", lineHeight: 1.55 }}>
+                  <strong style={{ color: "#FFB547" }}>Check your totals.</strong> {reviewPlanGap} You can still save, or go back and adjust portions.
+                </div>
+              )}
               {reviewConflicts.length > 0 && (
                 <div role="alert" data-testid="review-allergy" style={{ border: `1px solid ${NEON3}`, borderRadius: 6, padding: 12, marginTop: 12, fontSize: 11, color: "#E0EAF0", lineHeight: 1.55 }}>
                   <div style={{ color: NEON3, fontWeight: 700, marginBottom: 4 }}>These meals contain foods you listed as allergies or intolerances:</div>
@@ -9819,6 +10009,9 @@ function Nutrition({ user, userSessions }) {
 
   // ── HOME VIEW ─────────────────────────────────────────────────────────────
   const todayLog = logs.find(l => l.date === today);
+  // The training day meals against the daily targets: say so when they miss.
+  const planTargets = { calories: plan?.daily_calories, protein: plan?.protein_target };
+  const planGap = plan?.meals?.length ? mealPlanGapText(mealPlanTargetCheck(plan.meals, planTargets), planTargets) : "";
   const planMealNames = new Set([...(plan?.meals || []), ...(plan?.rest_day_meals || [])].map(meal => String(meal?.name || "").trim().toLowerCase()).filter(Boolean));
 
   return (
@@ -9874,8 +10067,9 @@ function Nutrition({ user, userSessions }) {
               <button className="t3d-btn t3d-btn-sm" onClick={openSetup}>CHANGE TARGETS</button>
             </div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>REMAINING TODAY</div>
+            {Number(offPlanCals) > 0 && !(mealResults && typeof mealResults._off_plan === "object") && <div data-testid="offplan-no-macros" style={{ color: "#8AABB8", fontSize: 9, lineHeight: 1.5, marginBottom: 6 }}>Off-plan food has calories but no protein, carbs or fat figures, so what&apos;s left of those is capped by the calories left. Estimate it in the day review to count them.</div>}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, textAlign: "center" }}>
-              {[["calories","KCAL",NEON],["protein","PROTEIN",NEON2],["carbs","CARBS","#FF8C00"],["fats","FATS","#C5D6DC"]].map(([key,label,color]) => <div key={key} style={{ padding: "8px 3px", background: SURFACE2, borderRadius: 5 }}><div style={{ color, fontSize: 13, fontWeight: 700 }}>{remainingNutrition[key]}{key === "calories" ? "" : "g"}</div><div style={{ color: "#6F8792", fontSize: 7, marginTop: 3 }}>{label}</div></div>)}
+              {[["calories","KCAL",NEON],["protein","PROTEIN",NEON2],["carbs","CARBS","#FF8C00"],["fats","FATS","#C5D6DC"]].map(([key,label,color]) => <div key={key} data-testid={`remaining-${key}`} style={{ padding: "8px 3px", background: SURFACE2, borderRadius: 5 }}><div style={{ color, fontSize: 13, fontWeight: 700 }}>{remainingNutrition[key]}{key === "calories" ? "" : "g"}</div><div style={{ color: "#6F8792", fontSize: 7, marginTop: 3 }}>{label}</div></div>)}
             </div>
           </div>
 
@@ -9904,6 +10098,15 @@ function Nutrition({ user, userSessions }) {
               <div className="t3d-ctitle" style={{ margin: 0 }}>{isTrainingDay?"TRAINING DAY MEALS":"REST DAY MEALS"}</div>
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => openMealEditor(!isTrainingDay)}>EDIT MEALS</button>
             </div>
+            {planGap && (
+              <div role="alert" data-testid="plan-target-gap" style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 10, marginBottom: 12, fontSize: 10, color: "#FFD08A", lineHeight: 1.55 }}>
+                <strong style={{ color: "#FFB547" }}>Your meals don&apos;t match your targets.</strong> {planGap.replace("These meals", "Your training day meals")}
+                <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                  <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => openMealEditor(false)}>EDIT MEALS</button>
+                  <button className="t3d-btn t3d-btn-sm" onClick={openSetup}>CHANGE TARGETS</button>
+                </div>
+              </div>
+            )}
             {activeMeals.map((m, i) => (
               <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
@@ -10102,15 +10305,15 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     if (!user) return;
     // Load morning routine, nutrition, fitness for auto-populate
     Promise.all([
-      supabase.from("morning_routines").select("tasks,wake_time").eq("user_id", user.id).single(),
-      supabase.from("nutrition_plans").select("meals,rest_day_meals").eq("user_id", user.id).single(),
-      supabase.from("workout_splits").select("sessions").eq("user_id", user.id).single(),
+      readMorningRoutine(user.id),
+      readNutritionPlan(user.id),
+      readWorkoutSplit(user.id),
     ]).then(([morning, nutrition, fitness]) => {
       if (morning.data?.tasks) setMorningRoutine(morning.data.tasks);
       if (nutrition.data) {
         const todayShort = dateKeyDayCode(selectedDate);
         const isTraining = fitness.data?.sessions?.some(s => s.days?.includes(todayShort));
-        const meals = isTraining ? (nutrition.data.meals || []) : (nutrition.data.rest_day_meals || nutrition.data.meals || []);
+        const meals = mealsForDay(nutrition.data, selectedDate, isTraining);
         setNutritionMeals(meals);
         setFitnessData({ sessions: fitness.data?.sessions || [], isTraining });
       }
@@ -10126,7 +10329,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
       const { data: taskData } = await supabase.from("calendar_tasks").select("*").eq("user_id", user.id).eq("date", selectedDate).order("start_time");
       if (taskData) setTasks(taskData);
       if (isToday) {
-        const { data: debriefData } = await supabase.from("daily_debrief").select("*").eq("user_id", user.id).eq("date", today).single();
+        const { data: debriefData } = await supabase.from("daily_debrief").select("*").eq("user_id", user.id).eq("date", today).maybeSingle();
         if (debriefData) { setDebrief(debriefData); setTodayDebriefed(true); }
       }
     } catch (e) { console.log("Load error:", e); }
@@ -10683,10 +10886,13 @@ export default function App() {
     (async () => {
       let loaded = [];
       try {
-        const { data: defs, error: defsError } = await supabase.from("habits").select("*").eq("user_id", user.id).order("created_at", { ascending: true });
-        if (defsError) throw defsError;
         // Completion history (up to a year) gives each habit's real streak.
-        const { data: completions, error: compError } = await supabase.from("habit_completions").select("habit_id,date").eq("user_id", user.id).gte("date", shiftDateKey(todayKey, -366)).lte("date", todayKey);
+        // Both reads start together and share the weekly report's identical reads.
+        const [{ data: defs, error: defsError }, { data: completions, error: compError }] = await Promise.all([
+          readHabits(user.id),
+          readHabitCompletions(user.id, shiftDateKey(todayKey, -366), todayKey),
+        ]);
+        if (defsError) throw defsError;
         if (compError) throw compError;
         const datesByHabit = new Map();
         (completions || []).forEach(c => datesByHabit.set(String(c.habit_id), [...(datesByHabit.get(String(c.habit_id)) || []), c.date]));
@@ -10780,7 +10986,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
-    supabase.from("workout_splits").select("sessions").eq("user_id", user.id).single()
+    readWorkoutSplit(user.id)
       .then(({ data }) => { if (data?.sessions) setFitnessSessions(data.sessions); });
   }, [user]);
 
@@ -10864,9 +11070,9 @@ export default function App() {
     if (!user?.id) { setProfile(null); return; }
     let cancelled = false;
     Promise.all([
-      supabase.from("user_profiles").select("height_cm,date_of_birth,sex").eq("user_id", user.id).maybeSingle(),
-      supabase.from("coach_profiles").select("experience_level").eq("user_id", user.id).maybeSingle(),
-    ]).then(([row, coach]) => { if (!cancelled) setProfile(normaliseProfile(row.data, coach.data?.experience_level)); });
+      readUserProfile(user.id),
+      readCoachProfile(user.id),
+    ]).then(([row, coach]) => { if (!cancelled) setProfile({ ...normaliseProfile(row.data, coach.data?.experience_level), personality: coach.data?.personality || "balanced" }); });
     return () => { cancelled = true; };
   }, [user?.id]);
 
@@ -10946,7 +11152,7 @@ export default function App() {
         {profileOpen && (
           <div onClick={() => setProfileOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 130, padding: 16 }}>
             <div role="dialog" aria-modal="true" aria-label="Your profile" data-testid="profile-dialog" onClick={event => event.stopPropagation()} className="t3d-card" style={{ width: "100%", maxWidth: 440, maxHeight: "90dvh", overflowY: "auto", marginBottom: 0 }}>
-              <div className="t3d-ctitle" style={{ marginBottom: 4 }}>YOUR PROFILE</div>
+              <div className="t3d-ctitle" style={{ marginBottom: 4 }}>PROFILE &amp; COACH SETTINGS</div>
               {profile ? (
                 <ProfileForm user={user} profile={profile} today={todayKey} onCancel={() => setProfileOpen(false)} onSaved={saved => { setProfile(saved); setProfileOpen(false); }} />
               ) : <div style={{ fontSize: 11, color: "#8AABB8", padding: "10px 0" }}>Loading your profile...</div>}

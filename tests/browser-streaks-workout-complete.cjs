@@ -88,6 +88,10 @@ const londonKey = (offset = 0) => {
       const inProgress = url.searchParams.get('in_progress');
       if (inProgress === 'eq.true') rows = [];
     }
+    // PostgREST or=(in_progress.eq.false,date.lt.X): finished, or from an earlier day.
+    const orFilter = url.searchParams.get('or');
+    const earlierDay = orFilter && /in_progress\.eq\.false,date\.lt\.(\d{4}-\d{2}-\d{2})/.exec(orFilter);
+    if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();

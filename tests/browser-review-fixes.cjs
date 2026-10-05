@@ -78,6 +78,10 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     if (table === 'nutrition_logs' && scenario === 'tz') rows = [{ user_id: user.id, date: '2026-10-06', total_calories: 2500, total_protein: 180 }];
     if (table === 'morning_checkins' && scenario === 'tz') rows = [{ user_id: user.id, date: '2026-10-04', score: 7, data: {} }, { user_id: user.id, date: '2026-10-05', score: 8, data: {} }];
     if (table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true') rows = [];
+    // PostgREST or=(in_progress.eq.false,date.lt.X): finished, or from an earlier day.
+    const orFilter = url.searchParams.get('or');
+    const earlierDay = orFilter && /in_progress\.eq\.false,date\.lt\.(\d{4}-\d{2}-\d{2})/.exec(orFilter);
+    if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();
@@ -154,9 +158,10 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     await page.waitForTimeout(1500);
     await page.clock.fastForward('00:06');
     await page.waitForTimeout(1500);
-    const cleanup = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body === '{"in_progress":false}' && decodeURIComponent(w.url).includes('date=lt.2026-10-07'));
-    assert(cleanup.length >= 1, 'stale cleanup ran after the date changed');
-    cleanup.forEach(w => assert(w.url.includes('id=neq.w1'), 'cleanup skips the active workout: ' + w.url));
+    // Crossing midnight writes nothing: older unfinished workouts are closed
+    // only when a new workout starts, and never the one in progress.
+    const cleanup = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body === '{"in_progress":false}');
+    assert.equal(cleanup.length, 0, 'no cleanup just because the date changed');
     await logSet(60, 7);
     await page.waitForTimeout(800);
     const latest = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body.includes('"exercises"')).pop();
