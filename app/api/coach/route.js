@@ -68,22 +68,25 @@ export async function POST(request) {
       olderHistory = data || [];
     }
 
-    const providerResponse = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
-        max_tokens: 1200,
-        system: `${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
-        messages: [{ role: "user", content: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}\n\nUSER\n${message}` }],
-      }),
-    });
-    if (!providerResponse.ok) return Response.json({ error: "Coach provider failed" }, { status: 502 });
-    const providerPayload = await providerResponse.json();
-    const text = providerPayload.content?.map((block) => block.text || "").join("") || "";
-
+    // Retry once when the model's reply is not valid JSON before reporting an error.
     let answer;
-    try { answer = extractJson(text); } catch { return Response.json({ error: "Coach returned an invalid response" }, { status: 502 }); }
+    for (let attempt = 0; attempt < 2 && !answer; attempt++) {
+      const providerResponse = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
+          max_tokens: 1200,
+          system: `${buildCoachSystemInstructions(profile?.personality)}\n\n${responseShape}`,
+          messages: [{ role: "user", content: `14-DAY CONTEXT\n${JSON.stringify(context)}\n\nCURRENT CLIENT CONTEXT\n${JSON.stringify(body?.clientContext || null)}\n\nOLDER HISTORY RETRIEVAL\n${JSON.stringify(olderHistory)}\n\nUSER\n${message}` }],
+        }),
+      });
+      if (!providerResponse.ok) return Response.json({ error: "Coach provider failed" }, { status: 502 });
+      const providerPayload = await providerResponse.json();
+      const text = providerPayload.content?.map((block) => block.text || "").join("") || "";
+      try { answer = extractJson(text); } catch { answer = undefined; }
+    }
+    if (!answer) return Response.json({ error: "Coach returned an invalid response" }, { status: 502 });
 
     const preparedActions = [];
     for (const raw of answer.actions || []) {

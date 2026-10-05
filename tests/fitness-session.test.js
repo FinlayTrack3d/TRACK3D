@@ -45,3 +45,16 @@ test("extra completed sets are retained without being counted as skipped", () =>
   assert.equal(review.skippedSets, 0);
   assert.equal(review.exercises[0].sets[1].extra, true);
 });
+
+test("coach workout summaries list every set against its target and group by session name", async () => {
+  const { recentWorkoutsForCoach, summariseWorkoutForCoach } = await import("../lib/fitness-session.js");
+  const pullA = { date: "2026-10-03", session_name: "Pull A", duration_mins: 41, exercises: [{ name: "Row", prescribed_sets: 3, prescribed_reps: "8-12", sets: [{ reps: "12", weight: "40" }, { reps: "12", weight: "40" }] }] };
+  const summary = summariseWorkoutForCoach(pullA);
+  assert.match(summary, /Pull A · 41 min/);
+  assert.match(summary, /S1 12 × 40kg \(target 8-12\); S2 12 × 40kg \(target 8-12\); S3 skipped \(target 8-12\)/);
+  const grouped = recentWorkoutsForCoach([pullA, { ...pullA, session_name: "Pull B", date: "2026-10-02" }, { ...pullA, date: "2026-09-30" }]);
+  const pullASection = grouped.split("\n\n").find((section) => section.startsWith('SESSION "Pull A"'));
+  assert.equal((pullASection.match(/· Pull A ·/g) || []).length, 2);
+  assert.doesNotMatch(pullASection, /Pull B/);
+  assert.equal(recentWorkoutsForCoach([]), "No completed workouts yet.");
+});

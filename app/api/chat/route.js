@@ -1,5 +1,24 @@
+import { createClient } from "@supabase/supabase-js";
+
+function supabaseForToken(token) {
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { persistSession: false },
+  });
+}
+
 export async function POST(request) {
   try {
+    const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    if (!token) return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const supabase = supabaseForToken(token);
+    if (!supabase) return Response.json({ error: "Chat data service is not configured" }, { status: 503 });
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return Response.json({ error: "Unauthorised" }, { status: 401 });
+
     const { messages, system, responseTokens } = await request.json();
     const key = process.env.ANTHROPIC_API_KEY;
     
