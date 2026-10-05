@@ -1582,6 +1582,9 @@ function MorningSection({ user }) {
   const [trainingDays, setTrainingDays] = useState([]);
   const [openHistoryDate, setOpenHistoryDate] = useState(null);
   const [pendingLiveStart, setPendingLiveStart] = useState(null);
+  // "end" | "delete" | { deleteDate } while a confirmation is open.
+  const [morningConfirm, setMorningConfirm] = useState(null);
+  const [morningActionError, setMorningActionError] = useState("");
   const [weightUnit, setWeightUnit] = useState(() => {
     try { return localStorage.getItem("track3d-weight-unit") === "st" ? "st" : "kg"; } catch { return "kg"; }
   });
@@ -2377,6 +2380,96 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     </div>
   ) : null;
 
+  // Finish now with whatever has been answered; unanswered tasks count as not done.
+  const endMorningNow = () => {
+    if (view === "liveMorning") {
+      setLiveDeadline(null);
+      setCheckinData(previous => ({ ...previous, routineTiming: captureLiveRoutineTiming() }));
+    }
+    setReviewingMissed(false);
+    setLiveInputActive(false);
+    setTempInput("");
+    setCheckinStep(checkinDoneIndex);
+    setView("checkin");
+  };
+  const resetMorningSession = () => {
+    setCheckinData({});
+    setCheckinStep(0);
+    setTempInput("");
+    setPhotoAngleIdx(0);
+    setPhotoFiles({ front: null, side: null, back: null });
+    setPhotoPreviews({ front: null, side: null, back: null });
+    setLiveTaskIndex(0);
+    setLiveDeadline(null);
+    setLiveStartedAt(null);
+    setLiveInputActive(false);
+    setReviewingMissed(false);
+  };
+  // Discard the current session. Only an unfinished saved row is deleted; a
+  // finished morning (for example during "Do again") is left as it was.
+  const deleteMorningSession = async () => {
+    setMorningActionError("");
+    const todayRow = history.find(entry => entry.date === today);
+    if (todayRow?.data?.inProgress) {
+      const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", today);
+      if (error) { setMorningActionError(`Could not delete this session: ${error.message}`); return; }
+    }
+    resetMorningSession();
+    setMorningConfirm(null);
+    setView("home");
+    await loadData();
+  };
+  const deleteHistoryEntry = async date => {
+    setMorningActionError("");
+    const { error } = await supabase.from("morning_checkins").delete().eq("user_id", user.id).eq("date", date);
+    if (error) { setMorningActionError(`Could not delete this day: ${error.message}`); return; }
+    setMorningConfirm(null);
+    setOpenHistoryDate(null);
+    if (date === today) resetMorningSession();
+    await loadData();
+  };
+  const morningConfirmDialog = morningConfirm ? (() => {
+    const deleteDate = morningConfirm.deleteDate;
+    const redoing = !deleteDate && history.some(entry => entry.date === today && !entry.data?.inProgress);
+    const title = morningConfirm === "end" ? "END MORNING NOW?" : deleteDate ? "DELETE THIS DAY?" : "DELETE THIS SESSION?";
+    const body = morningConfirm === "end"
+      ? "Your morning is saved with what you have done so far. Tasks you have not answered count as not done."
+      : deleteDate
+        ? "This permanently removes this day's check-in from your history."
+        : redoing
+          ? "This stops the redo. Your earlier check-in for today stays saved."
+          : "This removes today's unfinished morning. You can start again afterwards.";
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+        <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="morning-confirm-title" style={{ width: "100%", maxWidth: 360, borderColor: morningConfirm === "end" ? NEON : NEON3, textAlign: "center" }}>
+          <div id="morning-confirm-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: morningConfirm === "end" ? NEON : NEON3, letterSpacing: 2, marginBottom: 12 }}>{title}</div>
+          <p style={{ fontSize: 11, color: "#A9BBC3", lineHeight: 1.6, marginBottom: 18 }}>{body}</p>
+          {morningActionError && <p role="alert" style={{ fontSize: 11, color: NEON3 }}>{morningActionError}</p>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => { setMorningConfirm(null); setMorningActionError(""); }}>CANCEL</button>
+            <button className={`t3d-btn t3d-btn-sm ${morningConfirm === "end" ? "" : "t3d-btn-red"}`} style={{ flex: 1, minHeight: 44 }}
+              onClick={() => morningConfirm === "end" ? (setMorningConfirm(null), endMorningNow()) : deleteDate ? deleteHistoryEntry(deleteDate) : deleteMorningSession()}>
+              {morningConfirm === "end" ? "END AND SAVE" : "DELETE"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  })() : null;
+  const sessionControls = (canGoBack, onBack) => (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} disabled={!canGoBack} onClick={onBack}>← BACK</button>
+        <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44 }} onClick={() => setMorningConfirm("end")}>END MORNING</button>
+      </div>
+      <button type="button" onClick={() => setMorningConfirm("delete")}
+        style={{ display: "block", margin: "10px auto 0", background: "none", border: 0, color: NEON3, cursor: "pointer", fontSize: 10, minHeight: 32, textDecoration: "underline" }}>
+        Delete this session
+      </button>
+      {typeof morningConfirm === "string" && morningConfirmDialog}
+    </div>
+  );
+
   const scoreExplanation = (
     <details style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, margin: "8px auto", maxWidth: 430, textAlign: "left" }}>
       <summary style={{ cursor: "pointer", minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center" }}>How is the score worked out?</summary>
@@ -2725,6 +2818,21 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 </>
               ) : (
                 <>
+                  {(() => {
+                    const unfinished = history.find(entry => entry.date === today && entry.data?.inProgress);
+                    if (!unfinished) return null;
+                    return (
+                      <div style={{ marginBottom: 18, padding: 14, border: "1px solid #FFB547", background: "rgba(255,181,71,.08)", borderRadius: 8, textAlign: "left" }}>
+                        <div style={{ color: "#FFB547", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>STARTED · NOT FINISHED</div>
+                        <p style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6, margin: "6px 0 10px" }}>You started this morning but it was not finished. Finish it now, or delete it and start again.</p>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => openCheckinForm("log", { data: { ...unfinished.data } })}>FINISH NOW</button>
+                          <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 44 }} onClick={() => setMorningConfirm("delete")}>DELETE SESSION</button>
+                        </div>
+                        {morningConfirm === "delete" && morningConfirmDialog}
+                      </div>
+                    );
+                  })()}
                   <div style={{
                     fontSize: 12,
                     color: "#E0EAF0",
@@ -2949,10 +3057,17 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                                 ))}
                               </div>
                               <CheckinPhotoThumbs photos={data.photos} />
-                              <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44, marginTop: 8 }}
-                                onClick={() => openCheckinForm("edit", { date: entry.date, data: { ...data } })}>
-                                {unfinished ? "FINISH THIS CHECK-IN" : "EDIT THIS DAY"}
-                              </button>
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                                <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }}
+                                  onClick={() => openCheckinForm("edit", { date: entry.date, data: { ...data } })}>
+                                  {unfinished ? "FINISH THIS CHECK-IN" : "EDIT THIS DAY"}
+                                </button>
+                                <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ minHeight: 44 }}
+                                  onClick={() => setMorningConfirm({ deleteDate: entry.date })}>
+                                  DELETE THIS DAY
+                                </button>
+                              </div>
+                              {morningConfirm?.deleteDate === entry.date && morningConfirmDialog}
                             </div>
                           )}
                         </div>
@@ -3725,6 +3840,13 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </button>
             )}
           </div>
+          {sessionControls(liveTaskIndex > 0, () => {
+            const previousIndex = liveTaskIndex - 1;
+            setTempInput("");
+            setPhotoAngleIdx(0);
+            setLiveTaskIndex(previousIndex);
+            startLiveTimer(liveRoutineSteps[previousIndex]);
+          })}
         </div>
       </div>
     );
@@ -3764,6 +3886,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               </div>
             )}
           </div>
+          {sessionControls(checkinStep > 0, () => { setTempInput(""); setPhotoAngleIdx(0); setReviewingMissed(false); setCheckinStep(step => Math.max(0, step - 1)); })}
           <button
             type="button"
             onClick={() => setView("home")}
@@ -7718,11 +7841,13 @@ function Nutrition({ user, userSessions }) {
         : await supabase.from("nutrition_plans").insert({ user_id: user.id, ...row });
       if (result.error) {
         console.error("savePlan error:", result.error.message, result.error.code, result.error.details, result.error.hint);
+        setPlanSaveError(result.error.message || "database error");
         return false;
       }
       return true;
     } catch (e) {
       console.error("savePlan exception:", e.message || e);
+      setPlanSaveError(e?.message || "connection problem");
       return false;
     }
   };
@@ -7793,6 +7918,16 @@ function Nutrition({ user, userSessions }) {
       return false;
     }
   };
+
+  // Save meal answers as they are given during the review, so leaving part-way
+  // never loses them. A finished day keeps its finished status.
+  const reviewAutosaveRef = useRef(false);
+  useEffect(() => {
+    if (view !== "review") { reviewAutosaveRef.current = false; return; }
+    if (!reviewAutosaveRef.current) { reviewAutosaveRef.current = true; return; }
+    saveLog(mealResults, todayLogged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mealResults, view]);
 
   const getAIFeedback = async () => {
     setAiFeedbackLoading(true);
@@ -8388,7 +8523,7 @@ function Nutrition({ user, userSessions }) {
               )}
               {planSaveError && (
                 <div style={{ fontSize: 11, color: NEON3, marginTop: 12, textAlign: "center" }}>
-                  Couldn't save your plan — check your connection and try again.
+                  Couldn&apos;t save your plan: {planSaveError}. Please try again.
                 </div>
               )}
               <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
@@ -8399,7 +8534,7 @@ function Nutrition({ user, userSessions }) {
                   const realMacros = getFinalMacros();
                   const ok = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
-                  if (!ok) { setPlanSaveError(true); return; }
+                  if (!ok) return;
                   const nextLibrary = mergeMealLibrary(mealLibrary, preparedPlanMeals);
                   setMealLibrary(nextLibrary);
                   await persistNutritionPlanning(nextLibrary, weeklyMealPlan);
@@ -9347,6 +9482,7 @@ export default function App() {
   const [habits, setHabits] = useState(INITIAL_HABITS);
   const [habitsReady, setHabitsReady] = useState(false);
   const prevHabitsRef = useRef(null); // last-persisted snapshot, for diffing what changed
+  const [habitSaveError, setHabitSaveError] = useState("");
   const [fitnessSessions, setFitnessSessions] = useState([]);
   const homeTimeZone = resolveHomeTimeZone(user);
   const todayLabel = new Date().toLocaleDateString("en-US", { timeZone: homeTimeZone, weekday: "long", month: "long", day: "numeric" });
@@ -9369,6 +9505,7 @@ export default function App() {
         loaded = (defs || []).map(h => ({ id: h.id, name: h.name, category: h.category || "daily", streak: h.streak || 0, done: doneIds.has(h.id) }));
       } catch (e) {
         console.log("Habit load error:", e);
+        if (!cancelled) setHabitSaveError(`Your habits could not be loaded from your account (${e?.message || "connection problem"}). Changes may not be saved.`);
         try {
           const savedDefinitions = JSON.parse(localStorage.getItem(`track3d_habits_${user.id}`) || "[]");
           const savedToday = JSON.parse(localStorage.getItem(`track3d_habit_status_${user.id}_${todayKey}`) || "{}");
@@ -9393,35 +9530,57 @@ export default function App() {
 
     const previous = prevHabitsRef.current || [];
     const currentIds = new Set(habits.map(h => h.id));
+    const writes = [];
 
     previous.filter(h => !currentIds.has(h.id)).forEach(h => {
-      supabase.from("habits").delete().eq("user_id", user.id).eq("id", String(h.id))
-        .then(({ error }) => { if (error) console.log("Habit delete error:", error); });
+      writes.push(supabase.from("habits").delete().eq("user_id", user.id).eq("id", String(h.id)));
     });
 
     habits.forEach(h => {
       const prevMatch = previous.find(p => p.id === h.id);
       if (!prevMatch || prevMatch.name !== h.name || prevMatch.category !== h.category) {
-        supabase.from("habits").upsert({
+        writes.push(supabase.from("habits").upsert({
           id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
           streak: h.streak || 0, updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id,id" }).then(({ error }) => { if (error) console.log("Habit save error:", error); });
+        }, { onConflict: "user_id,id" }));
       }
       if (!prevMatch || Boolean(prevMatch.done) !== Boolean(h.done)) {
-        if (h.done) {
-          supabase.from("habit_completions").upsert({
+        writes.push(h.done
+          ? supabase.from("habit_completions").upsert({
             user_id: user.id, habit_id: String(h.id), date: todayKey, done: true, updated_at: new Date().toISOString(),
-          }, { onConflict: "user_id,habit_id,date" }).then(({ error }) => { if (error) console.log("Habit tick save error:", error); });
-        } else {
-          supabase.from("habit_completions").delete()
-            .eq("user_id", user.id).eq("habit_id", String(h.id)).eq("date", todayKey)
-            .then(({ error }) => { if (error) console.log("Habit untick save error:", error); });
-        }
+          }, { onConflict: "user_id,habit_id,date" })
+          : supabase.from("habit_completions").delete()
+            .eq("user_id", user.id).eq("habit_id", String(h.id)).eq("date", todayKey));
       }
     });
 
     prevHabitsRef.current = habits;
+    // Show any failure instead of only logging it, so unsaved habits are never silent.
+    Promise.all(writes).then(results => {
+      const failed = results.find(result => result.error);
+      if (failed) {
+        console.log("Habit save error:", failed.error);
+        setHabitSaveError(`Your habits could not be saved: ${failed.error.message}`);
+      }
+    }).catch(error => setHabitSaveError(`Your habits could not be saved: ${error?.message || "connection problem"}`));
   }, [habits, habitsReady, todayKey, user?.id]);
+
+  // Re-send every habit and today's ticks after a failed save.
+  const retryHabitSave = async () => {
+    if (!user) return;
+    setHabitSaveError("");
+    const results = await Promise.all([
+      ...habits.map(h => supabase.from("habits").upsert({
+        id: String(h.id), user_id: user.id, name: h.name, category: h.category || "daily",
+        streak: h.streak || 0, updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id,id" })),
+      ...habits.map(h => h.done
+        ? supabase.from("habit_completions").upsert({ user_id: user.id, habit_id: String(h.id), date: todayKey, done: true, updated_at: new Date().toISOString() }, { onConflict: "user_id,habit_id,date" })
+        : supabase.from("habit_completions").delete().eq("user_id", user.id).eq("habit_id", String(h.id)).eq("date", todayKey)),
+    ]).catch(error => [{ error }]);
+    const failed = results.find(result => result.error);
+    if (failed) setHabitSaveError(`Your habits could not be saved: ${failed.error?.message || "connection problem"}`);
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -9556,6 +9715,12 @@ export default function App() {
 
           {authError && <p role="status" style={{ color: "#FFB547", fontSize: 12 }}>{authError}</p>}
           {draftError && <p role="alert" style={{ color: "#FFB547", fontSize: 12 }}>This browser could not save your progress. Keep this page open until you finish.</p>}
+          {habitSaveError && (tab === "dashboard" || tab === "habits") && (
+            <div role="alert" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: 12, border: `1px solid ${NEON3}`, borderRadius: 7, background: "rgba(255,45,120,.07)", color: "#FF8AAD", fontSize: 12 }}>
+              <span style={{ flex: 1 }}>{habitSaveError}</span>
+              <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 40 }} onClick={retryHabitSave}>RETRY</button>
+            </div>
+          )}
           {[...new Set(Object.entries(activeSessions).filter(([, active]) => active).map(([kind]) => kind.startsWith("morning") ? "morning" : kind))].filter(kind => kind !== tab).map(kind => (
             <button key={kind} className="t3d-btn" onClick={() => setTab(kind)}
               style={{ display: "block", width: "100%", marginBottom: 14, textAlign: "left", whiteSpace: "normal", padding: 14, borderColor: NEON }}>
