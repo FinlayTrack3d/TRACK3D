@@ -20,7 +20,10 @@ with expected(table_name, column_name) as (values
   ('coach_memory', 'user_id'), ('coach_memory', 'summary'), ('coach_memory', 'updated_at'),
   ('weekly_reports', 'id'), ('weekly_reports', 'user_id'), ('weekly_reports', 'report_date'),
   ('weekly_reports', 'week_start'), ('weekly_reports', 'week_end'), ('weekly_reports', 'patterns'),
-  ('weekly_reports', 'diet_suggestions'), ('weekly_reports', 'created_at')
+  ('weekly_reports', 'diet_suggestions'), ('weekly_reports', 'created_at'),
+  ('nutrition_plans', 'setup'),
+  ('user_profiles', 'user_id'), ('user_profiles', 'height_cm'), ('user_profiles', 'date_of_birth'),
+  ('user_profiles', 'sex'), ('user_profiles', 'updated_at')
 )
 select 'missing column' as problem, e.table_name, e.column_name
 from expected e
@@ -48,7 +51,7 @@ union all
 select case when r.oid is null then 'missing table'
             when not r.relrowsecurity then 'row level security off'
             else 'missing policy' end, t.table_name, null
-from (values ('habits'), ('habit_completions'), ('daily_goals'), ('coach_memory'), ('weekly_reports')) as t(table_name)
+from (values ('habits'), ('habit_completions'), ('daily_goals'), ('coach_memory'), ('weekly_reports'), ('user_profiles')) as t(table_name)
 left join pg_class r on r.relname = t.table_name and r.relnamespace = 'public'::regnamespace and r.relkind = 'r'
 where r.oid is null or not r.relrowsecurity
    or not exists (select 1 from pg_policies p where p.schemaname = 'public' and p.tablename = t.table_name)

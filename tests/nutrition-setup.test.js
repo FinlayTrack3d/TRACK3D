@@ -35,6 +35,12 @@ test("a cut is based on body weight, not a flat 20%", () => {
 test("stats are validated", () => {
   assert.match(setupStatsProblem({ ...stats, height: "" }), /height/);
   assert.match(setupStatsProblem({ ...stats, age: 14 }), /16/);
+  assert.match(setupStatsProblem({ ...stats, age: null }), /date of birth/);
+  // Prefer not to say is the average of the male and female results.
+  const male = calculateNutritionTargets({ ...stats, sex: "Male", goal: "Maintain" });
+  const female = calculateNutritionTargets({ ...stats, sex: "Female", goal: "Maintain" });
+  const unsaid = calculateNutritionTargets({ ...stats, sex: "Prefer not to say", goal: "Maintain" });
+  assert.equal(unsaid.bmr, (male.bmr + female.bmr) / 2);
   assert.match(setupStatsProblem({ ...stats, sex: "" }), /sex/);
   assert.equal(setupStatsProblem(stats), "");
   assert.equal(calculateNutritionTargets({ ...stats, weight: "" }), null);
