@@ -10,6 +10,7 @@ import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/c
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory } from "../lib/coaching/plan-change";
 import { buildLoggedExercises, buildWorkoutReview, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, workoutVolume } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
+import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
 import { calculateLoggedNutrition, inferNutritionStyle, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // /api/chat requires the signed-in user's Supabase session token.
@@ -1585,13 +1586,17 @@ function MorningSection({ user }) {
   const [liveStartedAt, setLiveStartedAt] = useState(null);
   const [liveInputActive, setLiveInputActive] = useState(false);
 
+  // Set once the complete screen has saved the morning; the draft is then
+  // cleared so the "active morning routine" banner goes away on its own.
+  const [finalisedDraft, setFinalisedDraft] = useState(null);
   const morningDraft = useMemo(() => (
-    ["liveMorning", "checkin", "wakeCheckin"].includes(view) ? {
+    ["liveMorning", "checkin", "wakeCheckin"].includes(view)
+      && !(view === "checkin" && finalisedDraft && checkinStep >= finalisedDraft.step && JSON.stringify(checkinData) === finalisedDraft.key) ? {
       view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
       liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive,
     } : null
   ), [view, checkinStep, checkinData, tempInput, photoAngleIdx, photoFiles,
-    liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive]);
+    liveTaskIndex, liveDeadline, liveStartedAt, liveInputActive, finalisedDraft]);
   useSessionDraft(user?.id, `morning-${today}`, morningDraft, draft => {
     if (!["liveMorning", "checkin", "wakeCheckin"].includes(draft.view)) return;
     setCheckinStep(draft.checkinStep || 0);
@@ -1949,6 +1954,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   const checkinComplete = view === "checkin" && allSteps.length > 0 && checkinStep >= checkinDoneIndex;
   const finalisedCheckinRef = useRef(null);
   const finaliseCheckin = async () => {
+    const draftKey = { key: JSON.stringify(checkinData), step: checkinStep };
     const score = morningScore(checkinData);
     const plannedRoutineMinutes = liveRoutineSteps.reduce((total, step) => total + (Number(step.duration) || 0), 0);
     const actualRoutineMinutes = checkinData.routineTiming?.actualMinutes || (liveStartedAt ? Math.max(1, Math.round((Date.now() - liveStartedAt) / 60000)) : null);
@@ -1974,6 +1980,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     }
     setCompletedToday(true);
     setSkippedToday(false);
+    setFinalisedDraft(draftKey);
     setHistory(entries => [
       { ...(entries.find(entry => entry.date === today) || {}), user_id: user.id, date: today, score, data: finalData },
       ...entries.filter(entry => entry.date !== today),
@@ -5440,34 +5447,51 @@ function withPlanApproval(sessions, now = new Date()) {
     setAiBuilding(true);
     const context = AI_QUESTIONS.map(question => `${question.q}: ${aiAnswerText(question, answers) || "not answered"}`).join("\n")
       + (chatContext ? `\n\nEarlier conversation with the coach (respect anything relevant, such as injuries or preferences):\n${chatContext}` : "");
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({
-          responseTokens: 6000,
-          system: `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
+    const budgetText = String(answers.session_length || "");
+    const budgetFor = session => requestedBudget(budgetText, session.days || []);
+    const validProgramme = parsed => Array.isArray(parsed?.sessions) && parsed.sessions.length > 0 &&
+      parsed.sessions.length === parseInt(answers.days_per_week, 10) &&
+      !parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
+        session.days.some(day => !DAYS.includes(day)) ||
+        !Array.isArray(session.exercises) || !session.exercises.length ||
+        session.exercises.some(exercise => !exercise.name || !Number.isInteger(exercise.sets) ||
+          exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
+          exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
+          typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)));
+    const system = `You are an expert personal trainer and AI Coach. Build a complete, realistic training programme tailored to all questionnaire answers. Choose exercises, sets, one rep range per set, tempo, order and estimated duration for every session. Recommend well-spaced training days with sensible recovery; the sessions must still be achievable within a rolling 8-day cycle when life disrupts the exact weekdays. Explain each session choice briefly and plainly. Listen to user preferences, adjust reasonable requests, and concisely warn against poor recovery, unsafe volume, or incompatible ideas. Match available equipment, experience, training frequency, and constraints. The user may specify exact durations, ranges, or different time budgets on different days. Honour each day-specific budget including warm-up and rest. Use a four-part tempo (lowering-pause-lifting-pause), such as 3-1-1-0. Use day codes MON,TUE,WED,THU,FRI,SAT,SUN. Keep notes concise and use short bullet-style sentences without emojis. The user's home timezone is ${homeTimeZone}; the authoritative local day is ${homeDate.weekday}, ${homeDate.dateKey}. Never infer their day from server time.
+TIME LIMIT: Every session must fit the user's stated time for its day. The app times a session like this, and so must you: 5 minutes general warm-up; for each exercise, warmup_sets ramp-up sets (default 2) of about 8 reps × the tempo total in seconds plus 60 seconds each; each working set lasts the top of its rep range × the tempo total in seconds; rest_seconds between working sets (default 120, minimum 60); 90 seconds to change exercise. duration_mins must be that total, and must not exceed the user's limit. If it would, use fewer exercises or sets, shorter rest or fewer ramp-up sets.
 SAFETY: Never recommend training through injuries. For beginners start conservatively. Recommend consulting a doctor for health conditions. This is general fitness guidance not medical advice.
 Respond ONLY with valid JSON:
-{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "duration_mins": 60, "reasoning": "short explanation", "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "notes": "string"}]}], "notes": "string"}`,
-          messages: [{ role: "user", content: `Build me a training programme:\n${context}` }],
-        }),
-      });
-      if (!res.ok) throw new Error("Could not build programme");
-      const data = await res.json();
-      const text = data.content?.map(b => b.text || "").join("") || "";
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      if (!Array.isArray(parsed.sessions) || !parsed.sessions.length ||
-          parsed.sessions.length !== parseInt(answers.days_per_week, 10) ||
-          parsed.sessions.some(session => !session.name || !Array.isArray(session.days) ||
-            session.days.some(day => !DAYS.includes(day)) ||
-            !Array.isArray(session.exercises) || !session.exercises.length ||
-            session.exercises.some(exercise => !exercise.name || !Number.isInteger(exercise.sets) ||
-              exercise.sets < 1 || exercise.sets > 10 || !Array.isArray(exercise.reps) ||
-              exercise.reps.length !== exercise.sets || exercise.reps.some(rep => typeof rep !== "string" || !rep.trim()) ||
-              typeof exercise.tempo !== "string" || !/^[0-9Xx]+-[0-9]+-[0-9Xx]+-[0-9]+$/.test(exercise.tempo)))) {
-        throw new Error("Incomplete programme");
+{"split_name": "string", "sessions": [{"name": "string", "days": ["MON"], "duration_mins": 60, "reasoning": "short explanation", "exercises": [{"name": "string", "sets": 4, "reps": ["10","8","8","6"], "tempo": "3-1-0-1", "rest_seconds": 90, "warmup_sets": 1, "notes": "string"}]}], "notes": "string"}`;
+    try {
+      // Up to two attempts: retry once if the reply cannot be read as a
+      // complete programme, or if a session runs over the stated time.
+      const messages = [{ role: "user", content: `Build me a training programme:\n${context}` }];
+      let plan = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetch("/api/chat", {
+          method: "POST", headers: await chatHeaders(),
+          body: JSON.stringify({ responseTokens: 6000, system, messages }),
+        });
+        if (!res.ok) throw new Error("Could not build programme");
+        const data = await res.json();
+        const text = data.content?.map(b => b.text || "").join("") || "";
+        let parsed = null;
+        try { parsed = JSON.parse(text.replace(/```json|```/g, "").trim()); } catch { parsed = null; }
+        if (!validProgramme(parsed)) {
+          messages.push({ role: "assistant", content: text || "(empty reply)" }, { role: "user", content: `Your reply could not be used: it must be one complete, valid JSON object matching the schema, with exactly ${parseInt(answers.days_per_week, 10)} sessions and one rep range per set. Return the whole programme again as JSON only.` });
+          continue;
+        }
+        plan = parsed;
+        const overruns = parsed.sessions
+          .map(session => ({ session, budget: budgetFor(session), minutes: estimateSession(session).minutes }))
+          .filter(item => item.budget && item.minutes > item.budget);
+        if (!overruns.length) break;
+        messages.push({ role: "assistant", content: text }, { role: "user", content: `These sessions run over my time limit by the app's timing: ${overruns.map(item => `${item.session.name} ${item.minutes} min (limit ${item.budget})`).join("; ")}. Return the whole programme again as JSON only, with every session within its limit.` });
       }
-      setAiPlan(parsed);
+      if (!plan) throw new Error("Incomplete programme");
+      // Whatever the model returned, never show a session longer than the stated limit.
+      setAiPlan({ ...plan, sessions: plan.sessions.map(session => fitSessionToBudget(session, budgetFor(session))) });
     } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
     setAiBuilding(false);
   };

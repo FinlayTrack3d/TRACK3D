@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { repRange, targetFor, normalizeExercise, estimateSession, requestedBudget, equivalentWorkout, workoutReview } from '../lib/workout.js';
+import { repRange, targetFor, normalizeExercise, estimateSession, requestedBudget, equivalentWorkout, workoutReview, fitSessionToBudget } from '../lib/workout.js';
 import { mirrorDraft, readDraft } from '../lib/session-drafts.js';
 
 test('legacy targets and dash variants become valid ranges, including optional sets', () => {
@@ -54,4 +54,16 @@ test('workout mirror survives reopening beyond 24 hours, isolates users, and cle
     mirrorDraft('one', 'fitness', null);
     assert.equal(await readDraft('one', 'fitness'), null);
   } finally { Date.now = now; delete globalThis.localStorage; }
+});
+
+test('sessions are trimmed to the stated time budget', () => {
+  const ex = name => ({ name, sets: 4, reps: ['8-12','8-12','8-12','8-12'], tempo: '3-0-1-0', rest_seconds: 90, warmup_sets: 1 });
+  const session = { name: 'Upper', exercises: [ex('Press'), ex('Row'), ex('Fly'), ex('Curl')] };
+  assert(estimateSession(session).minutes > 40);
+  const fitted = fitSessionToBudget(session, 40);
+  assert(estimateSession(fitted).minutes <= 40, String(estimateSession(fitted).minutes));
+  assert.equal(fitted.duration_mins, estimateSession(fitted).minutes);
+  fitted.exercises.forEach(item => assert.equal(item.reps.length, item.sets));
+  assert.equal(session.exercises[0].sets, 4);
+  assert.equal(fitSessionToBudget(session, null).exercises.length, 4);
 });
