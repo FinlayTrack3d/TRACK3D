@@ -48,7 +48,8 @@ test("a full week produces real numbers and comparisons", () => {
   assert.equal(metrics.habits.possible, 9); // 7 days of Water + 2 days of Read (created Saturday)
   assert.equal(metrics.habits.done, 8);
   assert.equal(metrics.habits.completionPct, 89);
-  assert.equal(metrics.habits.currentStreak, 9);
+  // As it stood at the end of that week (Sunday), not today: Water ran Mon–Sun.
+  assert.equal(metrics.habits.currentStreak, 7);
   assert.equal(metrics.habits.currentStreakHabit, "Water");
   assert.equal(metrics.morning.completed, 2);
   assert.equal(metrics.morning.days, 7);

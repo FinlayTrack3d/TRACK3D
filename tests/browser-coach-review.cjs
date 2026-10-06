@@ -7,6 +7,7 @@
 //  profilelive, profileexperience, restday, targetsuggest, targetkeep, logextra, logextradash, editordraft,
 //  weeklyplanstart, habitlink, activitylog, activitynextup, persistlogin, smallfixes,
 //  fitnesslastweek, fitnessmissed, repsplit, mealswap, mealswapdash,
+//  stalework, weeklystale, exercisealias, weekcount,
 //  nutritionorder, dashlog, libraryedit, restdaybuild, restdayai, weeklybadge, fitnessrest, headerprofile,
 //  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
@@ -98,7 +99,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   if (scenario === 'newdash') await context.clock.setFixedTime(atLondonHour(10));
   // Scenarios about a given weekday run at midday London time on a fixed date
   // (2026-10-07 is a Wednesday, 2026-10-12 a Monday).
-  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12' }[scenario];
+  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12', weeklystale: '2026-10-07', weekcount: '2026-10-07' }[scenario];
   if (fixedDay) await context.clock.setFixedTime(new Date(`${fixedDay}T11:00:00Z`));
   const today = fixedDay || londonKey();
   const yesterday = shiftKey(today, -1);
@@ -168,6 +169,48 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   if (scenario === 'repsplit') tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
     { name: 'Upper A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 4, reps: '6-8,6-8,8,10' }, { name: 'Row', sets: 3, reps: ['8-10,8-10,12', '8-10,8-10,12', '8-10,8-10,12'] }], approval: { approved: true } },
   ] }];
+  if (scenario === 'stalework') {
+    // Yesterday's Upper A: two sets, then left open; the last autosave said 345 min.
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Upper A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
+    tables.workout_logs = [
+      { id: 'stale1', user_id: user.id, date: yesterday, session_name: 'Upper A', in_progress: true, created_at: `${yesterday}T12:00:00Z`, duration_mins: 345, total_volume: 960, exercises: [{ name: 'Bench Press', sets: [{ weight: '60', reps: '8', at: `${yesterday}T12:05:00Z` }, { weight: '60', reps: '8', at: `${yesterday}T12:12:00Z` }] }] },
+      // Closed before sets had times: shown capped.
+      { id: 'old2', user_id: user.id, date: shiftKey(today, -2), session_name: 'Lower A', in_progress: false, created_at: `${shiftKey(today, -2)}T12:00:00Z`, duration_mins: 345, total_volume: 1000, exercises: [{ name: 'Squat', sets: [{ weight: '100', reps: '5' }, { weight: '100', reps: '5' }] }] },
+    ];
+  }
+  if (scenario === 'exercisealias') {
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Lower B', days: [dayCodes[todayDow]], exercises: [{ name: 'Goblet Squat', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
+    tables.workout_logs = [{ id: 'h1', user_id: user.id, date: shiftKey(today, -7), session_name: 'Lower A', in_progress: false, created_at: `${shiftKey(today, -7)}T12:00:00Z`, duration_mins: 40, total_volume: 432, exercises: [{ name: 'Dumbbell Goblet Squat', sets: [{ weight: '18', reps: '8' }, { weight: '18', reps: '8' }, { weight: '18', reps: '8' }] }] }];
+  }
+  if (scenario === 'weekcount') {
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
+      { name: 'Upper A', days: ['MON'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+      { name: 'Lower A', days: ['TUE'], exercises: [{ name: 'Squat', sets: 3, reps: ['5', '5', '5'] }], approval: { approved: true } },
+    ] }];
+    tables.workout_logs = [
+      { id: 'w1', user_id: user.id, date: shiftKey(today, -2), session_name: 'Upper A', in_progress: false, created_at: `${shiftKey(today, -2)}T12:00:00Z`, duration_mins: 50, total_volume: 3000, exercises: [] },
+      { id: 'w2', user_id: user.id, date: yesterday, session_name: 'Lower A', in_progress: false, created_at: `${yesterday}T12:00:00Z`, duration_mins: 45, total_volume: 3500, exercises: [] },
+      { id: 'r1', user_id: user.id, date: today, session_name: 'Run', in_progress: false, created_at: `${today}T07:00:00Z`, duration_mins: 45, total_volume: 0, exercises: [{ name: 'Run', activity: { type: 'run', effort: 'hard', distanceKm: 8, notes: '' }, sets: [] }] },
+    ];
+  }
+  if (scenario === 'weeklystale') {
+    // Last week (28 Sep – 4 Oct): two lifts and a run, no plan to compare with,
+    // and a coach summary written before the figures changed.
+    const lastWeek = key => shiftKey('2026-09-28', key);
+    tables.workout_splits = [];
+    tables.workout_logs = [
+      { id: 'a', user_id: user.id, date: lastWeek(1), session_name: 'Upper A', in_progress: false, created_at: `${lastWeek(1)}T12:00:00Z`, duration_mins: 50, total_volume: 3000, exercises: [] },
+      { id: 'b', user_id: user.id, date: lastWeek(2), session_name: 'Run', in_progress: false, created_at: `${lastWeek(2)}T07:00:00Z`, duration_mins: 45, total_volume: 0, exercises: [{ name: 'Run', activity: { type: 'run', effort: 'hard' }, sets: [] }] },
+      { id: 'c', user_id: user.id, date: lastWeek(3), session_name: 'Lower A', in_progress: false, created_at: `${lastWeek(3)}T12:00:00Z`, duration_mins: 45, total_volume: 3500, exercises: [] },
+    ];
+    tables.weekly_reports = [{ id: 'wr', user_id: user.id, week_start: '2026-09-28', week_end: '2026-10-04', report_date: '2026-10-04', created_at: '2026-10-05T08:00:00Z',
+      patterns: 'BIGGEST WIN: Consistent mornings.\n\nFOCUS FOR NEXT WEEK: Two out of four leaves half the volume on the table.\n\nCOACH\'S VERDICT: Get all four in.' }];
+    // Habit ticks and mornings from this week only, after a streak that ended last Sunday.
+    tables.habits = [{ id: 'hr', user_id: user.id, name: 'Read for 10 minutes', category: 'daily', created_at: '2026-09-01T00:00:00Z' }];
+    tables.habit_completions = ['2026-10-05', '2026-10-06', '2026-10-07'].map(date => ({ user_id: user.id, habit_id: 'hr', date }));
+    tables.morning_routines = [{ user_id: user.id, wake_time: '06:30', tasks: [] }];
+    tables.morning_checkins = ['2026-10-03', '2026-10-04', '2026-10-05', '2026-10-06', '2026-10-07'].map(date => ({ user_id: user.id, date, score: 8, data: {} }));
+  }
   if (scenario === 'weeklyplanstart') {
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [{ name: 'Push A', days: ['MON', 'THU'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
     tables.workout_logs = [{ id: 'old', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Old Plan Day', in_progress: false, total_volume: 2000, duration_mins: 40, exercises: [] }];
@@ -255,7 +298,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     if (scenario === 'nextupmorningslow' && table === 'morning_checkins' && url.searchParams.get('limit') === '30') await new Promise(resolve => setTimeout(resolve, 3000));
     const dateParam = url.searchParams.get('date');
     const dateMatches = r => !dateParam || (dateParam.startsWith('eq.') ? String(r.date) === dateParam.slice(3) : dateParam.startsWith('lt.') ? String(r.date) < dateParam.slice(3) : true);
-    if (table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true') rows = ['loadwrites', 'nextupslow', 'nextupworkout'].includes(scenario) ? rows.filter(r => r.in_progress && dateMatches(r)) : [];
+    if (table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true') rows = ['loadwrites', 'nextupslow', 'nextupworkout', 'stalework'].includes(scenario) ? rows.filter(r => r.in_progress && dateMatches(r)) : [];
     if (scenario === 'weeklysavefail' && table === 'workout_logs') rows = [{ id: 'w', date: shiftKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7) - 5), total_volume: 2180, duration_mins: 1, in_progress: false, exercises: [] }];
     // PostgREST or=(in_progress.eq.false,date.lt.X): finished, or from an earlier day.
     const orFilter = url.searchParams.get('or');
@@ -484,11 +527,24 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     if (scenario === 'targetkeep') {
       await card.getByRole('button', { name: 'KEEP MY TARGETS' }).click();
       assert.equal(await page.getByTestId('target-suggestion').count(), 0);
+      // Saved with the plan, not only in this browser.
+      for (let i = 0; i < 30 && !writes.some(w => w.table === 'nutrition_plans' && /targetSuggestionDismissed/.test(w.body || '')); i++) await page.waitForTimeout(100);
+      const saved = JSON.parse(writes.find(w => w.table === 'nutrition_plans' && /targetSuggestionDismissed/.test(w.body || '')).body);
+      assert.equal(saved.setup.targetSuggestionDismissed, `2381|${proposed}`);
+      assert.equal(saved.setup.weight, 82, 'the rest of the setup is kept');
       await page.reload();
       await page.getByText('DAILY SCORE').waitFor();
       await openNutrition();
       await page.getByTestId('nutrition-today').waitFor();
       assert.equal(await page.getByTestId('target-suggestion').count(), 0, 'stays dismissed');
+      // Another device: nothing in this browser, the plan says it was kept.
+      tables.nutrition_plans[0].setup = saved.setup;
+      await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('track3d-target-suggestion')).forEach(key => localStorage.removeItem(key)));
+      await page.reload();
+      await page.getByText('DAILY SCORE').waitFor();
+      await openNutrition();
+      await page.getByTestId('nutrition-today').waitFor();
+      assert.equal(await page.getByTestId('target-suggestion').count(), 0, 'stays dismissed on another device');
     } else {
       await card.getByRole('button', { name: 'REVIEW NEW TARGETS →' }).click();
       await page.getByTestId('setup-notice').getByText(`New targets from your profile: ${proposed.toLocaleString('en-GB')} kcal (was 2,381)`, { exact: false }).waitFor();
@@ -863,6 +919,67 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(saved.meals_completed[1], undefined);
     assert.equal(saved.total_calories, 600);
     assert.equal(await log.getByTestId('meal-swapped').count(), 1);
+  } else if (scenario === 'stalework') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByText('WORKOUT HISTORY').click();
+    // The old row closed hours late shows a capped length; yesterday's ends at its last set.
+    const history = page.locator('.t3d-card').filter({ hasText: 'WORKOUT HISTORY' });
+    await history.getByText('45 mins').first().waitFor();
+    await history.getByText('14 mins').first().waitFor();
+    assert.equal(await history.getByText('345 mins').count(), 0);
+    // Starting today's workout closes yesterday's with the time it really took.
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
+    await page.getByText('SET 1 OF 3').waitFor();
+    const closed = writes.find(w => w.table === 'workout_logs' && w.method === 'PATCH' && /stale1/.test(w.url));
+    assert.ok(closed, 'yesterday closed');
+    assert.deepEqual(JSON.parse(closed.body), { in_progress: false, duration_mins: 14 });
+  } else if (scenario === 'exercisealias') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
+    await page.getByText('SET 1 OF 3').waitFor();
+    // Last time this was logged as "Dumbbell Goblet Squat": 18 kg carries over.
+    assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '18');
+    await page.getByText(/LAST TIME/).first().waitFor();
+  } else if (scenario === 'weekcount') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByTestId('week-sessions').waitFor();
+    assert.equal(await page.getByTestId('week-sessions').textContent(), '2');
+    await page.getByText('SESSIONS · 1 ACTIVITY').waitFor();
+    if (process.env.SHOT) { await page.getByText('SESSIONS · 1 ACTIVITY').scrollIntoViewIfNeeded(); await page.screenshot({ path: 'weekcount.png' }); }
+    // Log an activity, then add one to the plan: the confirmation is for the plan.
+    await page.getByTestId('log-activity').click();
+    const form = page.getByTestId('activity-form');
+    await form.getByRole('button', { name: 'WALK', exact: true }).click();
+    await form.getByLabel('Minutes').fill('30');
+    await form.getByRole('button', { name: /SAVE ACTIVITY/ }).click();
+    await page.getByText('Walk logged · 30 min · Moderate').waitFor();
+    await page.getByTestId('plan-add-activity').click();
+    const planForm = page.getByTestId('plan-activity-form');
+    await planForm.getByRole('button', { name: 'HYROX', exact: true }).click();
+    await planForm.getByRole('button', { name: freeDay, exact: true }).click();
+    await planForm.getByLabel('Planned minutes').fill('60');
+    await planForm.getByRole('button', { name: /ADD TO MY PLAN/ }).click();
+    await page.getByTestId('plan-notice').getByText(`HYROX added to your plan on ${freeDay.charAt(0) + freeDay.slice(1).toLowerCase()} · 60 min`).waitFor();
+    assert.equal(await page.getByText('Walk logged · 30 min · Moderate').count(), 0, 'the old message is gone');
+  } else if (scenario === 'weeklystale') {
+    await page.getByRole('button', { name: 'OPEN WEEKLY REPORT →' }).click();
+    const recap = page.getByTestId('weekly-recap');
+    await recap.waitFor();
+    // Figures: two workouts plus the run, no plan to compare against.
+    const workoutsTile = recap.getByTestId('tile-workouts');
+    await workoutsTile.getByText('No weekly plan to compare against · plus 1 activity (45 min)').waitFor();
+    assert.equal((await workoutsTile.textContent()).includes('WORKOUTS COMPLETED2'), true);
+    // The old coach text is rewritten for these figures, and saved with them.
+    await recap.getByTestId('recap-coach').getByText('You trained twice.').waitFor({ timeout: 10000 });
+    assert.equal(await recap.getByText(/half the volume on the table/).count(), 0);
+    const saved = writes.filter(w => w.table === 'weekly_reports').at(-1);
+    assert.match(JSON.parse(saved.body).patterns, /\n\nFACTS: \w+$/);
+    assert.equal(chats.filter(chat => chat.area === 'weekly_summary').length, 1);
+    // Streaks as they stood at the end of that week, not this week's.
+    await recap.getByTestId('tile-habit-streak').getByText('HABIT STREAK AT WEEK END').waitFor();
+    assert.match(await recap.getByTestId('tile-habit-streak').textContent(), /🔥 0d/);
+    assert.match(await recap.getByTestId('tile-mornings').textContent(), /streak at week end 2d/);
+    if (process.env.SHOT) { await recap.getByTestId('tile-workouts').scrollIntoViewIfNeeded(); await page.screenshot({ path: 'weeklystale.png', animations: 'disabled' }); await recap.getByTestId('recap-coach').scrollIntoViewIfNeeded(); await page.screenshot({ path: 'weeklystale2.png', animations: 'disabled' }); }
   } else if (scenario === 'mealswapdash') {
     const card = page.getByTestId('dashboard-meal-log');
     await card.getByText('LOG AS YOU GO').waitFor();

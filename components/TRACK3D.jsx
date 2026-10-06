@@ -9,14 +9,14 @@ import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progres
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
-import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume } from "../lib/fitness-session";
+import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, repTargets, requestedBudget, splitRepTargets } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
-import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
+import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach, weeklyFactsKey } from "../lib/weekly-report";
 import { nextUpItems } from "../lib/next-up";
 import { dailyScore } from "../lib/daily-score";
 import { linkedHabitIds } from "../lib/habit-links";
@@ -4246,7 +4246,7 @@ function EndOfDayCheckin({ user, onComplete }) {
         supabase.from("morning_checkins").select("score,data").eq("user_id", user.id).eq("date", today).maybeSingle(),
         supabase.from("nutrition_logs").select("total_calories,total_protein,meals_completed,off_plan_food").eq("user_id", user.id).eq("date", today).maybeSingle(),
         // Every workout finished today (there can be more than one).
-        supabase.from("workout_logs").select("session_name,total_volume,duration_mins").eq("user_id", user.id).eq("date", today).eq("in_progress", false),
+        supabase.from("workout_logs").select("session_name,total_volume,duration_mins,exercises,created_at").eq("user_id", user.id).eq("date", today).eq("in_progress", false),
         supabase.from("daily_debrief").select("overall_score,task_scores").eq("user_id", user.id).eq("date", today).maybeSingle(),
         supabase.from("calendar_tasks").select("title,status").eq("user_id", user.id).eq("date", today),
         supabase.from("end_of_day").select("mood,energy,steps,future_you,date").eq("user_id", user.id).order("date", { ascending: false }).limit(7),
@@ -4255,7 +4255,7 @@ function EndOfDayCheckin({ user, onComplete }) {
       // Build context
       const morningScore = morning.data?.score ?? "not completed";
       const nutritionData = nutrition.data ? `${nutrition.data.total_calories} kcal, ${nutrition.data.total_protein}g protein, ${countCompletedMeals(nutrition.data.meals_completed)} meals on plan${nutrition.data.off_plan_food ? `, off plan: ${nutrition.data.off_plan_food}` : ""}` : "not logged";
-      const workoutsToday = (fitness.data || []).filter(log => Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2);
+      const workoutsToday = (fitness.data || []).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log) })).filter(log => Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2);
       const fitnessData = workoutsToday.length ? workoutsToday.map(log => `${log.session_name}, ${log.duration_mins} mins, ${Math.round(log.total_volume || 0)}kg volume`).join("; ") : "no workout logged";
       const calendarTasks = debrief.data ? `calendar score ${debrief.data.overall_score}/10` : calendar.data?.length ? `${calendar.data.filter(t=>t.status==="done").length}/${calendar.data.length} tasks done` : "no tasks";
 
@@ -4648,7 +4648,7 @@ async function loadWeeklyReportData(user, week) {
   const historyFrom = shiftDateKey(todayKey, -366);
   const previousStart = shiftDateKey(week.start, -7);
   const [workouts, split, habits, completions, checkins, routine, nutritionLogs, nutritionPlan, stored] = await Promise.all([
-    supabase.from("workout_logs").select("id,date,total_volume,duration_mins,exercises,in_progress").eq("user_id", user.id).gte("date", previousStart).lte("date", week.end).or(`in_progress.eq.false,date.lt.${todayKey}`),
+    supabase.from("workout_logs").select("id,date,session_name,total_volume,duration_mins,exercises,in_progress,created_at").eq("user_id", user.id).gte("date", previousStart).lte("date", week.end).or(`in_progress.eq.false,date.lt.${todayKey}`),
     readWorkoutSplit(user.id),
     readHabits(user.id),
     readHabitCompletions(user.id, historyFrom, todayKey),
@@ -4662,7 +4662,7 @@ async function loadWeeklyReportData(user, week) {
   if (failed) throw failed.error;
   const metrics = buildWeeklyMetrics({
     week, todayKey,
-    workoutLogs: (workouts.data || []).map(log => ({ ...log, in_progress: !isFinishedWorkout(log, todayKey) })),
+    workoutLogs: (workouts.data || []).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log), in_progress: !isFinishedWorkout(log, todayKey) })),
     sessions: split.data?.sessions || [],
     // Sessions only count as planned from the day this plan started.
     planStartKey: split.data?.programme_started_at ? getZonedDateInfo(new Date(split.data.programme_started_at), resolveHomeTimeZone(user)).dateKey : null,
@@ -4778,11 +4778,13 @@ function WeeklyRecap({ user, onBack }) {
       const json = await res.json();
       const parsed = extractJsonObject(json.content?.map(block => block.text || "").join("") || "");
       if (!parsed?.biggest_win && !parsed?.verdict) throw new Error("the coach reply could not be read");
-      const summary = { biggestWin: cleanAiText(parsed.biggest_win), focus: cleanAiText(parsed.focus), verdict: cleanAiText(parsed.verdict) };
+      // Saved with the facts it was written from, so changed figures get a new one.
+      const factsKey = weeklyFactsKey(data.metrics);
+      const summary = { biggestWin: cleanAiText(parsed.biggest_win), focus: cleanAiText(parsed.focus), verdict: cleanAiText(parsed.verdict), factsKey };
       setData(current => ({ ...current, summary }));
       const { error } = await supabase.from("weekly_reports").upsert({
         user_id: user.id, report_date: week.end, week_start: week.start, week_end: week.end,
-        patterns: formatCoachSummary(summary), diet_suggestions: null,
+        patterns: formatCoachSummary(summary, factsKey), diet_suggestions: null,
       }, { onConflict: "user_id,report_date" });
       if (error) {
         console.log("Weekly report save error:", error.message);
@@ -4796,12 +4798,16 @@ function WeeklyRecap({ user, onBack }) {
     }
   };
 
-  // A finished week with data gets its coach summary once, automatically.
+  // A summary written from other numbers than the report now shows (or
+  // before summaries kept their facts) is out of date.
+  const summaryStale = Boolean(data?.summary && data?.metrics?.hasData && data.summary.factsKey !== weeklyFactsKey(data.metrics));
+  // A finished week with data gets its coach summary automatically, and a new
+  // one when the old one is out of date (once per visit).
   useEffect(() => {
-    if (!data?.metrics?.hasData || data.summary || week.inProgress || autoRequested.current.has(week.start)) return;
+    if (!data?.metrics?.hasData || (data.summary && !summaryStale) || week.inProgress || autoRequested.current.has(week.start)) return;
     autoRequested.current.add(week.start);
     generateSummary();
-  }, [data, week]);
+  }, [data, week, summaryStale]);
 
   const metrics = data?.metrics;
   const { workouts, habits, morning, bodyWeight, nutrition } = metrics || {};
@@ -4826,6 +4832,7 @@ function WeeklyRecap({ user, onBack }) {
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 40, color: "#E0EAF0", lineHeight: 1 }}>{workouts.volume.toLocaleString()}<span style={{ fontSize: 14, color: "#8AABB8" }}> KG</span></div>
             <div style={{ fontSize: 10, color: "#8AABB8", letterSpacing: 1, marginTop: 6 }}>
               LIFTED ACROSS {workouts.completed} WORKOUT{workouts.completed === 1 ? "" : "S"}
+              {workouts.activities > 0 && ` · PLUS ${workouts.activities} ${workouts.activities === 1 ? "ACTIVITY" : "ACTIVITIES"}`}
               {workouts.volumeChangePct !== null && <span style={{ color: workouts.volumeChangePct >= 0 ? NEON : "#FFB547" }}> · {signed(workouts.volumeChangePct)}% VS PREVIOUS WEEK</span>}
             </div>
           </div>
@@ -4846,7 +4853,7 @@ function WeeklyRecap({ user, onBack }) {
             {workouts && (
               <div className="t3d-reveal" style={reveal(1)}>
                 <ReportTile testId="tile-workouts" label="WORKOUTS COMPLETED" value={workouts.planned ? `${workouts.completed} / ${workouts.planned}` : workouts.completed}
-                  sub={workouts.planned ? (workouts.completed >= workouts.planned ? "Every planned session done" : workouts.missed ? `${workouts.missed} planned session${workouts.missed === 1 ? "" : "s"} missed` : week.inProgress ? "On track so far" : "No planned sessions missed") : "No weekly plan to compare against"}
+                  sub={`${workouts.planned ? (workouts.completed >= workouts.planned ? "Every planned session done" : workouts.missed ? `${workouts.missed} planned session${workouts.missed === 1 ? "" : "s"} missed` : week.inProgress ? "On track so far" : "No planned sessions missed") : "No weekly plan to compare against"}${workouts.activities ? ` · plus ${workouts.activities} ${workouts.activities === 1 ? "activity" : "activities"} (${workouts.activityMinutes} min)` : ""}`}
                   progress={workouts.planned ? workouts.completed / workouts.planned : null} />
               </div>
             )}
@@ -4870,14 +4877,14 @@ function WeeklyRecap({ user, onBack }) {
             )}
             {habits && (
               <div className="t3d-reveal" style={reveal(5)}>
-                <ReportTile testId="tile-habit-streak" label="HABIT STREAK" value={`🔥 ${habits.currentStreak}d`} color="#FF8C00"
-                  sub={`${habits.currentStreakHabit ? `${habits.currentStreakHabit} · ` : ""}best ever ${habits.bestStreak}d`} />
+                <ReportTile testId="tile-habit-streak" label={week.inProgress ? "HABIT STREAK" : "HABIT STREAK AT WEEK END"} value={`🔥 ${habits.currentStreak}d`} color="#FF8C00"
+                  sub={`${habits.currentStreakHabit ? `${habits.currentStreakHabit} · ` : ""}best ${week.inProgress ? "ever " : "by then "}${habits.bestStreak}d`} />
               </div>
             )}
             {morning && (
               <div className="t3d-reveal" style={reveal(6)}>
                 <ReportTile testId="tile-mornings" label="MORNING ROUTINES" value={`${morning.completed} / ${morning.days}`} color="#FF8C00" progress={morning.days ? morning.completed / morning.days : 0}
-                  sub={`${morning.averageScore !== null ? `Avg score ${morning.averageScore}/10 · ` : ""}streak now ${morning.currentStreak}d`} />
+                  sub={`${morning.averageScore !== null ? `Avg score ${morning.averageScore}/10 · ` : ""}${week.inProgress ? "streak now" : "streak at week end"} ${morning.currentStreak}d`} />
               </div>
             )}
             {nutrition && (
@@ -4910,7 +4917,14 @@ function WeeklyRecap({ user, onBack }) {
 
           <div className="t3d-card t3d-reveal" data-testid="recap-coach" style={reveal(10)}>
             <div className="t3d-ctitle">COACH'S TAKE</div>
-            {data.summary ? (
+            {generating ? (
+              <div role="status" style={{ fontSize: 11, color: NEON }}>{data.summary ? "Coach is updating this for your latest numbers..." : "Coach is reviewing your week..."}</div>
+            ) : data.summary && summaryStale ? (
+              <div data-testid="coach-stale">
+                <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>Your numbers have changed since the coach wrote this, so it is hidden until it is updated.</p>
+                <button className="t3d-btn" style={{ width: "100%" }} onClick={generateSummary}>UPDATE COACH&apos;S TAKE</button>
+              </div>
+            ) : data.summary ? (
               <div style={{ display: "grid", gap: 10 }}>
                 {[["BIGGEST WIN", data.summary.biggestWin, "#FFB547"], ["FOCUS FOR NEXT WEEK", data.summary.focus, NEON2], ["COACH'S VERDICT", data.summary.verdict, NEON]].filter(([, text]) => text).map(([label, text, color]) => (
                   <div key={label} style={{ padding: "12px 14px", borderLeft: `3px solid ${color}`, background: SURFACE2, borderRadius: 6 }}>
@@ -4919,8 +4933,6 @@ function WeeklyRecap({ user, onBack }) {
                   </div>
                 ))}
               </div>
-            ) : generating ? (
-              <div role="status" style={{ fontSize: 11, color: NEON }}>Coach is reviewing your week...</div>
             ) : (
               <div>
                 <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>{week.inProgress ? "The week is not over yet. You can get a coach summary of the week so far." : "Get your Biggest Win, one focus for next week and the coach's verdict."}</p>
@@ -5146,7 +5158,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       readNutritionPlan(user.id),
       readWorkoutSplit(user.id),
       // This week's workouts (with sets), so the coach knows what was lifted.
-      supabase.from("workout_logs").select("id,session_name,date,in_progress,total_volume,duration_mins,exercises").eq("user_id", user.id).gte("date", shiftDateKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7))).lte("date", today),
+      supabase.from("workout_logs").select("id,session_name,date,in_progress,total_volume,duration_mins,exercises,created_at").eq("user_id", user.id).gte("date", shiftDateKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7))).lte("date", today),
       readMorningRoutine(user.id),
     ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine]) => setTodayData({
       loaded: true,
@@ -5158,8 +5170,8 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       nutritionPlan: nutritionPlan.data || null,
       sessions: split.data?.sessions || [],
       // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
-      workouts: (workouts.data || []).filter(log => log.date === today && !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
-      weekWorkouts: (workouts.data || []).filter(log => isFinishedWorkout(log, today)).map(log => ({ ...log, in_progress: false })),
+      workouts: (workouts.data || []).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log) })).filter(log => log.date === today && !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
+      weekWorkouts: (workouts.data || []).filter(log => isFinishedWorkout(log, today)).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log), in_progress: false })),
       activeWorkout: (workouts.data || []).find(log => log.date === today && log.in_progress) || null,
     }));
   }, [user, today]);
@@ -5214,7 +5226,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
         `- ${log.session_name} PBs: ${pbs.length ? pbs.map(pb => `${pb.exercise} ${pb.weight}kg × ${pb.reps} (${pb.label})`).join("; ") : "none today"}`,
       ];
     }),
-    `- Workouts this week: ${(() => { const week = weeklyWorkoutProgress(todayData.weekWorkouts || [], today, todayData.sessions, null, { countCurrent: false }); return week.planned ? `${week.completed} of ${week.planned} planned` : `${week.completed}`; })()}`,
+    `- Workouts this week: ${(() => { const week = weeklyWorkoutProgress(todayData.weekWorkouts || [], today, todayData.sessions, null, { countCurrent: false }); return `${week.planned ? `${week.completed} of ${week.planned} planned` : `${week.completed}`}${week.activities ? `, plus ${week.activities} other ${week.activities === 1 ? "activity" : "activities"} (not weight training)` : ""}`; })()}`,
     `- Nutrition: ${todayData.nutrition ? `${todayData.nutrition.total_calories || 0} kcal, ${todayData.nutrition.total_protein || 0}g protein logged` : "not logged"}${calorieGoal ? ` (app target ${calorieGoal} kcal${dashboardTargets.restDay ? " for a rest day" : ""}${todayData.nutritionPlan?.protein_target ? `, ${todayData.nutritionPlan.protein_target}g protein` : ""})` : " (no calorie target set)"}`,
     ...(todayData.nutrition?.off_plan_food && Number(todayData.nutrition.off_plan_calories) > 0 ? [`- Off-plan food: ${todayData.nutrition.off_plan_food} (${todayData.nutrition.off_plan_calories} kcal, included above)`] : []),
     ...(unloggedFoodFromLog(todayData.nutrition).length ? [`- Food eaten with no calories entered (the calorie total above is incomplete): ${unloggedFoodFromLog(todayData.nutrition).join("; ")}`] : []),
@@ -5696,6 +5708,8 @@ function Fitness({ user, isActive = true }) {
   const [activityError, setActivityError] = useState("");
   const [activityNotice, setActivityNotice] = useState("");
   const [planActivityForm, setPlanActivityForm] = useState(null);
+  // Confirmation under the weekly plan after an activity is added to it.
+  const [planNotice, setPlanNotice] = useState("");
   const [discardWorkoutWarning, setDiscardWorkoutWarning] = useState(false);
   const [pendingSession, setPendingSession] = useState(null);
   const [availableMinutes, setAvailableMinutes] = useState("");
@@ -5870,10 +5884,14 @@ function withPlanApproval(sessions, now = new Date()) {
     try {
       const draft = await readDraft(user.id, "fitness").catch(() => null);
       const keep = activeWorkoutLogIds({ currentId: workoutLogIdRef.current, finalised: workoutFinalizedRef.current, draft });
-      const { data: stale } = await supabase.from("workout_logs").select("id")
+      const { data: stale } = await supabase.from("workout_logs").select("id,created_at,duration_mins,exercises")
         .eq("user_id", user.id).eq("in_progress", true).lt("date", today);
-      const ids = (stale || []).map(row => row.id).filter(id => !keep.includes(id));
+      const rows = (stale || []).filter(row => !keep.includes(row.id));
+      // A workout closed long after its last set keeps the time it really took.
+      const corrected = rows.filter(row => settledWorkoutDuration(row) !== (Number(row.duration_mins) || 0));
+      const ids = rows.filter(row => !corrected.includes(row)).map(row => row.id);
       if (ids.length) await supabase.from("workout_logs").update({ in_progress: false }).eq("user_id", user.id).in("id", ids);
+      for (const row of corrected) await supabase.from("workout_logs").update({ in_progress: false, duration_mins: settledWorkoutDuration(row) }).eq("user_id", user.id).eq("id", row.id);
     } catch (e) { console.log("Stale workout cleanup error:", e); }
   };
 
@@ -5919,7 +5937,7 @@ function withPlanApproval(sessions, now = new Date()) {
       const draft = await readDraft(user.id, "fitness").catch(() => null);
       const keep = activeWorkoutLogIds({ currentId: workoutLogIdRef.current, finalised: workoutFinalizedRef.current, draft });
       const { data: logs } = await supabase.from("workout_logs").select("*").eq("user_id", user.id).or(`in_progress.eq.false,date.lt.${today}`).order("created_at", { ascending: false }).limit(250);
-      if (logs) setHistory(logs.filter(log => !keep.includes(log.id)).map(log => ({ ...log, in_progress: false, ai_feedback: log.ai_feedback || log.exercises?.find(exercise => exercise.ai_feedback)?.ai_feedback || "" })));
+      if (logs) setHistory(logs.filter(log => !keep.includes(log.id)).map(log => ({ ...log, in_progress: false, duration_mins: settledWorkoutDuration(log), ai_feedback: log.ai_feedback || log.exercises?.find(exercise => exercise.ai_feedback)?.ai_feedback || "" })));
       // maybeSingle: a new user has no coach memory yet (single() would 406).
       const { data: memoryRow } = await supabase.from("coach_memory").select("summary").eq("user_id", user.id).maybeSingle();
       if (memoryRow?.summary) setCoachMemory(memoryRow.summary);
@@ -5964,7 +5982,7 @@ function withPlanApproval(sessions, now = new Date()) {
     return {
       user_id: user.id, date: dateStr, session_name: activeSession?.name || "Workout",
       exercises: exerciseData, total_volume: totalVol,
-      duration_mins: Math.round((Date.now() - workoutStart) / 60000),
+      duration_mins: workoutDurationMins({ startedAt: workoutStart, exercises: exerciseData }),
     };
   };
 
@@ -6185,6 +6203,7 @@ function withPlanApproval(sessions, now = new Date()) {
   const openActivityLog = (prefill = {}) => {
     setActivityError("");
     setActivityNotice("");
+    setPlanNotice("");
     setActivityForm({ type: prefill.type || "run", name: prefill.name || "", minutes: prefill.minutes ? String(prefill.minutes) : "", effort: "moderate", distanceKm: "", notes: "" });
   };
   const saveActivityLog = async () => {
@@ -6205,10 +6224,15 @@ function withPlanApproval(sessions, now = new Date()) {
   };
   const savePlanActivity = async () => {
     if (!planActivityForm?.days?.length) return;
-    const saved = await saveSplit([...sessions, activitySession(planActivityForm)]);
+    const planned = activitySession(planActivityForm);
+    const saved = await saveSplit([...sessions, planned]);
     if (!saved.ok) { setPlanSaveError(`The activity wasn't added to your plan: ${saved.error}. Please try again.`); return; }
     setPlanSaveError("");
     setPlanActivityForm(null);
+    // Say what was added; an older "logged" message is no longer current.
+    setActivityNotice("");
+    const dayNames = planned.days.map(day => day.charAt(0) + day.slice(1).toLowerCase()).join(", ");
+    setPlanNotice(`${planned.name} added to your plan on ${dayNames} · ${planned.duration_mins} min`);
   };
 
   // Start straight away with the full session at the usual gym; the
@@ -6429,7 +6453,8 @@ function withPlanApproval(sessions, now = new Date()) {
     const priorSets = getExerciseHistory(activeSession.exercises[eIdx]).flatMap(exposure => exposure.sets || []);
     const personalBest = detectPersonalBest({ weight, reps }, priorSets);
     const progressionDecision = getProgressionRecommendation(activeSession.exercises[eIdx]);
-    const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision };
+    // The time it was logged, so a workout left open ends at its last set.
+    const newSet = { weight, reps, setNum: sIdx + 1, personalBest, progressionDecision, at: new Date().toISOString() };
     const newCompleted = { ...completedSets, [eIdx]: [...(completedSets[eIdx] || []), newSet] };
     setCompletedSets(newCompleted);
     // The next set starts from this weight and its own target reps.
@@ -6989,7 +7014,7 @@ function withPlanApproval(sessions, now = new Date()) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <div style={highlightTitle(NEON2)}>THIS WEEK</div>
               <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: "#E0EAF0" }}>
-                {weekProgress.planned ? `${weekProgress.completed} / ${weekProgress.planned}` : weekProgress.completed} <span style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1 }}>WORKOUT{(weekProgress.planned || weekProgress.completed) === 1 ? "" : "S"}</span>
+                {weekProgress.planned ? `${weekProgress.completed} / ${weekProgress.planned}` : weekProgress.completed} <span style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1 }}>WORKOUT{(weekProgress.planned || weekProgress.completed) === 1 ? "" : "S"}{weekProgress.activities > 0 ? ` · ${weekProgress.activities} ${weekProgress.activities === 1 ? "ACTIVITY" : "ACTIVITIES"}` : ""}</span>
               </div>
             </div>
             {weekProgress.planned > 0 && (
@@ -8061,6 +8086,9 @@ function withPlanApproval(sessions, now = new Date()) {
   const thisWeekLogs = realHistory.filter(h => {
     return h.date >= weekStartKey && h.date <= today;
   });
+  // A run or other activity is not a lifting session: counted on its own.
+  const thisWeekActivities = thisWeekLogs.filter(log => activityOfLog(log)).length;
+  const thisWeekSessions = thisWeekLogs.length - thisWeekActivities;
   const last6Days = Array.from({ length: 7 }, (_, index) => {
     const date = new Date(homeTodayAnchor);
     date.setUTCDate(date.getUTCDate() - (6 - index));
@@ -8373,8 +8401,8 @@ function withPlanApproval(sessions, now = new Date()) {
             <div className="t3d-ctitle">THIS WEEK <span style={{ color: "#6F8792" }}>· MON TO SUN</span></div>
             <div className="t3d-grid3" style={{ marginBottom: 18 }}>
               <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
-                <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{thisWeekLogs.length}</div>
-                <div className="t3d-slabel">SESSIONS</div>
+                <div className="t3d-sval" data-testid="week-sessions" style={{ color: NEON, fontSize: 24 }}>{thisWeekSessions}</div>
+                <div className="t3d-slabel">{thisWeekSessions === 1 ? "SESSION" : "SESSIONS"}{thisWeekActivities > 0 ? ` · ${thisWeekActivities} ${thisWeekActivities === 1 ? "ACTIVITY" : "ACTIVITIES"}` : ""}</div>
               </div>
               <div style={{ textAlign: "center", padding: 12, background: SURFACE2, borderRadius: 6 }}>
                 <div className="t3d-sval" style={{ color: NEON2, fontSize: 18 }}>{thisWeekLogs.reduce((total, log) => total + (log.total_volume || 0), 0).toLocaleString()}</div>
@@ -8411,10 +8439,11 @@ function withPlanApproval(sessions, now = new Date()) {
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button className="t3d-btn t3d-btn-sm" onClick={() => { setEditDaysModal(true); }}>EDIT SESSIONS</button>
-                <button className="t3d-btn t3d-btn-sm" data-testid="plan-add-activity" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => setPlanActivityForm({ type: "run", name: "", days: [], minutes: "30" })}>+ ACTIVITY</button>
+                <button className="t3d-btn t3d-btn-sm" data-testid="plan-add-activity" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => { setPlanNotice(""); setActivityNotice(""); setPlanActivityForm({ type: "run", name: "", days: [], minutes: "30" }); }}>+ ACTIVITY</button>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={openPlanChangeCoach}>CHANGE PLAN</button>
               </div>
             </div>
+            {planNotice && <div role="status" data-testid="plan-notice" style={{ marginBottom: 12, fontSize: 11, color: NEON }}>✓ {planNotice}</div>}
             <div style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${programmeApproved ? "rgba(0,255,178,.3)" : "rgba(255,181,71,.3)"}`, borderRadius: 6, background: programmeApproved ? "rgba(0,255,178,.04)" : "rgba(255,181,71,.04)" }}>
               <div style={{ fontSize: 9, color: programmeApproved ? NEON : "#FFB547", marginBottom: programmeApproved ? 0 : 7 }}>
                 {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${(() => { const reviewAfter = sessions.find(session => session.approval?.reviewAfter)?.approval?.reviewAfter; return /^\d{4}-\d{2}-\d{2}$/.test(String(reviewAfter || "")) ? dateKeyLabel(reviewAfter, { day: "numeric", month: "short" }).toUpperCase() : "LATER"; })()}` : "OPTIONAL: CHECK THE DAYS AND EXERCISES, THEN LOCK THIS PLAN IN FOR 8 WEEKS. YOU CAN TRAIN WITHOUT DOING THIS."}
@@ -9349,9 +9378,16 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     setView("home");
     setSetupDraft(readSetupDraft());
   };
-  const dismissTargetSuggestion = key => {
+  // KEEP MY TARGETS is saved with the plan, so it holds on every device; this
+  // browser keeps a copy in case the plan can't be updated.
+  const dismissTargetSuggestion = async key => {
     setDismissedTargetSuggestion(key);
-    try { localStorage.setItem(targetSuggestionStorageKey, key); } catch { /* shown again next time */ }
+    try { localStorage.setItem(targetSuggestionStorageKey, key); } catch { /* the plan keeps it */ }
+    if (!user || !plan) return;
+    const setup = { ...(plan.setup || {}), targetSuggestionDismissed: key };
+    const { error } = await supabase.from("nutrition_plans").update({ setup }).eq("user_id", user.id);
+    if (error) { console.log("Target suggestion save error:", error.message); return; }
+    setPlan(current => (current ? { ...current, setup } : current));
   };
 
   const loadData = async () => {
@@ -9418,6 +9454,8 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
       wakeTime: wakeTime || null,
       answers: aiNutritionAnswers,
       tdee: macros.tdee ?? calculatedMacros?.tdee ?? null,
+      // A KEEP MY TARGETS choice still holds after the plan is saved again.
+      ...(plan?.setup?.targetSuggestionDismissed ? { targetSuggestionDismissed: plan.setup.targetSuggestionDismissed } : {}),
     };
     const row = {
       daily_calories: macros.calories,
@@ -10612,8 +10650,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   const libraryOnly = mealLibrary.map((meal, index) => ({ meal, index })).filter(({ meal }) => !planMealNames.has(String(meal.name || "").trim().toLowerCase()));
   // A profile completed after the plan was made can change the targets.
   const targetSuggestion = plan ? targetUpdateSuggestion({ plan, profile, weight: latestWeight, activityLevel: suggestActivityLevel(trainingDaysCount), todayKey: today }) : null;
-  const targetSuggestionKey = targetSuggestion ? `${plan?.updated_at || ""}|${targetSuggestion.targets.calories}` : "";
-  const showTargetSuggestion = Boolean(targetSuggestion) && dismissedTargetSuggestion !== targetSuggestionKey;
+  // Kept dismissed while the plan's target and the suggested one stay the same.
+  const targetSuggestionKey = targetSuggestion ? `${Number(plan?.daily_calories) || 0}|${targetSuggestion.targets.calories}` : "";
+  const showTargetSuggestion = Boolean(targetSuggestion) && dismissedTargetSuggestion !== targetSuggestionKey && plan?.setup?.targetSuggestionDismissed !== targetSuggestionKey;
   // The week's average target: rest days count with their own target.
   const avgTarget = weekLogs.length ? Math.round(weekLogs.reduce((total, log) => total + dayTargets(plan, log.is_training_day !== false).calories, 0) / weekLogs.length) : trainingTargets.calories;
 
