@@ -884,6 +884,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       return JSON.parse(logWrites().at(-1).body);
     };
     let count = logWrites().length;
+    if (process.env.SHOT) { await log.getByRole('button', { name: 'Swap Lunch' }).waitFor(); await page.screenshot({ path: 'swap-closed.png' }); }
     await log.getByRole('button', { name: 'Swap Lunch' }).click();
     const panel = log.getByTestId('swap-panel');
     await panel.getByText('SWAP LUNCH FOR').waitFor();
@@ -897,6 +898,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(saved.total_calories, 450);
     assert.equal(await log.getByRole('button', { name: 'Swap Lunch' }).getAttribute('aria-pressed'), 'true');
     assert.equal(await log.getByRole('button', { name: 'Lunch went to plan' }).getAttribute('aria-pressed'), 'false');
+    if (process.env.SHOT) await page.screenshot({ path: 'swap-done.png' });
     // Make your own; it is kept in the library for next time.
     count = logWrites().length;
     await log.getByRole('button', { name: 'Swap Dinner' }).click();
