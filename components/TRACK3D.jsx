@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { Fragment, useState, useRef, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { readDraft, useSessionDraft } from "../lib/session-drafts";
 import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/login-window";
@@ -7,8 +7,8 @@ import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { normaliseExperience } from "../lib/coaching/system";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
-import { applyCoachActionToProgramme, applyCoachActionToWorkout } from "../lib/coaching/ui-actions";
-import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isPlanChangeRequest } from "../lib/coaching/plan-change";
+import { applyCoachActionToProgramme, applyCoachActionToWorkout, coachActionChangeLines } from "../lib/coaching/ui-actions";
+import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isApprovalReply, isPlanChangeRequest, planChangeSummary } from "../lib/coaching/plan-change";
 import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
@@ -458,8 +458,48 @@ function ScoreRing({ score, size = 108, max = 100 }) {
   );
 }
 
+// ─── Proposed change card ─────────────────────────────────────────────────────
+// A plan change the coach proposed, shown directly under the coach's message
+// with what it changes (before → after). Nothing is saved until APPROVE &
+// SAVE. While it waits it scrolls into view and stays pinned in sight in the
+// chat (sticky), so it can't be missed. status: pending, saving, saved,
+// discarded, replaced or unusable. highlight: bump to bring it back into view.
+function ProposedChangeCard({ lines = [], notes = [], status = "pending", error = "", onApprove, onDiscard, highlight = 0 }) {
+  const ref = useRef(null);
+  const waiting = status === "pending" || status === "saving";
+  useEffect(() => {
+    if (status === "pending") ref.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
+  }, [status, highlight]);
+  const outcome = {
+    saved: { text: "Saved to your plan ✓", color: NEON },
+    discarded: { text: "Discarded: your plan hasn't changed.", color: "#8AABB8" },
+    replaced: { text: "Replaced by the newer proposal below. This one wasn't saved.", color: "#8AABB8" },
+    unusable: { text: "Nothing to save: those sessions or exercises aren't in your plan.", color: "#FFB547" },
+  }[status];
+  return (
+    <div ref={ref} role="group" aria-label="Proposed change" data-testid="proposed-change" data-status={status}
+      style={{ ...(waiting ? { position: "sticky", top: 0, bottom: 0, zIndex: 2 } : {}), margin: "0 0 10px", padding: 12, borderRadius: 7, background: waiting ? "#18170F" : SURFACE2, border: `1px solid ${waiting ? "rgba(255,181,71,.6)" : BORDER}`, boxShadow: waiting ? "0 6px 18px rgba(0,0,0,.55)" : "none" }}>
+      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, fontWeight: 700, color: waiting ? "#FFB547" : "#8AABB8", letterSpacing: 1, marginBottom: 7 }}>Proposed change</div>
+      {lines.map((line, index) => <div key={index} data-testid="proposed-change-line" style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.5, marginBottom: 3, overflowWrap: "anywhere" }}>{line}</div>)}
+      {notes.map((note, index) => <div key={index} style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginTop: 5 }}>{note}</div>)}
+      {error && <div role="alert" style={{ fontSize: 10, color: NEON3, lineHeight: 1.5, marginTop: 6 }}>{error}</div>}
+      {waiting ? (
+        <>
+          <div style={{ fontSize: 9, color: "#8AABB8", margin: "8px 0" }}>Not saved yet.</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="t3d-btn" style={{ flex: 1, borderColor: NEON, background: "rgba(0,255,178,.12)" }} disabled={status === "saving"} onClick={onApprove}>{status === "saving" ? "SAVING..." : "APPROVE & SAVE"}</button>
+            <button type="button" className="t3d-btn t3d-btn-red" style={{ flex: 1 }} disabled={status === "saving"} onClick={onDiscard}>DISCARD</button>
+          </div>
+        </>
+      ) : outcome && <div role="status" style={{ fontSize: 10, color: outcome.color, marginTop: 6 }}>{outcome.text}</div>}
+    </div>
+  );
+}
+
 // ─── AI Coach ─────────────────────────────────────────────────────────────────
-function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false }) {
+// planSessions: the whole saved plan, to describe a proposed change before →
+// after (coachContext may hold only today's session).
+function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false, planSessions = null }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -521,7 +561,15 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
           scroll();
         });
         setConversationId(data.conversationId);
-        setActions((data.actions || []).map(action => ({ ...action, type: action.type || action.action_type })));
+        // Each change sits under the reply that proposed it. Permanent changes
+        // stay until approved or discarded (a newer one for the same exercise
+        // replaces a waiting one); temporary ones last until the next reply.
+        const incoming = (data.actions || []).map(action => ({ ...action, type: action.type || action.action_type, messageIndex: updated.length }));
+        const target = action => action.payload?.programmeExerciseId || action.id;
+        setActions(current => [
+          ...current.filter(action => action.scope === "permanent").map(action => (action.status === "pending_approval" && incoming.some(next => next.scope === "permanent" && target(next) === target(action)) ? { ...action, status: "replaced" } : action)),
+          ...incoming,
+        ]);
         setPainActive(Boolean(data.activePain));
         setPainNote("");
         setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet.", planChangeHint: Boolean(data.planChangeHint) }]);
@@ -565,23 +613,45 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   const decideStructuredAction = async (action, decision) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
+    const updateAction = changes => setActions(current => current.map(item => (item.id === action.id ? { ...item, ...changes } : item)));
+    updateAction({ deciding: true, error: "" });
     // Apply (and for permanent changes, save) first; only mark the action
     // applied once that has succeeded.
     if (decision !== "reject") {
       const result = await onStructuredAction?.(action);
       if (result && !result.ok) {
-        setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
+        updateAction({ deciding: false, error: action.scope === "permanent" ? result.message : "" });
+        if (action.scope !== "permanent") setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
         return;
       }
       if (result?.message) setMessages(previous => [...previous, { role: "assistant", content: result.message }]);
     }
-    const response = await fetch("/api/coach-action", {
+    // Record the decision. The change itself is already saved (or discarded).
+    await fetch("/api/coach-action", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
       body: JSON.stringify({ actionId: action.id, decision }),
-    });
-    if (!response.ok) return;
-    setActions(current => current.map(item => item.id === action.id ? { ...item, status: decision === "reject" ? "rejected" : "applied" } : item));
+    }).catch(() => null);
+    updateAction({ deciding: false, status: decision === "reject" ? "rejected" : "applied" });
+  };
+
+  // A change the coach proposed: permanent ones in a Proposed change card
+  // (APPROVE & SAVE / DISCARD), temporary ones as before.
+  const actionCard = action => {
+    if (action.scope === "permanent") {
+      const status = action.status === "applied" ? "saved" : action.status === "rejected" ? "discarded" : action.status === "replaced" ? "replaced" : action.deciding ? "saving" : "pending";
+      return <ProposedChangeCard key={action.id} lines={coachActionChangeLines(planSessions || coachContext?.programme, action)} notes={action.payload?.reason ? [action.payload.reason] : []} status={status} error={action.error}
+        onApprove={() => decideStructuredAction(action, "approve")} onDiscard={() => decideStructuredAction(action, "reject")} />;
+    }
+    if (["rejected", "applied"].includes(action.status)) return null;
+    return <div key={action.id} style={{ background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
+      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: NEON2, letterSpacing: 1, marginBottom: 5 }}>TEMPORARY CHANGE</div>
+      <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 8 }}>{action.payload?.reason || "Coach suggested a workout update."}</div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button className="t3d-btn t3d-btn-sm" disabled={action.deciding} onClick={() => decideStructuredAction(action, "apply")}>APPLY</button>
+        <button className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={action.deciding} onClick={() => decideStructuredAction(action, "reject")}>NO CHANGE</button>
+      </div>
+    </div>;
   };
 
   // A caller (e.g. the 1-week review banner) can hand this coach a message to
@@ -595,6 +665,12 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     onConsumedPrompt?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPrompt, restored]);
+
+  // Messages on screen with their place in the conversation (for the
+  // changes proposed under them). The minimised chat shows the last two.
+  const visibleEntries = messages.map((m, index) => ({ m, index })).filter(({ m }) => !m.hidden);
+  const shownEntries = compact && !expanded ? visibleEntries.slice(-2) : visibleEntries;
+  const shownIndexes = new Set(shownEntries.map(entry => entry.index));
 
   return (
     <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
@@ -613,7 +689,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
       ) : (
         <>
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
-            {(compact && !expanded ? messages.filter(m => !m.hidden).slice(-2) : messages.filter(m => !m.hidden)).map((m, i) => {
+            {shownEntries.map(({ m, index }, i) => <Fragment key={index}>{(() => {
               if (m.role === "note") return <div key={i} data-testid="coach-note" style={{ textAlign: "center", fontSize: 9, color: "#6F8792", letterSpacing: 1, margin: "6px 0" }}>{m.content}</div>;
               const changePlanButton = m.planChangeHint && onOpenChangePlan ? <button key={`cp-${i}`} className="t3d-btn t3d-btn-sm" style={{ margin: "0 0 8px", fontSize: 8 }} onClick={onOpenChangePlan}>OPEN CHANGE PLAN</button> : null;
               if (changePlanButton && i === messages.filter(message => !message.hidden).length - 1) {
@@ -662,7 +738,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
                   </div>
                 )}
               </div>
-            );})}
+            );})()}{coachingV12 && actions.filter(action => action.messageIndex === index).map(actionCard)}</Fragment>)}
             {loading && (
               <div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}>
                 <div className="t3d-ai-tag" style={{ color: NEON }}>AI</div>
@@ -679,17 +755,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
                 }}>PAIN RESOLVED</button>}
               </div>
             )}
-            {coachingV12 && actions.filter(action => !["rejected", "applied"].includes(action.status)).map(action => {
-              const permanent = action.scope === "permanent";
-              return <div key={action.id} style={{ background: "rgba(0,200,255,.05)", border: `1px solid ${permanent ? "rgba(255,140,0,.35)" : "rgba(0,200,255,.25)"}`, borderRadius: 6, padding: 10, marginBottom: 8 }}>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: permanent ? "#FF8C00" : NEON2, letterSpacing: 1, marginBottom: 5 }}>{permanent ? "PERMANENT CHANGE — APPROVAL REQUIRED" : "TEMPORARY CHANGE"}</div>
-                <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 8 }}>{action.payload?.reason || "Coach suggested a workout update."}</div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button className="t3d-btn t3d-btn-sm" onClick={() => decideStructuredAction(action, permanent ? "approve" : "apply")}>{permanent ? "APPROVE & APPLY" : "APPLY"}</button>
-                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => decideStructuredAction(action, "reject")}>NO CHANGE</button>
-                </div>
-              </div>;
-            })}
+            {/* A change still waiting whose message isn't shown (the minimised chat shows the last two). */}
+            {coachingV12 && actions.filter(action => !shownIndexes.has(action.messageIndex) && (action.scope === "permanent" ? action.status === "pending_approval" : !["rejected", "applied"].includes(action.status))).map(actionCard)}
             <div ref={endRef} />
           </div>
           {messages.at(-1)?.role === "assistant" && isYesNoQuestion(messages.at(-1)?.content) && (
@@ -5688,6 +5755,19 @@ function Fitness({ user, isActive = true }) {
   const [planChangeInput, setPlanChangeInput] = useState("");
   const [planChangeLoading, setPlanChangeLoading] = useState(false);
   const [planChangeRecommendation, setPlanChangeRecommendation] = useState(null);
+  // Bumped to bring a waiting Proposed change card back into view.
+  const [planChangeHighlight, setPlanChangeHighlight] = useState(0);
+  // A change still waiting for approval keeps its conversation when Change
+  // Plan is opened again. (Defined here: the workout screen returns before
+  // the plan-change functions further down.)
+  const planChangeHasPending = planChangeMessages.some(message => ["pending", "saving"].includes(message.proposal?.status));
+  const planChangeLogRef = useRef(null);
+  // New messages scroll the plan-change chat to the bottom; a change waiting
+  // for approval stays pinned in view there.
+  useEffect(() => {
+    const log = planChangeLogRef.current;
+    if (log) log.scrollTop = log.scrollHeight;
+  }, [planChangeMessages.length, planChangeLoading, planChangeOpen]);
   const [replaceWarning, setReplaceWarning] = useState(null);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [endWorkoutConfirm, setEndWorkoutConfirm] = useState(null);
@@ -6664,7 +6744,13 @@ function withPlanApproval(sessions, now = new Date()) {
           recentWorkoutsBySession: recentWorkoutsForCoach(history.filter(log => log.session_name?.toLowerCase() === activeSession.name?.toLowerCase()), { perSession: 2, maxSessions: 1 }),
         } : { programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
-        onOpenChangePlan={() => { setPlanChangeMessages([]); setPlanChangeInput(""); setPlanChangeRecommendation(null); setPlanChangeOpen(true); setView("home"); }}
+        planSessions={sessions}
+        onOpenChangePlan={() => {
+          if (!planChangeHasPending) { setPlanChangeMessages([]); setPlanChangeRecommendation(null); }
+          setPlanChangeInput("");
+          setPlanChangeOpen(true);
+          setView("home");
+        }}
       />
     </div>
   );
@@ -6690,7 +6776,8 @@ function withPlanApproval(sessions, now = new Date()) {
                         setPlanChangeInput("");
                         setPlanChangeRecommendation(null);
                         setPlanChangeOpen(true);
-                        askPlanChangeCoach(message.openChangePlan, planChangeIntro);
+                        // A change still waiting for approval keeps its conversation.
+                        askPlanChangeCoach(message.openChangePlan, planChangeHasPending ? planChangeMessages : planChangeIntro);
                       }}>OPEN CHANGE PLAN</button></div>}
                     </div>
                   ))}
@@ -7680,10 +7767,30 @@ function withPlanApproval(sessions, now = new Date()) {
     role: "assistant",
     content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
   }];
+  // The coach's proposal still waiting for approval, if any. Proposals live
+  // on the coach message that made them, so the card shows under it.
+  const pendingPlanProposal = (messages = planChangeMessages) => [...messages].reverse().find(message => ["pending", "saving"].includes(message.proposal?.status))?.proposal || null;
+  const updatePlanProposal = (id, changes) => setPlanChangeMessages(current => current.map(message => (message.proposal?.id === id ? { ...message, proposal: { ...message.proposal, ...changes } } : message)));
+  // What the changes would do to the plan, before → after.
+  const makePlanProposal = changes => {
+    const summary = planChangeSummary(sessions, changes);
+    return {
+      id: `proposal-${Date.now()}`,
+      changes,
+      lines: summary.lines.length ? summary.lines : changes.map(describePlanChange),
+      notes: summary.changed && summary.unmatched.length ? [`Not in your plan, so left out: ${summary.unmatched.join("; ")}.`] : [],
+      status: summary.changed ? "pending" : "unusable",
+      error: "",
+    };
+  };
+
   const openPlanChangeCoach = () => {
-    setPlanChangeMessages(planChangeIntro);
+    // A change still waiting for approval keeps its conversation.
+    if (!planChangeHasPending) {
+      setPlanChangeMessages(planChangeIntro);
+      setPlanChangeRecommendation(null);
+    }
     setPlanChangeInput("");
-    setPlanChangeRecommendation(null);
     setPlanChangeOpen(true);
   };
 
@@ -7693,8 +7800,15 @@ function withPlanApproval(sessions, now = new Date()) {
     // Close the phone keyboard so the screen returns to its normal size.
     document.activeElement?.blur?.();
     const nextMessages = [...baseMessages, { role: "user", content: message }];
-    setPlanChangeMessages(nextMessages);
     setPlanChangeInput("");
+    const pending = pendingPlanProposal(baseMessages);
+    // "I approve" in words: only the card saves, so point to it.
+    if (pending && isApprovalReply(message)) {
+      setPlanChangeMessages([...nextMessages, { role: "assistant", content: "That change isn't saved yet. Tap APPROVE & SAVE on the Proposed change card to save it, or DISCARD to keep your plan as it is." }]);
+      setPlanChangeHighlight(count => count + 1);
+      return;
+    }
+    setPlanChangeMessages(nextMessages);
     setPlanChangeLoading(true);
     setPlanChangeRecommendation(null);
     try {
@@ -7704,37 +7818,50 @@ function withPlanApproval(sessions, now = new Date()) {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
         body: JSON.stringify({
-          messages: nextMessages.filter(item => item.role === "user" || item.role === "assistant"),
+          messages: nextMessages.filter(item => item.role === "user" || item.role === "assistant").map(({ role, content }) => ({ role, content })),
           currentPlan: sessions,
           recentWorkouts: history.slice(0, 30),
+          // So the coach knows a change is already waiting in its card.
+          pendingChanges: pending?.lines || [],
         }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Coach request failed");
-      setPlanChangeMessages([...nextMessages, { role: "assistant", content: result.message }]);
+      const proposal = result.changes?.length ? makePlanProposal(result.changes) : null;
+      // A newer proposal replaces one still waiting.
+      setPlanChangeMessages(current => [
+        ...current.map(item => (proposal && item.proposal?.status === "pending" ? { ...item, proposal: { ...item.proposal, status: "replaced" } } : item)),
+        { role: "assistant", content: result.message, ...(proposal ? { proposal } : {}) },
+      ]);
       setPlanChangeRecommendation(result);
     } catch (error) {
-      setPlanChangeMessages([...nextMessages, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again." }]);
+      setPlanChangeMessages(current => [...current, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again." }]);
     } finally {
       setPlanChangeLoading(false);
     }
   };
 
-  const applyTargetedPlanChanges = async () => {
-    const changes = planChangeRecommendation?.changes || [];
-    if (!changes.length) return;
-    const updated = applyPlanChangeProposal(sessions, changes);
+  // APPROVE & SAVE on a Proposed change card.
+  const approvePlanProposal = async id => {
+    const proposal = planChangeMessages.find(item => item.proposal?.id === id)?.proposal;
+    if (!proposal || proposal.status !== "pending") return;
+    const updated = applyPlanChangeProposal(sessions, proposal.changes);
     if (JSON.stringify(updated) === JSON.stringify(sessions)) {
-      setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Nothing was changed: those exercises or sessions were not found in your saved plan." }]);
+      updatePlanProposal(id, { status: "unusable", error: "" });
       return;
     }
+    updatePlanProposal(id, { status: "saving", error: "" });
     const saved = await saveSplit(updated);
     if (!saved.ok) {
-      setPlanChangeMessages(previous => [...previous, { role: "assistant", content: `Not saved: ${saved.error}. Your plan has not changed. Please try again.` }]);
+      updatePlanProposal(id, { status: "pending", error: `Not saved: ${saved.error}. Your plan has not changed. Please try again.` });
       return;
     }
-    setPlanChangeRecommendation(null);
+    updatePlanProposal(id, { status: "saved", error: "" });
     setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "Saved: those changes are now in your plan. Your completed workout and exercise history has not been removed." }]);
+  };
+  const discardPlanProposal = id => {
+    updatePlanProposal(id, { status: "discarded", error: "" });
+    setPlanChangeMessages(previous => [...previous, { role: "assistant", content: "OK, your plan stays as it is. Tell me if you'd like a different change." }]);
   };
 
   // Go straight to the AI builder, pre-filling answers from the coach chat and
@@ -7790,12 +7917,18 @@ function withPlanApproval(sessions, now = new Date()) {
         <div style={{ padding: "9px 11px", marginBottom: 12, background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.2)", borderRadius: 6, color: "#9CB3BD", fontSize: 10, lineHeight: 1.5 }}>
           Nothing changes until you approve it. Completed workouts and exercise records remain in your history.
         </div>
-        <div role="log" aria-live="polite" style={{ maxHeight: 290, overflowY: "auto", marginBottom: 12 }}>
+        <div ref={planChangeLogRef} role="log" aria-live="polite" style={{ maxHeight: "min(52dvh, 420px)", overflowY: "auto", marginBottom: 12 }}>
           {(planChangeMessages.length ? planChangeMessages : planChangeIntro).map((message, index) => (
-            <div key={index} className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.18)" : "rgba(0,255,178,.12)"}` }}>
-              <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
-              <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
-            </div>
+            <Fragment key={index}>
+              <div className="t3d-ai-msg" style={{ background: message.role === "user" ? "rgba(0,200,255,.06)" : SURFACE2, border: `1px solid ${message.role === "user" ? "rgba(0,200,255,.18)" : "rgba(0,255,178,.12)"}` }}>
+                <div className="t3d-ai-tag" style={{ color: message.role === "user" ? NEON2 : NEON }}>{message.role === "user" ? "YOU" : "COACH"}</div>
+                <span style={{ whiteSpace: "pre-wrap", color: "#C7D6DC" }}>{message.role === "assistant" ? cleanAiText(message.content) : message.content}</span>
+              </div>
+              {message.proposal && (
+                <ProposedChangeCard lines={message.proposal.lines} notes={message.proposal.notes} status={message.proposal.status} error={message.proposal.error} highlight={planChangeHighlight}
+                  onApprove={() => approvePlanProposal(message.proposal.id)} onDiscard={() => discardPlanProposal(message.proposal.id)} />
+              )}
+            </Fragment>
           ))}
           {planChangeLoading && <div style={{ color: "#6F8792", fontSize: 10, padding: 8 }}>Coach is reviewing your plan and history...</div>}
         </div>
@@ -7805,14 +7938,6 @@ function withPlanApproval(sessions, now = new Date()) {
             {["A few exercises don't suit me", "I want to change sets or reps", "My available days changed", "My main goal changed", "I think I need a full rebuild"].map(prompt => (
               <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanChangeCoach(prompt)}>{prompt}</button>
             ))}
-          </div>
-        )}
-
-        {planChangeRecommendation?.changes?.length > 0 && (
-          <div style={{ marginBottom: 12, padding: 11, background: "rgba(255,181,71,.05)", border: "1px solid rgba(255,181,71,.3)", borderRadius: 6 }}>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: "#FFB547", letterSpacing: 1, marginBottom: 8 }}>PROPOSED TARGETED CHANGES</div>
-            {planChangeRecommendation.changes.map((change, index) => <div key={index} style={{ fontSize: 10, color: "#D6E1E5", lineHeight: 1.55, marginBottom: 4 }}>• {describePlanChange(change)}</div>)}
-            <button className="t3d-btn" style={{ width: "100%", marginTop: 10 }} onClick={applyTargetedPlanChanges}>APPROVE &amp; SAVE THESE CHANGES</button>
           </div>
         )}
 
