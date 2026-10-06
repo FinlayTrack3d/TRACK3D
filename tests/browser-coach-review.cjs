@@ -6,6 +6,7 @@
 //  nextupslow, nextupmorningslow, newdash,
 //  profilelive, profileexperience, restday, targetsuggest, targetkeep, logextra, logextradash, editordraft,
 //  weeklyplanstart, habitlink, activitylog, activitynextup, persistlogin, smallfixes,
+//  fitnesslastweek, fitnessmissed, repsplit, mealswap, mealswapdash,
 //  nutritionorder, dashlog, libraryedit, restdaybuild, restdayai, weeklybadge, fitnessrest, headerprofile,
 //  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
@@ -95,7 +96,11 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   if (['nextupmorning', 'nextupmorningslow'].includes(scenario)) await context.clock.setFixedTime(atLondonHour(9));
   if (['nextupworkout', 'nextupslow'].includes(scenario)) await context.clock.setFixedTime(atLondonHour(13));
   if (scenario === 'newdash') await context.clock.setFixedTime(atLondonHour(10));
-  const today = londonKey();
+  // Scenarios about a given weekday run at midday London time on a fixed date
+  // (2026-10-07 is a Wednesday, 2026-10-12 a Monday).
+  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12' }[scenario];
+  if (fixedDay) await context.clock.setFixedTime(new Date(`${fixedDay}T11:00:00Z`));
+  const today = fixedDay || londonKey();
   const yesterday = shiftKey(today, -1);
   const bornYearsAgo = years => `${Number(today.slice(0, 4)) - years}-01-01`;
   const dayCodes = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
@@ -107,7 +112,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   const freeDay = dayCodes[(todayDow + 2) % 7];
   const tables = {
     nutrition_plans: ['nutritionai', 'newdash'].includes(scenario) ? [] : [{ user_id: user.id, daily_calories: scenario === 'planwarning' ? 2600 : 2100, protein_target: scenario === 'planwarning' ? 100 : 135, carbs_target: 230, fats_target: 65, meals, rest_day_meals: [], meal_library: [], weekly_meal_plan: {},
-      ...(scenario === 'libraryedit' ? { meal_library: [{ id: 'lib1', name: 'Protein Pancakes', calories: 450, protein: 35, carbs: 50, fats: 9, mealType: 'fixed', repeatDaily: true }] } : {}),
+      ...(['libraryedit', 'mealswap', 'mealswapdash'].includes(scenario) ? { meal_library: [{ id: 'lib1', name: 'Protein Pancakes', calories: 450, protein: 35, carbs: 50, fats: 9, mealType: 'fixed', repeatDaily: true }] } : {}),
       goal: scenario === 'nutritionlegacy' ? 'Cut (lose fat)' : ['nutritionedit', 'nutritionnocolumn'].includes(scenario) ? 'Lose fat' : 'maintain',
       ...(['nutritionedit', 'nutritionnocolumn'].includes(scenario) ? { setup: { mode: 'guided', weight: 82, height: 180, age: 34, sex: 'Male', activityLevel: 'Lightly active', goal: 'Lose fat', mealsPerDay: 3, wakeTime: '06:15', answers: { allergies: 'peanuts', diet_type: 'No restrictions' } } } : {}) }],
     ...(scenario === 'nutritionlegacy' ? { morning_checkins: [{ date: yesterday, score: 7, data: { weight: '79.5' } }] } : {}),
@@ -119,7 +124,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     nutrition_logs: [
       ...(scenario === 'offplancap' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 3720, total_protein: 85, meals_completed: { 0: true, 1: true, _review_complete: true }, off_plan_food: 'large pizza', off_plan_calories: 2420 }]
         : scenario === 'offplanmacros' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 1000, total_protein: 70, meals_completed: { 0: true, _off_plan: { protein: 30, carbs: 50, fats: 10 }, _review_complete: false }, off_plan_food: 'toast', off_plan_calories: 400 }]
-        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'weeklyplanstart', 'profilelive', 'profileexperience'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
+        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'weeklyplanstart', 'profilelive', 'profileexperience', 'mealswap', 'mealswapdash'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
       { id: 'n0', user_id: user.id, date: yesterday, total_calories: 2050, total_protein: 130, meals_completed: [true, true, true] },
     ],
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
@@ -151,6 +156,18 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [{ name: 'Upper A', days: [dayCodes[todayDow]], duration_mins: 30, exercises: [{ name: 'Bench Press', sets: 4, reps: ['8-10', '8-10', '8-10', '8-10'] }, { name: 'Row', sets: 6, reps: ['8-10', '8-10', '8-10', '8-10', '8-10', '8-10'] }], approval: { approved: true, reviewAfter: '2026-11-30' } }] }];
     tables.workout_logs = [{ id: 'w9', user_id: user.id, date: yesterday, session_name: 'Upper A', in_progress: false, total_volume: 3000, duration_mins: 32, created_at: `${yesterday}T18:00:00Z`, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '8' }] }] }];
   }
+  if (scenario === 'fitnesslastweek') tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
+    { name: 'Push A', days: ['FRI'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+    { name: 'Pull A', days: ['WED'], exercises: [{ name: 'Row', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+  ] }];
+  if (scenario === 'fitnessmissed') tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
+    { name: 'Push A', days: ['MON'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+    { name: 'Pull A', days: ['WED'], exercises: [{ name: 'Row', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+  ] }];
+  // Rep targets saved as one string, as a coach reply or an import sometimes left them.
+  if (scenario === 'repsplit') tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
+    { name: 'Upper A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 4, reps: '6-8,6-8,8,10' }, { name: 'Row', sets: 3, reps: ['8-10,8-10,12', '8-10,8-10,12', '8-10,8-10,12'] }], approval: { approved: true } },
+  ] }];
   if (scenario === 'weeklyplanstart') {
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [{ name: 'Push A', days: ['MON', 'THU'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
     tables.workout_logs = [{ id: 'old', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Old Plan Day', in_progress: false, total_volume: 2000, duration_mins: 40, exercises: [] }];
@@ -747,15 +764,119 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await rest.getByText(/Nothing is scheduled today. Rest is part of the plan./).waitFor();
     assert.equal(await page.getByText('RECOMMENDED NEXT SESSION').count(), 0);
     assert.equal(await page.getByRole('button', { name: '▶ START WORKOUT' }).count(), 0, 'no big start button on a rest day');
-    const catchUp = page.getByTestId('catch-up');
-    await catchUp.getByText('OPTIONAL CATCH-UP').waitFor();
-    await catchUp.getByText(/You missed Push A on/).waitFor();
-    await catchUp.getByRole('button', { name: 'DO IT TODAY →' }).waitFor();
-    await catchUp.getByRole('button', { name: 'View Push A exercises' }).click();
+    // The next day of the plan is the main suggestion (Push A is on Tuesdays; today is Wednesday).
+    const next = rest.getByTestId('next-session');
+    await next.getByText('NEXT SESSION · TUESDAY').waitFor();
+    await next.getByText('Push A', { exact: true }).waitFor();
+    // Yesterday's miss (this week) is only a small optional catch-up.
+    await rest.getByTestId('catch-up').filter({ hasText: 'Catch up Push A (missed Tuesday)' }).waitFor();
+    await next.getByRole('button', { name: 'View Push A exercises' }).click();
     const sheet = page.getByTestId('plan-preview');
-    await sheet.getByText('CATCH-UP SESSION').waitFor();
+    await sheet.getByText('NEXT SESSION', { exact: true }).waitFor();
     assert.match(await sheet.textContent(), /Dumbbell Shoulder Press4 × 10/);
     if (process.env.SHOT) await page.screenshot({ path: 'fitness-rest.png' });
+  } else if (scenario === 'fitnesslastweek') {
+    // Monday: Friday's Push A was missed last week. It isn't carried over.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    const rest = page.getByTestId('rest-day');
+    await rest.getByText('REST DAY', { exact: true }).waitFor();
+    await rest.getByTestId('next-session').getByText('NEXT SESSION · WEDNESDAY').waitFor();
+    await rest.getByTestId('next-session').getByText('Pull A', { exact: true }).waitFor();
+    assert.equal(await page.getByTestId('catch-up').count(), 0, 'no catch-up from last week');
+    assert.doesNotMatch(await rest.textContent(), /Push A/);
+  } else if (scenario === 'fitnessmissed') {
+    // Wednesday: today's Pull A leads; Monday's missed Push A is a small option.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByText('Scheduled for today').waitFor();
+    await page.getByText('Pull A', { exact: true }).first().waitFor();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).waitFor();
+    assert.equal(await page.getByText(/Make-up session/).count(), 0);
+    const catchUp = page.getByTestId('catch-up');
+    await catchUp.getByText('Missed Push A on Monday?').waitFor();
+    await catchUp.getByRole('button', { name: 'Do it today instead' }).click();
+    await page.getByText('SET 1 OF 3').waitFor();
+    await page.getByText('Bench Press').first().waitFor();
+  } else if (scenario === 'repsplit') {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
+    await page.getByText('SET 1 OF 4').waitFor();
+    await page.getByText('TARGET: 6-8 REPS').waitFor();
+    assert.equal(await page.getByText(/6-8,6-8/).count(), 0, 'the whole list never shows as one target');
+    assert.equal(await page.getByLabel('Reps').inputValue(), '6');
+    await page.getByLabel('Weight in kilograms').fill('60');
+    for (const target of ['6-8', '8', '10']) {
+      await page.getByRole('button', { name: 'Log set' }).click();
+      await page.getByText(`TARGET: ${target} REPS`).waitFor();
+    }
+    await page.getByRole('button', { name: 'Log set' }).click();
+    await page.getByText('SET 1 OF 3').waitFor();
+    await page.getByText('TARGET: 8-10 REPS').waitFor();
+    const saved = JSON.parse(writes.filter(w => w.table === 'workout_logs' && w.body && (JSON.parse(w.body).exercises || [])[0]?.sets?.length === 4).at(-1).body);
+    assert.deepEqual(saved.exercises[0].sets.map(set => set.repRange), ['6-8', '6-8', '8', '10']);
+  } else if (scenario === 'mealswap') {
+    await openNutrition();
+    const log = page.getByTestId('nutrition-today');
+    // The swap shows at once and saves just after: wait for the save itself.
+    const logWrites = () => writes.filter(w => w.table === 'nutrition_logs');
+    const nextLogWrite = async count => {
+      for (let i = 0; i < 50 && logWrites().length <= count; i++) await page.waitForTimeout(100);
+      assert.ok(logWrites().length > count, 'saved');
+      return JSON.parse(logWrites().at(-1).body);
+    };
+    let count = logWrites().length;
+    await log.getByRole('button', { name: 'Swap Lunch' }).click();
+    const panel = log.getByTestId('swap-panel');
+    await panel.getByText('SWAP LUNCH FOR').waitFor();
+    if (process.env.SHOT) await page.screenshot({ path: 'swap.png' });
+    // Library meals are offered, not the planned meal itself.
+    assert.equal(await panel.getByTestId('swap-option').filter({ hasText: /^Lunch/ }).count(), 0);
+    await panel.getByTestId('swap-option').filter({ hasText: 'Protein Pancakes' }).click();
+    await log.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Protein Pancakes · 450 kcal · 35g P' }).waitFor();
+    let saved = await nextLogWrite(count);
+    assert.deepEqual(saved.meals_completed[1], { completed: true, swap: { name: 'Protein Pancakes', calories: 450, protein: 35, carbs: 50, fats: 9 } });
+    assert.equal(saved.total_calories, 450);
+    assert.equal(await log.getByRole('button', { name: 'Swap Lunch' }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await log.getByRole('button', { name: 'Lunch went to plan' }).getAttribute('aria-pressed'), 'false');
+    // Make your own; it is kept in the library for next time.
+    count = logWrites().length;
+    await log.getByRole('button', { name: 'Swap Dinner' }).click();
+    await panel.getByLabel('Swap meal name').fill('Chicken wrap');
+    await panel.getByLabel('Swap meal KCAL').fill('600');
+    await panel.getByLabel('Swap meal P (g)').fill('40');
+    await panel.getByRole('button', { name: 'SWAP IT IN ✓' }).click();
+    await log.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Chicken wrap · 600 kcal · 40g P' }).waitFor();
+    saved = await nextLogWrite(count);
+    assert.equal(saved.total_calories, 1050);
+    assert.equal(saved.total_protein, 75);
+    for (let i = 0; i < 20 && !writes.some(w => w.table === 'nutrition_plans' && /Chicken wrap/.test(w.body || '')); i++) await page.waitForTimeout(100);
+    const library = JSON.parse(writes.filter(w => w.table === 'nutrition_plans' && /Chicken wrap/.test(w.body || '')).at(-1).body).meal_library;
+    assert.deepEqual(library.map(meal => meal.name).sort(), ['Breakfast', 'Chicken wrap', 'Dinner', 'Lunch', 'Protein Pancakes']);
+    // Undo: Lunch is not answered any more.
+    count = logWrites().length;
+    await log.getByRole('button', { name: 'Swap Lunch' }).click();
+    await log.getByTestId('swap-panel').getByRole('button', { name: 'UNDO SWAP' }).click();
+    saved = await nextLogWrite(count);
+    assert.equal(saved.meals_completed[1], undefined);
+    assert.equal(saved.total_calories, 600);
+    assert.equal(await log.getByTestId('meal-swapped').count(), 1);
+  } else if (scenario === 'mealswapdash') {
+    const card = page.getByTestId('dashboard-meal-log');
+    await card.getByText('LOG AS YOU GO').waitFor();
+    await card.getByRole('button', { name: 'Swap Breakfast' }).click();
+    await card.getByTestId('swap-option').filter({ hasText: 'Protein Pancakes' }).click();
+    await card.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Protein Pancakes · 450 kcal · 35g P' }).waitFor();
+    for (let i = 0; i < 50 && !writes.some(w => w.table === 'nutrition_logs'); i++) await page.waitForTimeout(100);
+    const saved = JSON.parse(writes.filter(w => w.table === 'nutrition_logs').at(-1).body);
+    assert.equal(saved.meals_completed[0].swap.name, 'Protein Pancakes');
+    assert.equal(saved.total_calories, 450);
+    // A made-up meal is added to the library from the dashboard too.
+    await card.getByRole('button', { name: 'Swap Lunch' }).click();
+    await card.getByTestId('swap-panel').getByLabel('Swap meal name').fill('Sushi');
+    await card.getByTestId('swap-panel').getByLabel('Swap meal KCAL').fill('500');
+    await card.getByTestId('swap-panel').getByRole('button', { name: 'SWAP IT IN ✓' }).click();
+    await card.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Sushi · 500 kcal' }).waitFor();
+    for (let i = 0; i < 20 && !writes.some(w => w.table === 'nutrition_plans' && /Sushi/.test(w.body || '')); i++) await page.waitForTimeout(100);
+    assert.ok(writes.some(w => w.table === 'nutrition_plans' && w.method === 'PATCH' && /Sushi/.test(w.body || '')), 'library saved');
   } else if (scenario === 'headerprofile') {
     await page.getByRole('button', { name: 'PROFILE', exact: true }).click();
     const dialog = page.getByTestId('profile-dialog');

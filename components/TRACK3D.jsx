@@ -13,7 +13,7 @@ import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activi
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
-import { estimateSession, fitSessionToBudget, requestedBudget } from "../lib/workout";
+import { estimateSession, fitSessionToBudget, repTargets, requestedBudget, splitRepTargets } from "../lib/workout";
 import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach } from "../lib/weekly-report";
@@ -22,7 +22,7 @@ import { dailyScore } from "../lib/daily-score";
 import { linkedHabitIds } from "../lib/habit-links";
 import { EXPERIENCE_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
 import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, targetUpdateSuggestion } from "../lib/nutrition-setup";
-import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, mealSwap, swappedMealResult, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
 // On start the dashboard, the hidden Morning and Fitness tabs and the weekly
@@ -5185,6 +5185,15 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   const caloriesEaten = todayData.nutrition?.total_calories || 0;
   // Today's target: rest days with their own meals have a lighter one.
   const dashboardTargets = dayTargets(todayData.nutritionPlan, dashboardTrainingDay);
+  // Meals to swap in from LOG AS YOU GO, as on the Nutrition page.
+  const dashboardLibrary = mergeMealLibrary(todayData.nutritionPlan?.meal_library || [], todayData.nutritionPlan?.meals || []);
+  const addDashboardLibraryMeal = async meal => {
+    if (!user || !todayData.nutritionPlan) return;
+    const next = mergeMealLibrary(todayData.nutritionPlan.meal_library || [], [{ ...meal, id: globalThis.crypto?.randomUUID?.() || `meal-${Date.now()}`, ingredients: [] }]);
+    const { error } = await supabase.from("nutrition_plans").update({ meal_library: next, updated_at: new Date().toISOString() }).eq("user_id", user.id);
+    if (error) { console.error("Meal library save error:", error.message); return; }
+    setTodayData(current => ({ ...current, nutritionPlan: current.nutritionPlan ? { ...current.nutritionPlan, meal_library: next } : current.nutritionPlan }));
+  };
   const calorieGoal = dashboardTargets.calories || 0;
   // The score is the average of what applies today; its parts are shown under it.
   const { score, parts: scoreParts } = dailyScore({
@@ -5348,7 +5357,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
               <div className="t3d-ctitle" style={{ margin: 0 }}>LOG AS YOU GO</div>
               <span style={{ fontSize: 8, color: dashboardTrainingDay ? NEON : NEON2, letterSpacing: 1 }}>{dashboardTrainingDay ? "TRAINING DAY" : "REST DAY"} MEALS</span>
             </div>
-            <MealLogList meals={dashboardMeals} results={dashMeals.results} onResultsChange={dashMeals.setResults} onSave={dashMeals.save} compact />
+            <MealLogList meals={dashboardMeals} results={dashMeals.results} onResultsChange={dashMeals.setResults} onSave={dashMeals.save} compact library={dashboardLibrary} onAddToLibrary={addDashboardLibraryMeal} />
             <LogSomethingElse onAdd={dashMeals.addExtra} />
             {dashMeals.error && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{dashMeals.error}</div>}
             <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("nutrition")}>{todayData.nutrition?.meals_completed && todayData.nutrition.meals_completed._review_complete !== false ? "OPEN NUTRITION →" : "DAY REVIEW IN NUTRITION →"}</button>
@@ -5600,16 +5609,15 @@ function workoutProgressLine({ activeSession, exerciseIdx = 0, completedSets = {
   return [activeSession.name, total && done < total ? `Set ${done + 1} of ${total}` : "Sets done", exercise.name].filter(Boolean).join(" · ");
 }
 
+const exerciseCountText = session => { const count = session?.exercises?.length || 0; return `${count} exercise${count === 1 ? "" : "s"}`; };
+
 function normalizeFitnessSessions(sessions = []) {
   return sessions.map(session => ({
     ...session,
     exercises: (session.exercises || []).map(exercise => {
       const sets = Math.max(1, parseInt(exercise.sets, 10) || 3);
-      const suppliedRanges = Array.isArray(exercise.reps)
-        ? exercise.reps.map(value => String(value || "").trim()).filter(Boolean)
-        : String(exercise.reps || "").split("/").map(value => value.trim()).filter(Boolean);
-      const fallbackRange = suppliedRanges.at(-1) || "8-12";
-      return { ...exercise, sets, reps: Array.from({ length: sets }, (_, index) => suppliedRanges[index] || fallbackRange) };
+      // One target per set, also when the plan kept them in one string ("6-8,6-8,8,10").
+      return { ...exercise, sets, reps: repTargets(exercise.reps, sets) };
     }),
   }));
 }
@@ -6049,7 +6057,7 @@ function withPlanApproval(sessions, now = new Date()) {
     if (!lastExposure?.sets?.length) return null;
     const currentWeight = Number(lastExposure.sets[0]?.weight) || 0;
     const equipmentHistory = exposures.flatMap(item => item.sets || []).map(set => Number(set.weight)).filter(Number.isFinite);
-    const repRange = Array.isArray(exercise.reps) ? exercise.reps[0] : exercise.reps;
+    const repRange = repTargets(exercise.reps)[0];
     return evaluateProgression({
       prescriptionType: exercise.prescription_type || "straight_sets",
       sets: lastExposure.sets,
@@ -6396,7 +6404,7 @@ function withPlanApproval(sessions, now = new Date()) {
     const exercise = activeSession?.exercises?.[eIdx];
     if (!exercise) return { weight: "", reps: "" };
     const setIdx = getCurrentSetIdx(eIdx);
-    const ranges = Array.isArray(exercise.reps) ? exercise.reps : String(exercise.reps || "8-12").split("/").map(value => value.trim()).filter(Boolean);
+    const ranges = repTargets(exercise.reps, Number(exercise.sets) || 0);
     const lastSets = getLastSessionData(exercise);
     const defaults = setLoggerDefaults({
       repRange: ranges[setIdx] || ranges.at(-1) || "8-12",
@@ -6698,8 +6706,7 @@ function withPlanApproval(sessions, now = new Date()) {
     const totalSets = currentExercise.sets || 0;
     const totalExercises = activeSession.exercises.length;
     const exerciseCompletedSets = getCompletedForExercise(exerciseIdx);
-    const suppliedRepRanges = Array.isArray(currentExercise.reps) ? currentExercise.reps : String(currentExercise.reps || "8-12").split("/").map(value => value.trim()).filter(Boolean);
-    const exerciseRepRanges = Array.from({ length: totalSets }, (_, index) => suppliedRepRanges[index] || suppliedRepRanges.at(-1) || "8-12");
+    const exerciseRepRanges = repTargets(currentExercise.reps, totalSets);
     const currentSetRepRange = exerciseRepRanges[sIdx] || "8-12";
     const weightGuidance = getWeightGuidance(currentExercise, sIdx);
     const suggestedWeight = weightGuidance?.weight;
@@ -7075,7 +7082,7 @@ function withPlanApproval(sessions, now = new Date()) {
               {s.exercises?.map((ex, eIdx) => (
                 <div key={eIdx} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${BORDER}`, fontSize: 11 }}>
                   <div style={{ flex: 1 }}>{ex.name}</div>
-                  <div style={{ fontSize: 10, color: "#E0EAF0" }}>{ex.sets}×{Array.isArray(ex.reps) ? ex.reps.join("/") : ex.reps}</div>
+                  <div style={{ fontSize: 10, color: "#E0EAF0" }}>{ex.sets}×{repTargets(ex.reps, ex.sets).join("/")}</div>
                   {ex.tempo && <div style={{ fontSize: 9, color: NEON2 }}>{ex.tempo}</div>}
                 </div>
               ))}
@@ -7235,7 +7242,7 @@ function withPlanApproval(sessions, now = new Date()) {
   const openExerciseEditor = (sessionIdx, exerciseIdx) => {
     const exercise = sessions[sessionIdx]?.exercises?.[exerciseIdx];
     if (!exercise) return;
-    const reps = Array.isArray(exercise.reps) ? exercise.reps : String(exercise.reps || "").split("/");
+    const reps = repTargets(exercise.reps, Number(exercise.sets) || 0, "");
     const uniform = reps.every(rep => rep === reps[0]);
     setNewEx({ name: exercise.name, sets: Number(exercise.sets) || reps.length || 3, reps, repsAll: uniform ? reps[0] || "" : "", perSet: !uniform, tempo: exercise.tempo || "" });
     setEditingExerciseIdx(exerciseIdx);
@@ -7491,7 +7498,7 @@ function withPlanApproval(sessions, now = new Date()) {
                         onClick={event => { event.stopPropagation(); setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, exercises: s.exercises.filter((_, j) => j !== eIdx) } : s)); }}>✕</button>
                     </div>
                     <div style={{ fontSize: 10, color: "#E0EAF0" }}>
-                      {ex.sets} sets · {Array.isArray(ex.reps) ? ex.reps.join(" / ") : ex.reps} reps
+                      {ex.sets} sets · {repTargets(ex.reps, ex.sets).join(" / ")} reps
                       {ex.tempo && ` · ${ex.tempo}`}
                     </div>
                   </div>
@@ -7944,7 +7951,7 @@ function withPlanApproval(sessions, now = new Date()) {
 
     const planSummary = sessions.map(session => {
       const exercises = (session.exercises || []).map(exercise => {
-        const reps = Array.isArray(exercise.reps) ? exercise.reps.join("/") : exercise.reps;
+        const reps = splitRepTargets(exercise.reps).join("/");
         return `${exercise.name} (${exercise.sets || 0} sets, ${reps || "reps not set"})`;
       }).join(", ");
       return `${session.name} [${(session.days || []).join(", ") || "not scheduled"}]: ${exercises || "no exercises"}`;
@@ -7999,12 +8006,15 @@ function withPlanApproval(sessions, now = new Date()) {
   const todaySession = getSessionForDayCode(homeDate.dayCode);
   const homeTodayAnchor = new Date(`${today}T12:00:00Z`);
   let missedRecommendation = null;
-  // Only days after the plan was created can have a missed session.
+  // Only days after the plan was created can have a missed session, and only
+  // this week's (Monday to Sunday): a session missed last week is not carried over.
   const planStartKey = split?.programme_started_at ? getZonedDateInfo(new Date(split.programme_started_at), homeTimeZone).dateKey : null;
+  const currentWeekStartKey = shiftDateKey(today, -((homeTodayAnchor.getUTCDay() + 6) % 7));
   for (let daysAgo = 1; daysAgo <= 7; daysAgo += 1) {
     const scheduledDate = new Date(homeTodayAnchor);
     scheduledDate.setUTCDate(scheduledDate.getUTCDate() - daysAgo);
     const dateKey = scheduledDate.toISOString().slice(0, 10);
+    if (dateKey < currentWeekStartKey) break;
     if (planStartKey && dateKey <= planStartKey) break;
     const scheduledSession = getSessionForDayCode(dayCodes[scheduledDate.getUTCDay()]);
     if (!scheduledSession) continue;
@@ -8017,7 +8027,9 @@ function withPlanApproval(sessions, now = new Date()) {
       break;
     }
   }
-  const recommendedSession = missedRecommendation?.session || todaySession;
+  // Today's own session is the one suggested. A session missed earlier this
+  // week is only offered as an optional catch-up.
+  const recommendedSession = todaySession;
   const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase()));
   const trainedToday = history.some(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2));
   const completedTodayNames = [...new Set(history.filter(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)).map(log => log.session_name).filter(Boolean))];
@@ -8151,26 +8163,24 @@ function withPlanApproval(sessions, now = new Date()) {
             ) : restDay ? (
               <div data-testid="rest-day">
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: NEON2, letterSpacing: 2, marginBottom: 6 }}>REST DAY</div>
-                <div style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6 }}>
-                  Nothing is scheduled today. Rest is part of the plan.{nextScheduled ? ` Next: ${nextScheduled.session.name}, ${nextScheduled.dayLabel}.` : ""}
-                </div>
-                {missedRecommendation && (
-                  <div data-testid="catch-up" style={{ marginTop: 14, padding: 12, border: "1px solid rgba(255,140,0,.35)", borderRadius: 7, background: "rgba(255,140,0,.05)" }}>
-                    <div style={{ fontSize: 9, color: "#FF8C00", letterSpacing: 1, marginBottom: 6 }}>OPTIONAL CATCH-UP</div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                      <div style={{ flex: "1 1 200px", fontSize: 11, color: "#E0EAF0", lineHeight: 1.5 }}>
-                        You missed <strong>{missedRecommendation.session.name}</strong> on {missedRecommendation.dayLabel}. If you feel fresh, you can do it today instead of resting.
-                      </div>
-                      <PlanPreviewButton label={`View ${missedRecommendation.session.name} exercises`} onClick={() => setPlanPreview({
-                        title: "CATCH-UP SESSION",
-                        entries: [{ session: missedRecommendation.session, label: `MISSED ${missedRecommendation.dayLabel.toUpperCase()}` }],
+                <div style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6 }}>Nothing is scheduled today. Rest is part of the plan.</div>
+                {/* The next day of the plan is the main suggestion. */}
+                {nextScheduled && (
+                  <div data-testid="next-session" style={{ marginTop: 14, padding: 12, border: `1px solid ${BORDER}`, borderRadius: 7, background: SURFACE2 }}>
+                    <div style={{ fontSize: 9, color: NEON, letterSpacing: 1, marginBottom: 6 }}>NEXT SESSION · {nextScheduled.dayLabel.toUpperCase()}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: "#E0EAF0", letterSpacing: 1.5, overflowWrap: "anywhere", minWidth: 0 }}>{nextScheduled.session.name}</div>
+                      <PlanPreviewButton label={`View ${nextScheduled.session.name} exercises`} onClick={() => setPlanPreview({
+                        title: "NEXT SESSION",
+                        entries: [{ session: nextScheduled.session, label: nextScheduled.dayLabel.toUpperCase() }],
                       })} />
-                      <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 40, borderColor: "rgba(255,140,0,.5)", color: "#FF8C00" }} onClick={() => requestStartWorkout(missedRecommendation.session)}>DO IT TODAY →</button>
                     </div>
+                    <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 4 }}>{isActivitySession(nextScheduled.session) ? `${activityTypeLabel(nextScheduled.session.activityType)} · ${sessionPlannedMinutes(nextScheduled.session)} min` : `${exerciseCountText(nextScheduled.session)} · about ${sessionPlannedMinutes(nextScheduled.session)} min`}</div>
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 10, color: "#6F8792" }}>
                   <span>Want to train anyway?</span>
+                  {missedRecommendation && <button type="button" data-testid="catch-up" onClick={() => requestStartWorkout(missedRecommendation.session)} style={{ background: "none", border: 0, color: "#FF8C00", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Catch up {missedRecommendation.session.name} (missed {missedRecommendation.dayLabel})</button>}
                   <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Choose a workout</button>
                 </div>
               </div>
@@ -8180,12 +8190,12 @@ function withPlanApproval(sessions, now = new Date()) {
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
                     <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: "#E0EAF0", letterSpacing: 2, overflowWrap: "anywhere", minWidth: 0 }}>{recommendedSession.name}</div>
                     <PlanPreviewButton label={`View ${recommendedSession.name} exercises`} onClick={() => setPlanPreview({
-                      title: missedRecommendation ? "MAKE-UP SESSION" : "TODAY'S WORKOUT",
-                      entries: [{ session: recommendedSession, label: missedRecommendation ? `MISSED ${missedRecommendation.dayLabel.toUpperCase()}` : "TODAY" }],
+                      title: "TODAY'S WORKOUT",
+                      entries: [{ session: recommendedSession, label: "TODAY" }],
                     })} />
                   </div>
-                  <div style={{ fontSize: 11, color: missedRecommendation ? "#FF8C00" : "#8AABB8" }}>
-                    {missedRecommendation ? `Make-up session missed on ${missedRecommendation.dayLabel}` : "Scheduled for today"} · {isActivitySession(recommendedSession) ? `${activityTypeLabel(recommendedSession.activityType)} · ${sessionPlannedMinutes(recommendedSession)} min` : `${recommendedSession.exercises?.length || 0} exercises`}
+                  <div style={{ fontSize: 11, color: "#8AABB8" }}>
+                    Scheduled for today · {isActivitySession(recommendedSession) ? `${activityTypeLabel(recommendedSession.activityType)} · ${sessionPlannedMinutes(recommendedSession)} min` : exerciseCountText(recommendedSession)}
                   </div>
                   {!recommendedSession.approval?.approved && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, color: "#FFB547", fontSize: 8 }}>
@@ -8200,6 +8210,12 @@ function withPlanApproval(sessions, now = new Date()) {
                 {!isActivitySession(recommendedSession) && <button type="button" onClick={() => openWorkoutOptions(recommendedSession)} style={{ flexBasis: "100%", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "4px 0", textAlign: "right", textDecoration: "underline" }}>
                   Short on time or at a different gym?
                 </button>}
+                {missedRecommendation && missedRecommendation.session !== recommendedSession && (
+                  <div data-testid="catch-up" style={{ flexBasis: "100%", display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", fontSize: 10, color: "#6F8792" }}>
+                    <span>Missed {missedRecommendation.session.name} on {missedRecommendation.dayLabel}?</span>
+                    <button type="button" onClick={() => requestStartWorkout(missedRecommendation.session)} style={{ background: "none", border: 0, color: "#FF8C00", cursor: "pointer", fontSize: 10, padding: "5px 6px", textDecoration: "underline" }}>Do it today instead</button>
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
@@ -8503,7 +8519,7 @@ function withPlanApproval(sessions, now = new Date()) {
                                 ...s, exercises: s.exercises.map((ex2, j) => {
                                   if (j !== eIdx) return ex2;
                                   const sets = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1));
-                                  const ranges = Array.isArray(ex2.reps) ? ex2.reps : [ex2.reps || "8-12"];
+                                  const ranges = Array.isArray(ex2.reps) ? ex2.reps : repTargets(ex2.reps, sets);
                                   return { ...ex2, sets, reps: Array.from({ length: sets }, (_, index) => ranges[index] || ranges.at(-1) || "8-12") };
                                 })
                               } : s))} />
@@ -8513,11 +8529,11 @@ function withPlanApproval(sessions, now = new Date()) {
                               <label key={setIndex} style={{ display: "flex", alignItems: "center", gap: 4, color: "#8AABB8", fontSize: 8 }}>
                                 S{setIndex + 1}
                                 <input style={{ minWidth: 0, width: "100%", background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 4, color: "#E0EAF0", fontSize: 9, padding: 5 }}
-                                  value={(Array.isArray(ex.reps) ? ex.reps[setIndex] : ex.reps) || ""} placeholder="8-12"
+                                  value={(Array.isArray(ex.reps) ? ex.reps[setIndex] : repTargets(ex.reps, Number(ex.sets) || 1)[setIndex]) || ""} placeholder="8-12"
                                   onChange={e => setSessions(prev => prev.map((s, i) => i === sIdx ? {
                                     ...s, exercises: s.exercises.map((ex2, j) => {
                                       if (j !== eIdx) return ex2;
-                                      const ranges = Array.isArray(ex2.reps) ? [...ex2.reps] : Array.from({ length: Number(ex2.sets) || 1 }, () => ex2.reps || "8-12");
+                                      const ranges = Array.isArray(ex2.reps) ? [...ex2.reps] : repTargets(ex2.reps, Number(ex2.sets) || 1);
                                       ranges[setIndex] = e.target.value;
                                       return { ...ex2, reps: ranges };
                                     })
@@ -8806,14 +8822,46 @@ function AiTweaksBox({ meals, setMeals, macros, goal, allergies = [], preference
 // planned meals, and macro boxes for flexible meals. Shared by Nutrition and
 // the dashboard; onSave stores each change and returns true when it saved.
 // showDetails: tapping a planned meal shows what's in it, so the Nutrition
-// page lists each meal once.
-function MealLogList({ meals, results, onResultsChange, onSave, compact = false, showDetails = false }) {
+// page lists each meal once. The yellow swap button replaces a planned meal
+// for today with one from `library` or one made up there; onAddToLibrary
+// keeps a made-up meal for next time.
+const EMPTY_SWAP = { name: "", calories: "", protein: "", carbs: "", fats: "" };
+const SWAP_YELLOW = "#FFD23F";
+const SwapIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M7 4 3 8l4 4" /><path d="M3 8h13a4 4 0 0 1 4 4" /><path d="m17 20 4-4-4-4" /><path d="M21 16H8a4 4 0 0 1-4-4" />
+  </svg>
+);
+function MealLogList({ meals, results, onResultsChange, onSave, compact = false, showDetails = false, library = [], onAddToLibrary = null }) {
   const [status, setStatus] = useState("");
   const [openMeal, setOpenMeal] = useState(null);
+  const [swapOpen, setSwapOpen] = useState(null);
+  const [swapDraft, setSwapDraft] = useState(EMPTY_SWAP);
+  const [keepSwap, setKeepSwap] = useState(true);
   const commit = async updated => {
     onResultsChange(updated);
     setStatus("SAVING...");
-    setStatus(await onSave(updated) ? "SAVED" : "COULD NOT SAVE");
+    const saved = await onSave(updated);
+    setStatus(saved ? "SAVED" : "COULD NOT SAVE");
+    return saved;
+  };
+  const openSwap = index => {
+    setSwapDraft(EMPTY_SWAP);
+    setKeepSwap(true);
+    setSwapOpen(current => (current === index ? null : index));
+  };
+  // Today's meal becomes the one chosen; the plan itself is unchanged.
+  const swapIn = async (index, item, addToLibrary = false) => {
+    const updated = { ...results, [index]: swappedMealResult(item) };
+    setSwapOpen(null);
+    setSwapDraft(EMPTY_SWAP);
+    const saved = await commit(updated);
+    if (saved && addToLibrary && onAddToLibrary) onAddToLibrary(updated[index].swap);
+  };
+  const undoSwap = index => {
+    const rest = Object.fromEntries(Object.entries(results || {}).filter(([key]) => key !== String(index)));
+    setSwapOpen(null);
+    commit(rest);
   };
   if (!meals.length) return <div style={{ fontSize: 10, color: "#6F8792", padding: "6px 0" }}>No meals planned for today.</div>;
   return (
@@ -8835,6 +8883,9 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
           </div>;
         }
         const detailsOpen = showDetails && openMeal === index;
+        const swap = mealSwap(result);
+        const wentToPlan = mealWasCompleted(result) && !swap;
+        const swapOptions = (library || []).filter(item => item?.name && !isFlexibleMeal(item) && item.name.trim().toLowerCase() !== String(meal.name || "").trim().toLowerCase());
         return <div key={`${meal.name}-${index}`} style={{ padding: compact ? "8px 0" : "10px 0", borderBottom: `1px solid ${BORDER}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
             {showDetails ? (
@@ -8843,9 +8894,45 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
                 <div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div>
               </button>
             ) : <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>}
-            <button aria-label={`${meal.name} went to plan`} aria-pressed={mealWasCompleted(result)} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 36, background: mealWasCompleted(result) ? "rgba(0,255,178,.16)" : "transparent", borderColor: mealWasCompleted(result) ? NEON : BORDER }} onClick={() => commit({ ...results, [index]: true })}>✓</button>
+            <button type="button" aria-label={`Swap ${meal.name}`} aria-pressed={Boolean(swap)} aria-expanded={swapOpen === index} title="Swap this meal" onClick={() => openSwap(index)}
+              style={{ width: 36, height: 36, minWidth: 36, padding: 0, borderRadius: "50%", border: `1px solid ${SWAP_YELLOW}`, background: swap ? SWAP_YELLOW : "rgba(255,210,63,.12)", color: swap ? "#06100D" : SWAP_YELLOW, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+              <SwapIcon />
+            </button>
+            <button aria-label={`${meal.name} went to plan`} aria-pressed={wentToPlan} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 36, background: wentToPlan ? "rgba(0,255,178,.16)" : "transparent", borderColor: wentToPlan ? NEON : BORDER }} onClick={() => commit({ ...results, [index]: true })}>✓</button>
             <button aria-label={`${meal.name} did not go to plan`} aria-pressed={missed} className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "6px 10px", minHeight: 36, background: missed ? "rgba(255,45,120,.14)" : "transparent" }} onClick={() => commit({ ...results, [index]: { completed: false, note: typeof result === "object" && result ? result.note || "" : "" } })}>×</button>
           </div>
+          {swap && <div data-testid="meal-swapped" style={{ marginTop: 5, fontSize: 10, color: SWAP_YELLOW }}>Swapped for {swap.name} · {swap.calories.toLocaleString("en-GB")} kcal · {swap.protein}g P</div>}
+          {swapOpen === index && (
+            <div data-testid="swap-panel" style={{ marginTop: 8, padding: 10, border: "1px solid rgba(255,210,63,.4)", borderRadius: 7, background: "rgba(255,210,63,.05)" }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: SWAP_YELLOW, letterSpacing: 1, marginBottom: 8 }}>SWAP {String(meal.name || "THIS MEAL").toUpperCase()} FOR</div>
+              <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>FROM YOUR LIBRARY</div>
+              {swapOptions.length ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+                  {swapOptions.map((option, optionIndex) => (
+                    <button key={option.id || `${option.name}-${optionIndex}`} type="button" data-testid="swap-option" className="t3d-btn t3d-btn-sm" style={{ display: "flex", justifyContent: "space-between", gap: 8, textAlign: "left", whiteSpace: "normal" }} onClick={() => swapIn(index, option)}>
+                      <span>{option.name}</span><span style={{ color: "#8AABB8", flexShrink: 0 }}>{Number(option.calories) || 0} kcal · {Number(option.protein) || 0}g P</span>
+                    </button>
+                  ))}
+                </div>
+              ) : <div style={{ fontSize: 10, color: "#6F8792", marginBottom: 12 }}>No other meals saved yet. Make your own below.</div>}
+              <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>OR MAKE YOUR OWN</div>
+              <input className="t3d-input" aria-label="Swap meal name" placeholder="e.g. Chicken wrap" value={swapDraft.name} onChange={event => { const value = event.target.value; setSwapDraft(draft => ({ ...draft, name: value })); }} style={{ marginBottom: 6 }} />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
+                {[["calories", "KCAL"], ["protein", "P (g)"], ["carbs", "C (g)"], ["fats", "F (g)"]].map(([key, label]) => (
+                  <label key={key} style={{ color: "#6F8792", fontSize: 7 }}>{label}
+                    <input className="t3d-input" aria-label={`Swap meal ${label}`} type="number" inputMode="decimal" min="0" value={swapDraft[key]} onChange={event => { const value = event.target.value; setSwapDraft(draft => ({ ...draft, [key]: value })); }} style={{ padding: "7px 4px", marginTop: 4, fontSize: 11 }} />
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 9, color: "#6F8792", lineHeight: 1.5, marginTop: 6 }}>Leave protein, carbs and fat blank for a rough split.</div>
+              {onAddToLibrary && <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: "#C5D6DC", marginTop: 8 }}><input type="checkbox" checked={keepSwap} onChange={event => setKeepSwap(event.target.checked)} /> Save it to my meal library</label>}
+              <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+                <button type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: SWAP_YELLOW, color: SWAP_YELLOW }} disabled={!swapDraft.name.trim() || !(Number(swapDraft.calories) > 0)} onClick={() => swapIn(index, swapDraft, keepSwap)}>SWAP IT IN ✓</button>
+                {swap && <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => undoSwap(index)}>UNDO SWAP</button>}
+                <button type="button" className="t3d-btn t3d-btn-sm" onClick={() => setSwapOpen(null)}>CANCEL</button>
+              </div>
+            </div>
+          )}
           {detailsOpen && (
             <div data-testid="meal-details" style={{ margin: "8px 0 2px", padding: "8px 10px", background: SURFACE2, borderRadius: 6 }}>
               {(meal.ingredients || []).map((ingredient, ingredientIndex) => <div key={ingredientIndex} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 10, color: "#C5D6DC", padding: "2px 0" }}><span>{ingredient.name}</span><span>{ingredient.weight}{ingredient.unit}</span></div>)}
@@ -9473,6 +9560,13 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     await persistNutritionPlanning(next, weeklyMealPlan);
   };
 
+  // A meal made up while swapping a meal is kept in the library for next time.
+  const addMealToLibrary = async meal => {
+    const next = mergeMealLibrary(mealLibrary, [{ ...meal, id: globalThis.crypto?.randomUUID?.() || `meal-${Date.now()}`, ingredients: [] }]);
+    setMealLibrary(next);
+    await persistNutritionPlanning(next, weeklyMealPlan);
+  };
+
   const closeLibraryForm = () => {
     setLibraryMealDraft({ name: "", calories: "", protein: "", carbs: "", fats: "" });
     setLibraryEditIndex(null);
@@ -9587,7 +9681,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     try {
       const text = await streamCoachText({
           area: "nutrition_day",
-          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; return result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${targets.protein}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : targets.restDay ? "Rest day (lighter rest day target)." : "Rest day."} Give brief feedback.` }],
+          messages: [{ role: "user", content: `Nutrition day summary: ${completedCount}/${activeMeals.length} meals logged. Planning style: ${inferNutritionStyle(activeMeals)}. Off plan: ${offPlanFood || "none"} (${Number(offPlanCals) > 0 ? `${offPlanCals} extra kcal` : "no calories entered"}). Meal notes: ${activeMeals.map((meal, index) => { const result = mealResults[index]; const swap = mealSwap(result); return swap ? `${meal.name}: swapped for ${swap.name} (${swap.calories} kcal, ${swap.protein}g protein)` : result && typeof result === "object" && result.note ? `${meal.name}: ${result.note}` : null; }).filter(Boolean).join("; ") || "none"}. Unlogged food with no calories: ${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).map(item => item.food).join("; ") || "none"}. Logged total: ${totalCals} kcal vs ${calorieTarget} target (${diff>0?"+":""}${diff})${unloggedFood(activeMeals, mealResults, offPlanFood, offPlanCals).length ? " — incomplete, excludes the unlogged food" : ""}. Protein: ${totals.protein}g vs ${targets.protein}g target. Goal: ${plan?.goal}. ${isTrainingDay ? "Training day." : targets.restDay ? "Rest day (lighter rest day target)." : "Rest day."} Give brief feedback.` }],
       }, setAiFeedback);
       setAiFeedback(text);
     } catch (e) {
@@ -10555,7 +10649,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               </div>
             </div>
             <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 4 }}>{activeNutritionStyle === "fixed" ? "Tick each planned meal when you have it. If it changes, tap × and briefly say what happened. Tap a meal to see what's in it." : "Tick repeated meals when you have them. For flexible meals, enter what the meal contributed to your macros."}</div>
-            <MealLogList meals={activeMeals} results={mealResults} onResultsChange={setMealResults} onSave={updated => saveLog(updated, todayLogged)} showDetails />
+            <MealLogList meals={activeMeals} results={mealResults} onResultsChange={setMealResults} onSave={updated => saveLog(updated, todayLogged)} showDetails library={mealLibrary} onAddToLibrary={addMealToLibrary} />
             <LogSomethingElse onAdd={addExtraToToday} />
             {nutritionSaveError && <div role="alert" style={{ color: NEON3, fontSize: 9, lineHeight: 1.5, marginTop: 6 }}>{nutritionSaveError}</div>}
             {/* Day review */}
