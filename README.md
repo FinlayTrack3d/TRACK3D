@@ -21,6 +21,7 @@ Legacy `workout_logs` writes remain authoritative and continue if the additive m
 - Calorie minimums (1,200 kcal for women, 1,500 for men, 1,350 when sex isn't given) are `CALORIE_FLOOR` in `lib/nutrition-safety.js`.
 - The privacy notice needs the controller's name and contact email: `CONTROLLER` in `app/privacy/page.js`.
 - There are no analytics or tracking cookies, and fonts are served from the site, so no cookie banner is needed. If analytics are ever added, they must not load until the user accepts them.
+- What still needs the owner (contact details, ICO fee, processing agreements, DPIA, backups, age, legal review) is listed in `COMPLIANCE.md`.
 
 ## Getting Started
 
