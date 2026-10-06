@@ -23,6 +23,9 @@ import { linkedHabitIds } from "../lib/habit-links";
 import { EXPERIENCE_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
 import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, targetUpdateSuggestion } from "../lib/nutrition-setup";
 import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, mealSwap, swappedMealResult, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
+import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
+import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
+import { createZip } from "../lib/zip";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
 // On start the dashboard, the hidden Morning and Fitness tabs and the weekly
@@ -221,7 +224,6 @@ const MORNING_QUOTES = [
 ];
 
 const css = `
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Orbitron:wght@400;600;700;900&display=swap');
   .t3d * { box-sizing: border-box; margin: 0; padding: 0; }
   .t3d { display: flex; min-height: 100vh; background: #080C10; color: #E0EAF0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
   .t3d input, .t3d select, .t3d textarea { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
@@ -8770,11 +8772,16 @@ const COMMON_MEALS = {
 // Asks the coach for a meal plan, adds it up in code and checks it against
 // its targets (calories within 5%, protein within 10%). If it is off, asks
 // once more with the gap stated. Returns { meals, check }; check.ok is false
-// when the plan is still off, so the screen can say so.
-async function requestMealPlan(area, content, targets, { allergies = [], wakeTime = "" } = {}) {
-  const messages = [{ role: "user", content: `${content}\n\n${allergyRule(allergies)}` }];
+// when the plan is still off, so the screen can say so. A plan below the
+// daily minimum (minCalories) is never returned: it is asked for again, and
+// if every try is below it the error has belowMinimum set.
+async function requestMealPlan(area, content, targets, { allergies = [], wakeTime = "", minCalories = 0 } = {}) {
+  const minimumRule = minCalories > 0 ? `\nMinimum daily calories: ${minCalories} kcal. The plan must add up to at least this, even if asked for less.` : "";
+  const messages = [{ role: "user", content: `${content}${minimumRule}\n\n${allergyRule(allergies)}` }];
   let best = null;
-  // Up to two tries for the targets, and a third only to remove an allergen.
+  let belowMinimum = null;
+  // Up to two tries for the targets, and a third only to remove an allergen
+  // or reach the minimum.
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch("/api/chat", { method: "POST", headers: await chatHeaders(), body: JSON.stringify({ area, responseTokens: 2500, messages }) });
     const reply = await readCoachReply(res);
@@ -8786,6 +8793,11 @@ async function requestMealPlan(area, content, targets, { allergies = [], wakeTim
     // Meal times come from the user's wake-up time, not the model.
     const meals = applyMealTimes(parsed, wakeTime);
     const check = { ...mealPlanTargetCheck(meals, targets), allergyConflicts: mealAllergyConflicts(meals, allergies) };
+    if (minCalories > 0 && check.totals.calories < minCalories) {
+      belowMinimum = check.totals.calories;
+      messages.push({ role: "assistant", content: reply }, { role: "user", content: `Your plan adds up to ${check.totals.calories} kcal, below the minimum of ${minCalories} kcal a day. Increase the portions so the total is at least ${Math.max(minCalories, Number(targets.calories) || 0)} kcal. Return the full plan as JSON only.` });
+      continue;
+    }
     const safe = !check.allergyConflicts.length;
     if (!best || (safe && best.check.allergyConflicts.length) || (safe === !best.check.allergyConflicts.length && check.ok && !best.check.ok)) best = { meals, check };
     if (check.ok && safe) return best;
@@ -8795,9 +8807,13 @@ async function requestMealPlan(area, content, targets, { allergies = [], wakeTim
     if (!check.ok) problems.push(`Your plan adds up to ${check.totals.calories} kcal and ${check.totals.protein} g protein, but the targets are ${targets.calories} kcal and ${targets.protein} g protein (${check.problems.join("; ")}). Adjust the portions so calories are within 5% and protein within 10%.`);
     messages.push({ role: "assistant", content: reply }, { role: "user", content: `${problems.join(" ")} Return the full plan as JSON only.` });
   }
+  if (!best && belowMinimum !== null) throw Object.assign(new Error(`the meal plan added up to ${belowMinimum} kcal, below the minimum of ${minCalories}`), { belowMinimum: true });
   if (!best) throw new Error("the meal plan could not be read");
   return best;
 }
+
+// Shown when the AI only came back with plans below the minimum.
+const belowMinimumText = minCalories => `The AI's plan came out below your minimum of ${minCalories.toLocaleString("en-GB")} kcal a day, so it wasn't used. Please try again.`;
 
 const mealPlanNeedsWarning = check => !check.ok || check.allergyConflicts?.length > 0;
 const mealPlanWarningText = (check, targets) => [
@@ -8805,7 +8821,8 @@ const mealPlanWarningText = (check, targets) => [
   check.ok ? "" : `This plan adds up to ${check.totals.calories.toLocaleString()} kcal and ${check.totals.protein} g protein, which is off your targets of ${Number(targets.calories).toLocaleString()} kcal and ${targets.protein} g. Adjust the portions or ask for a tweak before saving.`,
 ].filter(Boolean).join(" ");
 
-function AiTweaksBox({ meals, setMeals, macros, goal, allergies = [], preferences = "", wakeTime = "" }) {
+// minCalories: the daily minimum; a tweak can never take the plan below it.
+function AiTweaksBox({ meals, setMeals, macros, goal, allergies = [], preferences = "", wakeTime = "", minCalories = 0 }) {
   const [tweakInput, setTweakInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [tweakDone, setTweakDone] = useState(false);
@@ -8816,11 +8833,14 @@ function AiTweaksBox({ meals, setMeals, macros, goal, allergies = [], preference
     setLoading(true);
     setPlanWarning("");
     try {
-      const targets = { calories: macros.calories, protein: macros.protein };
-      const result = await requestMealPlan("meal_plan_tweak", `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan. Goal: ${goal}. Targets: ${macros.calories} kcal and ${macros.protein} g protein.${preferences ? `\nUser preferences:\n${preferences}` : ""}`, targets, { allergies, wakeTime });
+      const targets = { calories: Math.max(macros.calories, minCalories), protein: macros.protein };
+      const result = await requestMealPlan("meal_plan_tweak", `Current meal plan: ${JSON.stringify(meals)}. User wants to change: "${tweakInput}". Apply the changes and return the updated plan. Goal: ${goal}. Targets: ${targets.calories} kcal and ${macros.protein} g protein.${preferences ? `\nUser preferences:\n${preferences}` : ""}`, targets, { allergies, wakeTime, minCalories });
       setMeals(result.meals); setTweakDone(true); setTweakInput("");
       if (mealPlanNeedsWarning(result.check)) setPlanWarning(mealPlanWarningText(result.check, targets));
-    } catch (e) { console.error(e); setPlanWarning("Couldn't update the plan just now. Please try again."); }
+    } catch (e) {
+      console.error(e);
+      setPlanWarning(e?.belowMinimum ? `That change would take your plan below your minimum of ${minCalories.toLocaleString("en-GB")} kcal a day, so it wasn't made. Your plan is unchanged.` : "Couldn't update the plan just now. Please try again.");
+    }
     setLoading(false);
   };
 
@@ -9739,17 +9759,18 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     setRestAiLoading(true);
     setRestPlanNote("");
     const macros = getFinalMacros();
-    const restCals = restDayCalories(macros.calories);
+    const minCalories = calorieFloor(sex);
+    const restCals = Math.max(restDayCalories(macros.calories, minCalories), minCalories);
     const targets = { calories: restCals, protein: macros.protein };
     const preferences = preferencesText(aiNutritionAnswers);
     try {
-      const result = await requestMealPlan("rest_day_plan", `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${planMeals.map(m => m.name).join(", ")}${preferences ? `\nUser preferences:\n${preferences}` : ""}`, targets, { allergies: parseAllergies(aiNutritionAnswers.allergies), wakeTime });
+      const result = await requestMealPlan("rest_day_plan", `Build a ${mealsPerDay} meal REST DAY plan. Targets: ${restCals} kcal (slightly lower than training day ${macros.calories}), ${macros.protein}g protein, fewer carbs. Goal: ${goal}. Base it loosely on similar foods to: ${planMeals.map(m => m.name).join(", ")}${preferences ? `\nUser preferences:\n${preferences}` : ""}`, targets, { allergies: parseAllergies(aiNutritionAnswers.allergies), wakeTime, minCalories });
       setRestDayMeals(result.meals);
       setRestBuildMode("ai");
       if (mealPlanNeedsWarning(result.check)) setRestPlanNote(`Rest day: ${mealPlanWarningText(result.check, targets)}`);
     } catch (error) {
       console.error("Rest day plan error:", error);
-      setRestPlanNote("Couldn't build the rest day plan just now. Please try again.");
+      setRestPlanNote(error?.belowMinimum ? belowMinimumText(minCalories) : "Couldn't build the rest day plan just now. Please try again.");
     }
     setRestAiLoading(false);
   };
@@ -9759,14 +9780,15 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     setAiMealLoading(true);
     setShowAiQuestions(false);
     const macros = getFinalMacros();
+    const minCalories = calorieFloor(sex);
     const slots = mealTimeSlots(wakeTime, mealsPerDay);
     setMealPlanWarning("");
     try {
-      const targets = { calories: macros.calories, protein: macros.protein };
-      const result = await requestMealPlan("meal_plan_build", `Build a ${mealsPerDay} meal daily plan. Goal: ${goal}. Targets: ${macros.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats.${slots.length ? ` The user wakes at ${wakeTime}; use these meal times in order: ${slots.join(", ")}.` : ""}\nUser preferences:\n${preferencesText(answers) || "none given"}`, targets, { allergies: parseAllergies(answers.allergies), wakeTime });
+      const targets = { calories: Math.max(macros.calories, minCalories), protein: macros.protein };
+      const result = await requestMealPlan("meal_plan_build", `Build a ${mealsPerDay} meal daily plan. Goal: ${goal}. Targets: ${targets.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats.${slots.length ? ` The user wakes at ${wakeTime}; use these meal times in order: ${slots.join(", ")}.` : ""}\nUser preferences:\n${preferencesText(answers) || "none given"}`, targets, { allergies: parseAllergies(answers.allergies), wakeTime, minCalories });
       setPlanMeals(result.meals);
       if (mealPlanNeedsWarning(result.check)) setMealPlanWarning(mealPlanWarningText(result.check, targets));
-    } catch (e) { console.error("AI meals error:", e); setMealPlanWarning("Couldn't build your meal plan just now. Please try again."); }
+    } catch (e) { console.error("AI meals error:", e); setMealPlanWarning(e?.belowMinimum ? belowMinimumText(minCalories) : "Couldn't build your meal plan just now. Please try again."); }
     setAiMealLoading(false);
   };
 
@@ -10018,7 +10040,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     const reviewConflicts = mealAllergyConflicts([...preparedPlanMeals, ...preparedRestDayMeals], allergyList);
     const reviewTargets = { calories: getFinalMacros().calories, protein: getFinalMacros().protein };
     const reviewPlanGap = mealPlanGapText(mealPlanTargetCheck(preparedPlanMeals, reviewTargets), reviewTargets);
-    const reviewRestTargets = { calories: restDayCalories(reviewTargets.calories), protein: reviewTargets.protein };
+    const reviewRestTargets = { calories: restDayCalories(reviewTargets.calories, calorieFloor(sex)), protein: reviewTargets.protein };
     const reviewRestGap = preparedRestDayMeals.length ? mealPlanGapText(mealPlanTargetCheck(preparedRestDayMeals, reviewRestTargets), reviewRestTargets) : "";
     const age = ageFromDateOfBirth(dateOfBirth, today);
     const stats = { weight: bodyWeight, height, age, sex, activityLevel, goal };
@@ -10056,7 +10078,29 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     const currentMealTimes = currentMeals.map(meal => String(meal?.time || "")).filter(time => /^\d{1,2}:\d{2}$/.test(time)).map(time => time.padStart(5, "0")).sort();
     // Rest days with their own meals aim for the lighter rest day target.
     const finalMacros = getFinalMacros();
-    const restTarget = { calories: restDayCalories(finalMacros.calories), protein: finalMacros.protein };
+    const minCalories = calorieFloor(sex);
+    const restTarget = { calories: restDayCalories(finalMacros.calories, minCalories), protein: finalMacros.protein };
+    // Calorie safety: no target or day of meals below the daily minimum (Save
+    // is blocked), and a warning for losing more than 1% of body weight a
+    // week. Custom targets estimate maintenance from the profile when they can.
+    const customCaloriesProblem = calorieTargetProblem(customCalories, sex);
+    const targetMinimumProblem = calorieTargetProblem(finalMacros.calories, sex);
+    const mealMinimumProblems = targetMinimumProblem ? [] : [
+      mealPlanFloorProblem(preparedPlanMeals, sex, preparedRestDayMeals.length ? "Your training day meals" : "Your meals"),
+      mealPlanFloorProblem(preparedRestDayMeals, sex, "Your rest day meals"),
+    ].filter(Boolean);
+    const currentWeight = bodyWeight || latestWeight;
+    const maintenance = calculatedMacros?.tdee || calculateNutritionTargets({ ...stats, weight: currentWeight })?.tdee || null;
+    const lossWarningFor = calories => weeklyLossWarning({ calories, maintenance, weight: currentWeight, estimated: !calculatedMacros?.tdee });
+    const minimumAlert = (problem, testId) => (
+      <div role="alert" data-testid={testId} style={{ border: "1px solid rgba(255,77,109,.45)", background: "rgba(255,77,109,.07)", borderRadius: 6, padding: 12, margin: "0 0 12px", fontSize: 11, color: "#FFD0D8", lineHeight: 1.55 }}>
+        {problem}
+        <div style={{ color: "#8AABB8", fontSize: 10, marginTop: 6 }}>{EATING_SUPPORT_TEXT}</div>
+      </div>
+    );
+    const lossAlert = (warning, testId) => (
+      <div role="alert" data-testid={testId} style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 12, margin: "0 0 12px", fontSize: 11, color: "#FFD08A", lineHeight: 1.55 }}>{warning}</div>
+    );
     const changeWakeTime = value => {
       setWakeTime(value);
       setPlanMeals(meals => applyMealTimes(meals, value));
@@ -10194,7 +10238,16 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>HOW MANY MEALS PER DAY?</div>
                 <div style={{ display: "flex", gap: 8 }}>{[3,4,5,6].map(number => <button key={number} className="t3d-btn" style={{ flex: 1, padding: 10, background: mealsPerDay === number ? "rgba(0,255,178,.12)" : "transparent" }} onClick={() => setMealsPerDay(number)}>{number}</button>)}</div>
               </div>
-              <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!customCalories || !customProtein} onClick={() => {
+              {!fromProfile.sex && <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 8 }}>SEX <span style={{ color: "#8AABB8" }}>· sets your minimum daily calories</span></div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {SEX_OPTIONS.map(option => (
+                    <button key={option} type="button" className="t3d-btn t3d-btn-sm" style={{ flex: 1, fontSize: 9, whiteSpace: "normal", ...optionStyle(sex === option) }} onClick={() => setSex(option)}>{option.toUpperCase()}</button>
+                  ))}
+                </div>
+              </div>}
+              {customCaloriesProblem ? minimumAlert(customCaloriesProblem, "calorie-minimum") : lossWarningFor(customCalories) && lossAlert(lossWarningFor(customCalories), "weekly-loss-warning")}
+              <button className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!customCalories || !customProtein || Boolean(customCaloriesProblem)} onClick={() => {
                 setCalculatedMacros({ calories: parseInt(customCalories) || 0, protein: parseInt(customProtein) || 0, carbs: parseInt(customCarbs) || 0, fats: parseInt(customFats) || 0, tdee: null });
                 setSetupStep(1);
               }}>USE THESE TARGETS →</button>
@@ -10209,7 +10262,14 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: NEON, letterSpacing: 2 }}>{setupMode === "custom" ? "YOUR TARGETS" : "RECOMMENDED TARGETS"}</div>
-                  {setupMode !== "custom" && <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.6 }} onClick={() => setUseCustomTargets(v => !v)}>
+                  {setupMode !== "custom" && <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, opacity: 0.6 }} onClick={() => {
+                    // Customising starts from the recommended targets.
+                    if (!useCustomTargets && !customCalories) {
+                      setCustomCalories(String(calculatedMacros.calories)); setCustomProtein(String(calculatedMacros.protein));
+                      setCustomCarbs(String(calculatedMacros.carbs)); setCustomFats(String(calculatedMacros.fats));
+                    }
+                    setUseCustomTargets(v => !v);
+                  }}>
                     {useCustomTargets ? "USE RECOMMENDED" : "CUSTOMISE"}
                   </button>}
                 </div>
@@ -10233,6 +10293,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 {setupMode === "guided" && calculatedMacros.tdee && <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 8, lineHeight: 1.5 }}>Based on {bodyWeight} kg, {height} cm, age {age}, {sexText} · {goal} · {activityLevel}. Maintenance ≈ {calculatedMacros.tdee.toLocaleString()} kcal{calculatedMacros.adjustment ? `, ${calculatedMacros.adjustment > 0 ? "+" : "−"}${Math.abs(calculatedMacros.adjustment)} kcal for your goal` : ""}. A starting point: adjust after 2–3 weeks of weigh-ins.</div>}
                 {setupMode === "guided" && profileSaveNote && <div role="alert" style={{ fontSize: 9, color: "#FFB547", marginTop: 6 }}>{profileSaveNote}</div>}
               </div>
+              {targetMinimumProblem ? minimumAlert(targetMinimumProblem, "calorie-minimum") : lossWarningFor(finalMacros.calories) && lossAlert(lossWarningFor(finalMacros.calories), "weekly-loss-warning")}
 
               <div style={{ marginBottom: 16 }}>
                 <div className="t3d-ctitle">HOW MUCH STRUCTURE DO YOU WANT?</div>
@@ -10259,7 +10320,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(0)}>← BACK</button>
-                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => setSetupStep(2)}>NEXT: BUILD MEALS →</button>
+                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={Boolean(targetMinimumProblem)} onClick={() => setSetupStep(2)}>NEXT: BUILD MEALS →</button>
               </div>
             </div>
           )}
@@ -10397,6 +10458,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                       allergies={allergyList}
                       preferences={preferencesText(aiNutritionAnswers)}
                       wakeTime={wakeTime}
+                      minCalories={minCalories}
                     />
                   )}
 
@@ -10452,6 +10514,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                             <span style={{ color: Math.abs(v-t)/t<0.1?NEON:"#FF8C00" }}>{v} / {t}{u}</span>
                           </div>
                         ))}
+                        {!targetMinimumProblem && mealPlanFloorProblem(editingRestDay ? preparedRestDayMeals : preparedPlanMeals, sex) && (
+                          <div data-testid="meals-below-minimum" style={{ fontSize: 10, color: "#FF8FA3", marginTop: 6, lineHeight: 1.5 }}>{mealPlanFloorProblem(editingRestDay ? preparedRestDayMeals : preparedPlanMeals, sex, editingRestDay ? "Your rest day meals" : "Your meals")} You can&apos;t save the plan until they do.</div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -10548,6 +10613,12 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                   </label>
                 </div>
               )}
+              {(targetMinimumProblem || mealMinimumProblems.length > 0) && (
+                <div style={{ marginTop: 12 }}>
+                  {minimumAlert(<><strong style={{ color: "#FF4D6D" }}>Raise this before saving.</strong> {[targetMinimumProblem, ...mealMinimumProblems].filter(Boolean).join(" ")}</>, "review-calorie-minimum")}
+                </div>
+              )}
+              {!targetMinimumProblem && lossWarningFor(finalMacros.calories) && <div style={{ marginTop: 12 }}>{lossAlert(lossWarningFor(finalMacros.calories), "review-weekly-loss")}</div>}
               {planSaveError && (
                 <div style={{ fontSize: 11, color: NEON3, marginTop: 12, textAlign: "center" }}>
                   Couldn&apos;t save your plan: {planSaveError}. Please try again.
@@ -10557,7 +10628,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 {reviewReturn
                   ? <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={leaveSetup}>CLOSE</button>
                   : <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setSetupStep(2)}>← BACK</button>}
-                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan || !preparedPlanMeals.length || (reviewConflicts.length > 0 && !allergyCheckConfirmed)} onClick={async () => {
+                <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan || !preparedPlanMeals.length || (reviewConflicts.length > 0 && !allergyCheckConfirmed) || Boolean(targetMinimumProblem) || mealMinimumProblems.length > 0} onClick={async () => {
                   setSavingPlan(true);
                   setPlanSaveError(false);
                   const realMacros = getFinalMacros();
@@ -10656,6 +10727,12 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   const showTargetSuggestion = Boolean(targetSuggestion) && dismissedTargetSuggestion !== targetSuggestionKey && plan?.setup?.targetSuggestionDismissed !== targetSuggestionKey;
   // The week's average target: rest days count with their own target.
   const avgTarget = weekLogs.length ? Math.round(weekLogs.reduce((total, log) => total + dayTargets(plan, log.is_training_day !== false).calories, 0) / weekLogs.length) : trainingTargets.calories;
+  // A plan saved before the daily minimum existed can be below it.
+  const planSex = plan?.setup?.sex || sexLabel(profile?.sex);
+  const planMinimumProblem = plan ? calorieTargetProblem(plan.daily_calories, planSex)
+    || mealPlanFloorProblem(plan.meals, planSex, restPlan ? "Your training day meals" : "Your planned meals")
+    || (restPlan ? mealPlanFloorProblem(plan.rest_day_meals, planSex, "Your rest day meals") : "") : "";
+  const planLossWarning = plan ? weeklyLossWarning({ calories: plan.daily_calories, maintenance: plan.setup?.tdee, weight: plan.setup?.weight || latestWeight }) : "";
 
   return (
     <div className="t3d-fade">
@@ -10679,6 +10756,14 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
         </div>
       ) : (
         <>
+          {planMinimumProblem && (
+            <div className="t3d-card" role="alert" data-testid="plan-below-minimum" style={{ marginBottom: 16, borderColor: "rgba(255,77,109,.5)", background: "rgba(255,77,109,.05)" }}>
+              <div className="t3d-ctitle" style={{ color: "#FF4D6D" }}>YOUR PLAN IS BELOW THE MINIMUM</div>
+              <div style={{ fontSize: 11, color: "#FFD0D8", lineHeight: 1.6, marginBottom: 8 }}>{planMinimumProblem}</div>
+              <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>{EATING_SUPPORT_TEXT}</div>
+              <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup()}>EDIT PLAN →</button>
+            </div>
+          )}
           {/* Today: log meals as they happen, then the day review */}
           <div className="t3d-card" data-testid="nutrition-today" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
@@ -10765,6 +10850,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup()}>EDIT PLAN</button>
             </div>
             <div data-testid="plan-style" style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{planStyleText}</div>
+            {!planMinimumProblem && planLossWarning && <div role="status" data-testid="plan-weekly-loss" style={{ color: "#FFD08A", fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{planLossWarning}</div>}
             {[
               { key: "training", label: "TRAINING DAYS", meals: plan.meals || [], targets: trainingTargets, gap: trainingGap, rest: false },
               { key: "rest", label: "REST DAYS", meals: restPlan ? plan.rest_day_meals : [], targets: restTargets, gap: restGap, rest: true },
@@ -10819,6 +10905,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 <div style={{ flex: 1 }}><div style={{ color: isFlexibleMeal(meal) ? NEON2 : "#E0EAF0", fontSize: 11 }}>Meal {index + 1} · {meal.name}</div><div style={{ color: "#6F8792", fontSize: 8 }}>{meal.calories || 0} kcal · {meal.protein || 0}g protein</div></div>
                 <button aria-label={`Remove ${meal.name} from ${plannerDate}`} className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => updateDatedMealPlan(plannerDate, plannerMeals.filter((_, mealIndex) => mealIndex !== index))}>×</button>
               </div>)}
+              {mealPlanFloorProblem(plannerMeals, planSex) && <div role="status" data-testid="planner-below-minimum" style={{ color: "#FF8FA3", fontSize: 9, lineHeight: 1.5, marginTop: 8 }}>{mealPlanFloorProblem(plannerMeals, planSex, "This day's meals")}</div>}
             </div>
             {nutritionPlanningStatus && <div role="status" style={{ color: nutritionPlanningStatus === "SAVED" ? NEON : nutritionPlanningStatus.startsWith("COULD") ? NEON3 : "#8AABB8", fontSize: 8, marginTop: 8 }}>{nutritionPlanningStatus}</div>}
           </div>}
@@ -11519,6 +11606,224 @@ function HabitsPage({ habits, setHabits }) {
   );
 }
 
+// ─── Account (Profile → Account) ─────────────────────────────────────────────
+// Health data consent (with withdrawal), Download my data (a ZIP with one
+// JSON file per table and the progress photos, once a day) and Delete my
+// account (password, then type DELETE). Photos are removed through storage
+// first, then delete_my_account() removes every row and the sign-in account.
+const PHOTO_BUCKET = "checkin-photos";
+const needsDatabaseUpdate = error => /function|schema cache|PGRST202|does not exist/i.test(`${error?.message || ""} ${error?.code || ""}`);
+const formatConsentDate = (iso, timeZone) => new Date(iso).toLocaleDateString("en-GB", { ...(timeZone ? { timeZone } : {}), day: "numeric", month: "long", year: "numeric" });
+
+function AccountSection({ user, consent = null, timeZone, onWithdrawConsent = null, onDeleted }) {
+  const [downloading, setDownloading] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState("");
+  // An export fetched but not saved as a ZIP can be tried again without
+  // using up the day's download.
+  const unsavedExportRef = useRef(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [confirmText, setConfirmText] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteStatus, setDeleteStatus] = useState("");
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawError, setWithdrawError] = useState("");
+
+  const downloadData = async () => {
+    if (downloading || !user) return;
+    setDownloading(true);
+    setDownloadStatus("Preparing your download...");
+    try {
+      let data = unsavedExportRef.current;
+      if (!data) {
+        const result = await supabase.rpc("export_my_data");
+        if (result.error) {
+          console.error("Export error:", result.error.message);
+          setDownloadStatus(needsDatabaseUpdate(result.error) ? "Downloading your data needs a database update first." : `Couldn't prepare your download (${result.error.message}). Please try again.`);
+          return;
+        }
+        if (result.data?.error === "export_limit") { setDownloadStatus(exportLimitText(result.data.available_at, timeZone)); return; }
+        if (result.data?.error || !result.data?.tables) { setDownloadStatus("Please sign in again, then try again."); return; }
+        data = result.data;
+        unsavedExportRef.current = data;
+      }
+      const bucket = supabase.storage.from(PHOTO_BUCKET);
+      const photos = [];
+      const missingPhotos = [];
+      let paths = [];
+      try { paths = await listUserFiles(bucket, user.id); } catch (error) { missingPhotos.push({ path: `${user.id}/`, error: `the list of photos couldn't be read (${error.message})` }); }
+      for (const [index, path] of paths.entries()) {
+        setDownloadStatus(`Adding your photos (${index + 1} of ${paths.length})...`);
+        const { data: blob, error } = await bucket.download(path);
+        if (error || !blob) missingPhotos.push({ path, error: error?.message || "not found" });
+        else photos.push({ path, data: new Uint8Array(await blob.arrayBuffer()) });
+      }
+      const fileName = exportFileName();
+      const zip = createZip(exportFiles({ data, photos, missingPhotos, userId: user.id }));
+      const url = URL.createObjectURL(new Blob([zip], { type: "application/zip" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      unsavedExportRef.current = null;
+      const tableCount = Object.keys(data.tables).length;
+      setDownloadStatus(`Downloaded ${fileName}: ${tableCount} table${tableCount === 1 ? "" : "s"} and ${photos.length} photo${photos.length === 1 ? "" : "s"}.${missingPhotos.length ? ` ${missingPhotos.length} photo${missingPhotos.length === 1 ? "" : "s"} couldn't be added (listed in the download).` : ""}`);
+    } catch (error) {
+      console.error("Export error:", error);
+      setDownloadStatus(`Couldn't prepare your download (${error?.message || "connection problem"}). Please try again.`);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const deleteAccount = async () => {
+    if (deleting || !user || !password || confirmText !== "DELETE") return;
+    setDeleting(true);
+    const fail = text => { setDeleteStatus(text); setDeleting(false); };
+    try {
+      // The password is checked before anything is deleted.
+      setDeleteStatus("Checking your password...");
+      const check = await supabase.rpc("delete_my_account", { p_password: password, p_check_only: true });
+      if (check.error || check.data !== "ok") {
+        if (check.error) console.error("Delete account error:", check.error.message);
+        return fail(deleteAccountProblem(check.data, check.error) || "Couldn't check your password. Nothing has been deleted.");
+      }
+      setDeleteStatus("Deleting your progress photos...");
+      const bucket = supabase.storage.from(PHOTO_BUCKET);
+      try {
+        await removeFiles(bucket, await listUserFiles(bucket, user.id));
+      } catch (error) {
+        return fail(`Couldn't delete all your progress photos (${error.message}). Your account and the rest of your data haven't been deleted. Please try again.`);
+      }
+      setDeleteStatus("Deleting your account and data...");
+      const result = await supabase.rpc("delete_my_account", { p_password: password, p_check_only: false });
+      if (result.error || result.data !== "deleted") {
+        if (result.error) console.error("Delete account error:", result.error.message);
+        return fail(deleteAccountProblem(result.data, result.error) || "Couldn't delete your account. Please try again.");
+      }
+      setDeleteStatus("Deleted. Signing you out...");
+      await onDeleted();
+    } catch (error) {
+      fail(`Couldn't delete your account (${error?.message || "connection problem"}). Please try again.`);
+    }
+  };
+
+  const withdraw = async () => {
+    if (withdrawing || !onWithdrawConsent) return;
+    setWithdrawing(true);
+    setWithdrawError("");
+    const error = await onWithdrawConsent();
+    setWithdrawing(false);
+    if (error) setWithdrawError(error);
+    else setWithdrawOpen(false);
+  };
+
+  const sectionTitle = { fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 };
+  const note = { fontSize: 10, color: "#8AABB8", lineHeight: 1.55, marginBottom: 8 };
+  return (
+    <div data-testid="account-section" style={{ borderTop: `1px solid ${BORDER}`, marginTop: 14, paddingTop: 14 }}>
+      <div className="t3d-ctitle" style={{ marginBottom: 4 }}>ACCOUNT</div>
+      {user?.email && <div style={note}>Signed in as {user.email}</div>}
+
+      {consent?.given && onWithdrawConsent && (
+        <div data-testid="account-consent" style={{ marginBottom: 14 }}>
+          <div style={sectionTitle}>HEALTH DATA CONSENT</div>
+          <div style={note}>You agreed on {formatConsentDate(consent.at, timeZone)} to TRACK3D storing your health information (weight, body photos, food, training) to coach you. Privacy notice version {consent.version}.</div>
+          {!withdrawOpen ? (
+            <button type="button" className="t3d-btn t3d-btn-sm" onClick={() => setWithdrawOpen(true)}>WITHDRAW CONSENT</button>
+          ) : (
+            <div role="group" aria-label="Withdraw consent" style={{ padding: 10, border: "1px solid rgba(255,181,71,.4)", borderRadius: 6 }}>
+              <div style={{ ...note, color: "#FFD08A" }}>TRACK3D will stop using your health information, and you&apos;ll need to agree again before you can use the app. To erase what&apos;s already stored, delete your account below.</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: "#FFB547", color: "#FFB547" }} disabled={withdrawing} onClick={withdraw}>{withdrawing ? "WITHDRAWING..." : "WITHDRAW MY CONSENT"}</button>
+                <button type="button" className="t3d-btn t3d-btn-sm" disabled={withdrawing} onClick={() => { setWithdrawOpen(false); setWithdrawError(""); }}>CANCEL</button>
+              </div>
+              {withdrawError && <div role="alert" style={{ fontSize: 10, color: NEON3, marginTop: 8 }}>{withdrawError}</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={sectionTitle}>DOWNLOAD MY DATA</div>
+        <div style={note}>A ZIP file with everything stored for your account: one JSON file per table (morning check-ins, workouts, nutrition, habits, your profile and the rest) and your progress photos. You can download it once a day.</div>
+        <button type="button" className="t3d-btn t3d-btn-sm" data-testid="download-my-data" disabled={downloading} onClick={downloadData}>{downloading ? "PREPARING..." : "DOWNLOAD MY DATA"}</button>
+        {downloadStatus && <div role="status" data-testid="download-status" style={{ fontSize: 10, color: "#C5D6DC", lineHeight: 1.5, marginTop: 8 }}>{downloadStatus}</div>}
+      </div>
+
+      <div>
+        <div style={sectionTitle}>DELETE MY ACCOUNT</div>
+        <div style={note}>Permanently deletes your account and everything in it: check-ins, workouts, nutrition, habits, coach history, your profile and your progress photos. This can&apos;t be undone. Copies in our hosting provider&apos;s backups are deleted automatically within 30 days.</div>
+        {!deleteOpen ? (
+          <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setDeleteOpen(true); setDeleteStatus(""); }}>DELETE MY ACCOUNT</button>
+        ) : (
+          <form data-testid="delete-account-form" onSubmit={event => { event.preventDefault(); deleteAccount(); }} style={{ padding: 10, border: `1px solid ${NEON3}`, borderRadius: 6 }}>
+            <label style={{ display: "block", fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>YOUR PASSWORD
+              <input className="t3d-input" type="password" autoComplete="current-password" aria-label="Your password" value={password} onChange={event => setPassword(event.target.value)} style={{ marginTop: 5 }} />
+            </label>
+            <label style={{ display: "block", fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>TYPE DELETE TO CONFIRM
+              <input className="t3d-input" autoComplete="off" autoCapitalize="characters" spellCheck={false} aria-label="Type DELETE to confirm" placeholder="DELETE" value={confirmText} onChange={event => setConfirmText(event.target.value)} style={{ marginTop: 5 }} />
+            </label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="submit" className="t3d-btn t3d-btn-sm t3d-btn-red" disabled={deleting || !password || confirmText !== "DELETE"}>{deleting ? "DELETING..." : "DELETE MY ACCOUNT FOREVER"}</button>
+              <button type="button" className="t3d-btn t3d-btn-sm" disabled={deleting} onClick={() => { setDeleteOpen(false); setPassword(""); setConfirmText(""); setDeleteStatus(""); }}>CANCEL</button>
+            </div>
+            {deleteStatus && <div role="status" data-testid="delete-status" style={{ fontSize: 10, color: deleting ? "#C5D6DC" : NEON3, lineHeight: 1.5, marginTop: 8 }}>{deleteStatus}</div>}
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Shown instead of the app until the user has agreed to TRACK3D storing
+// their health information: existing users once, at their next visit, and
+// anyone who withdrew consent or when the wording changes.
+function HealthConsentGate({ user, consent, timeZone, onAgree, onSignOut, onDeleted }) {
+  const [ticked, setTicked] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const agree = async () => {
+    if (!ticked || saving) return;
+    setSaving(true);
+    setError("");
+    const problem = await onAgree();
+    if (problem) { setError(problem); setSaving(false); }
+  };
+  const intro = consent?.reason === "withdrawn"
+    ? `You withdrew your consent${consent.withdrawnAt ? ` on ${formatConsentDate(consent.withdrawnAt, timeZone)}` : ""}, so TRACK3D isn't using your health information. To use the app again, agree below.`
+    : consent?.reason === "new_version"
+      ? "We've updated how we look after your health information. Please read the Privacy Notice and agree again to keep using TRACK3D."
+      : "Before you carry on, we need your permission for something.";
+  return (
+    <>
+      <style>{css}</style>
+      <div className="t3d" style={{ display: "block" }}>
+        <main style={{ maxWidth: 560, margin: "0 auto", padding: "32px 16px" }}>
+          <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="consent-title" data-testid="consent-gate">
+            <div id="consent-title" className="t3d-ctitle" style={{ marginBottom: 8 }}>YOUR HEALTH INFORMATION</div>
+            <p style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6, margin: "0 0 10px" }}>{intro}</p>
+            <p style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6, margin: "0 0 10px" }}>TRACK3D stores health information about you, including your weight, body photos, food and training, so it can coach you. UK data protection law treats this as special category data, so we only store it with your explicit consent. You can withdraw your consent at any time in Profile → Account. The <a href="/privacy#health-data" target="_blank" rel="noreferrer" style={{ color: NEON }}>Privacy Notice</a> explains how it&apos;s used and protected.</p>
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 12, color: "#E0EAF0", lineHeight: 1.5, padding: 12, border: `1px solid ${BORDER}`, borderRadius: 6, margin: "14px 0", cursor: "pointer" }}>
+              <input type="checkbox" data-testid="health-consent-checkbox" checked={ticked} onChange={event => setTicked(event.target.checked)} style={{ marginTop: 3, width: 18, height: 18, flexShrink: 0 }} />
+              <span>{HEALTH_CONSENT_TEXT}</span>
+            </label>
+            {error && <div role="alert" style={{ fontSize: 11, color: NEON3, marginBottom: 10 }}>{error}</div>}
+            <button type="button" className="t3d-btn" style={{ width: "100%", padding: 14 }} disabled={!ticked || saving} onClick={agree}>{saving ? "SAVING..." : "AGREE AND CONTINUE"}</button>
+            <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 16 }}>Don&apos;t want to agree? You can&apos;t use TRACK3D without it, but you can sign out, download your data or delete your account.</div>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={onSignOut}>SIGN OUT</button>
+            <AccountSection user={user} consent={consent} timeZone={timeZone} onDeleted={onDeleted} />
+          </div>
+        </main>
+      </div>
+    </>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null);
@@ -11537,6 +11842,13 @@ export default function App() {
   // and the header PROFILE button both edit it.
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  // Health data consent (healthConsentStatus): null until the profile has
+  // loaded. Without it the consent screen is shown instead of the app.
+  const [consent, setConsent] = useState(null);
+  const consentGiven = Boolean(consent?.given);
+  // Set once the account is deleted, so signing out leaves the redirect to
+  // accountDeleted(), which says the account was deleted.
+  const accountDeletedRef = useRef(false);
   // A short confirmation under the header ("Profile saved ✓").
   const [notice, setNotice] = useState("");
   useEffect(() => {
@@ -11554,7 +11866,8 @@ export default function App() {
   // Load habit definitions + today's ticks from Supabase. localStorage is
   // kept only as an offline fallback if that read fails.
   useEffect(() => {
-    if (!user) return;
+    // Nothing is loaded until the user has agreed to health data storage.
+    if (!user || !consentGiven) return;
     let cancelled = false;
     setHabitsReady(false);
     (async () => {
@@ -11589,7 +11902,7 @@ export default function App() {
       setHabitsReady(true);
     })();
     return () => { cancelled = true; };
-  }, [user?.id, todayKey]);
+  }, [user?.id, todayKey, consentGiven]);
 
   const deleteHabitRow = id => supabase.from("habits").delete().eq("user_id", user.id).eq("id", id)
     .then(result => { if (!result.error) pendingHabitDeletesRef.current.delete(id); return result; });
@@ -11659,10 +11972,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !consentGiven) return;
     readWorkoutSplit(user.id)
       .then(({ data }) => { if (data?.sessions) setFitnessSessions(data.sessions); });
-  }, [user]);
+  }, [user, consentGiven]);
 
   useEffect(() => {
     let cancelled = false;
@@ -11706,7 +12019,8 @@ export default function App() {
       // Defer work out of Supabase's auth callback/lock.
       if (event === "SIGNED_OUT") {
         clearLoginWindow();
-        window.location.replace("/login");
+        // After Delete my account, accountDeleted() goes to the sign-in page itself.
+        if (!accountDeletedRef.current) window.location.replace("/login");
       } else if (session) {
         setTimeout(() => accept(session), 0);
       }
@@ -11751,20 +12065,67 @@ export default function App() {
     };
   }, [user?.id]);
   useEffect(() => {
-    if (!user?.id) { setProfile(null); return; }
+    if (!user?.id) { setProfile(null); setConsent(null); return; }
     let cancelled = false;
     Promise.all([
       readUserProfile(user.id),
       readCoachProfile(user.id),
-    ]).then(([row, coach]) => { if (!cancelled) setProfile({ ...normaliseProfile(row.data, coach.data?.experience_level), personality: coach.data?.personality || "balanced" }); });
+    ]).then(([row, coach]) => {
+      if (cancelled) return;
+      setProfile({ ...normaliseProfile(row.data, coach.data?.experience_level), personality: coach.data?.personality || "balanced" });
+      const status = healthConsentStatus({ profileRow: row.data, metadata: user.user_metadata });
+      setConsent(status);
+      // Consent ticked at sign-up (or given while the profile couldn't be
+      // written) is copied to the profile, keeping when it was given.
+      if (status.given && !status.onProfile && !row.error) {
+        supabase.from("user_profiles").upsert({ user_id: user.id, health_consent_at: status.at, health_consent_version: status.version, health_consent_withdrawn_at: null, updated_at: new Date().toISOString() }, { onConflict: "user_id" })
+          .then(({ error }) => { if (error) console.log("Consent copy error:", error.message); });
+      }
+    }).catch(error => {
+      // Without the profile, consent given at sign-up still counts.
+      console.log("Profile load error:", error?.message || error);
+      if (!cancelled) setConsent(healthConsentStatus({ metadata: user.user_metadata }));
+    });
     return () => { cancelled = true; };
-  }, [user?.id]);
+    // The user object only changes when a different user signs in.
+  }, [user]);
 
-  if (authLoading) return (
+  // Consent given (true) or withdrawn (false): recorded on the profile by
+  // the database, and on the sign-in account. Returns an error message, or
+  // "" when it was recorded.
+  const recordConsent = async given => {
+    const { data: stamp, error } = await supabase.rpc("set_health_consent", { p_version: HEALTH_CONSENT_VERSION, p_given: given });
+    if (error) console.log("Consent save error:", error.message);
+    const at = (!error && stamp) || new Date().toISOString();
+    const { error: accountError } = await supabase.auth.updateUser({ data: given
+      ? { health_consent_at: at, health_consent_version: HEALTH_CONSENT_VERSION, health_consent_withdrawn_at: null }
+      : { health_consent_withdrawn_at: at } });
+    if (accountError) console.log("Consent account save error:", accountError.message);
+    if (error && accountError) return `Couldn't save your choice (${accountError.message || error.message}). Please try again.`;
+    setConsent(given
+      ? { given: true, reason: "given", at, version: HEALTH_CONSENT_VERSION, withdrawnAt: null, onProfile: !error }
+      : { given: false, reason: "withdrawn", at: consent?.at || null, version: consent?.version || null, withdrawnAt: at, onProfile: false });
+    if (!given) setProfileOpen(false);
+    return "";
+  };
+
+  const signOut = async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); };
+
+  // After Delete my account: nothing of the account is left in this browser.
+  const accountDeleted = async () => {
+    accountDeletedRef.current = true;
+    clearLoginWindow();
+    try { await supabase.auth.signOut({ scope: "local" }); } catch { /* the stored session is removed below */ }
+    clearLocalAppData();
+    window.location.replace("/login?deleted=1");
+  };
+
+  if (authLoading || !user || !consent) return (
     <div style={{ minHeight: "100vh", background: "#080C10", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Orbitron',monospace", color: "#00FFB2", letterSpacing: 4, fontSize: 12 }}>
       {authError || "LOADING..."}
     </div>
   );
+  if (!consent.given) return <HealthConsentGate user={user} consent={consent} timeZone={homeTimeZone} onAgree={() => recordConsent(true)} onSignOut={signOut} onDeleted={accountDeleted} />;
 
   const nav = [
     { id: "dashboard", icon: "◈", label: "DASHBOARD" },
@@ -11810,8 +12171,7 @@ export default function App() {
               <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, color: "#8AABB8", borderColor: BORDER, background: "transparent" }} onClick={() => setProfileOpen(true)}>
                 PROFILE
               </button>
-              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, color: "#8AABB8", borderColor: BORDER, background: "transparent" }}
-                onClick={async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); }}>
+              <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, color: "#8AABB8", borderColor: BORDER, background: "transparent" }} onClick={signOut}>
                 SIGN OUT
               </button>
             </div>
@@ -11851,6 +12211,7 @@ export default function App() {
               {profile ? (
                 <ProfileForm user={user} profile={profile} today={todayKey} onCancel={() => setProfileOpen(false)} onSaved={saved => { profileSaved(saved); setProfileOpen(false); }} />
               ) : <div style={{ fontSize: 11, color: "#8AABB8", padding: "10px 0" }}>Loading your profile...</div>}
+              <AccountSection user={user} consent={consent} timeZone={homeTimeZone} onWithdrawConsent={() => recordConsent(false)} onDeleted={accountDeleted} />
             </div>
           </div>
         )}

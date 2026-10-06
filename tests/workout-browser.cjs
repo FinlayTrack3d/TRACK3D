@@ -28,6 +28,8 @@ const assert = require('node:assert/strict');
       saved = request.postDataJSON();
       return route.fulfill({ status: 201, json: saved });
     }
+    // The user has agreed to health data storage (on their profile).
+    if (table === 'user_profiles') return route.fulfill({ json: [{ user_id: user.id, health_consent_at: '2026-10-06T08:00:00.000Z', health_consent_version: '2026-10-06' }] });
     if (table === 'workout_splits') return route.fulfill({ json: { id: 'test-split', sessions: [session] } });
     if (table === 'workout_logs') return route.fulfill({ json: url.searchParams.has('id') ? null : [prior] });
     return route.fulfill({ json: request.headers().accept?.includes('vnd.pgrst.object') ? null : [] });

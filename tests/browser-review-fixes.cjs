@@ -82,6 +82,8 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     const orFilter = url.searchParams.get('or');
     const earlierDay = orFilter && /in_progress\.eq\.false,date\.lt\.(\d{4}-\d{2}-\d{2})/.exec(orFilter);
     if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
+    // Everyone here has already agreed to health data storage (on their profile).
+    if (table === 'user_profiles' && req.method() === 'GET') rows = (rows.length ? rows : [{ user_id: '11111111-1111-4111-8111-111111111111' }]).map(row => ({ health_consent_at: '2026-10-06T08:00:00.000Z', health_consent_version: '2026-10-06', ...row }));
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();

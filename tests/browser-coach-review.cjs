@@ -32,6 +32,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         if (url.hostname === 'localhost') return url.pathname.startsWith('/api/') ? route.fulfill({ json: { content: [{ text: 'OK.' }] } }) : route.continue();
         if (url.pathname.includes('/auth/v1/')) return route.fulfill({ json: loginUser });
         if (!url.pathname.includes('/rest/v1/')) return route.fulfill({ json: [] });
+        if (url.pathname.endsWith('/user_profiles')) return route.fulfill({ json: [{ user_id: loginUser.id, health_consent_at: '2026-10-06T08:00:00.000Z', health_consent_version: '2026-10-06' }] });
         return route.fulfill({ json: req.headers().accept?.includes('vnd.pgrst.object') ? null : [] });
       });
       return ctx;
@@ -304,6 +305,8 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     const orFilter = url.searchParams.get('or');
     const earlierDay = orFilter && /in_progress\.eq\.false,date\.lt\.(\d{4}-\d{2}-\d{2})/.exec(orFilter);
     if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
+    // Everyone here has already agreed to health data storage (on their profile).
+    if (table === 'user_profiles' && req.method() === 'GET') rows = (rows.length ? rows : [{ user_id: '11111111-1111-4111-8111-111111111111' }]).map(row => ({ health_consent_at: '2026-10-06T08:00:00.000Z', health_consent_version: '2026-10-06', ...row }));
     reads.push({ table, single, count: rows.length });
     // Like PostgREST: single() with no row (or several) is a 406.
     if (single && rows.length !== 1) return route.fulfill({ status: 406, json: { code: 'PGRST116', message: 'JSON object requested, multiple (or no) rows returned' } });
@@ -779,6 +782,13 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       if (process.env.SHOT) await page.screenshot({ path: 'rest-list.png', fullPage: true });
       await page.getByRole('button', { name: 'Remove Dinner' }).click();
       assert.equal(await page.getByRole('button', { name: /^Remove / }).count(), 2);
+      // 1,300 kcal is below the 1,350 kcal daily minimum (sex not given), so it has to be raised.
+      await page.getByTestId('meals-below-minimum').getByText(/Your rest day meals add up to 1,300 kcal, below the minimum of 1,350 kcal a day when sex isn't given/).waitFor();
+      await page.getByRole('button', { name: '+ ADD MEAL' }).click();
+      await page.getByPlaceholder('e.g. Chicken & Rice').fill('Fruit & Yoghurt');
+      await page.locator('input[placeholder="0"]').first().fill('150');
+      await page.getByRole('button', { name: 'ADD MEAL ✓' }).click();
+      assert.equal(await page.getByTestId('meals-below-minimum').count(), 0);
     } else {
       await start.getByRole('button', { name: /AI: lighter version of my training day/ }).click();
       await page.getByText('Rest Chicken Salad').waitFor();
@@ -797,7 +807,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: 'EDIT PLAN' }).waitFor();
     const saved = JSON.parse(writes.filter(w => w.table === 'nutrition_plans' && JSON.parse(w.body).daily_calories).at(-1).body);
     assert.equal(saved.meals.length, 3);
-    assert.deepEqual(saved.rest_day_meals.map(m => m.name), scenario === 'restdaybuild' ? ['Breakfast', 'Lunch'] : ['Rest Oats', 'Rest Chicken Salad', 'Rest Salmon & Veg']);
+    assert.deepEqual(saved.rest_day_meals.map(m => m.name).sort(), scenario === 'restdaybuild' ? ['Breakfast', 'Fruit & Yoghurt', 'Lunch'] : ['Rest Chicken Salad', 'Rest Oats', 'Rest Salmon & Veg']);
   } else if (scenario === 'weeklybadge') {
     if (todayDow === 0) { console.log('PASS weeklybadge (Sunday: the week is still in progress)'); await browser.close(); return; }
     const card = page.getByTestId('weekly-report-card');

@@ -84,6 +84,8 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
     const orFilter = url.searchParams.get('or');
     const earlierDay = orFilter && /in_progress\.eq\.false,date\.lt\.(\d{4}-\d{2}-\d{2})/.exec(orFilter);
     if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
+    // Everyone here has already agreed to health data storage (on their profile).
+    if (table === 'user_profiles' && req.method() === 'GET') rows = (rows.length ? rows : [{ user_id: '11111111-1111-4111-8111-111111111111' }]).map(row => ({ health_consent_at: '2026-10-06T08:00:00.000Z', health_consent_version: '2026-10-06', ...row }));
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
   });
   const page = await context.newPage();
@@ -129,7 +131,8 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
       await page.screenshot({ path: require('node:os').tmpdir() + '/weekly.png', fullPage: true });
       // Previous week: no data there, so no invented numbers.
       await page.getByRole('button', { name: 'Previous week' }).click();
-      await page.getByTestId('tile-volume').waitFor();
+      // Wait for the earlier week to be drawn before reading it.
+      await page.waitForFunction(() => /1 \/ 2/.test(document.querySelector('[data-testid="tile-workouts"]')?.textContent || ''), null, { timeout: 15000 });
       assert.match(await tile('tile-workouts'), /1 \/ 2/);
       assert.match(await tile('tile-volume'), /First tracked week/);
       await page.getByRole('button', { name: '← BACK' }).click();
