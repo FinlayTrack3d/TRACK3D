@@ -12160,10 +12160,21 @@ export default function App() {
     let recovering = false;
     let expiryTimer;
     let retryTimer;
+    let expiring = false;
+    let leaving = false;
+    // To the sign-in page once, however the sign-out arrives: a second move
+    // would cut the first one short.
+    const toLogin = () => {
+      if (leaving) return;
+      leaving = true;
+      window.location.replace("/login");
+    };
     const expire = async () => {
+      if (expiring) return;
+      expiring = true;
       clearLoginWindow();
       await supabase.auth.signOut({ scope: "local" });
-      if (!cancelled) window.location.replace("/login");
+      if (!cancelled) toLogin();
     };
     // Browsers run a timer of more than about 24 days at once, so a long
     // sign-in window is checked again at least once a day.
@@ -12173,7 +12184,7 @@ export default function App() {
     };
     const accept = session => {
       if (cancelled) return;
-      if (!session) { window.location.replace("/login"); return; }
+      if (!session) { toLogin(); return; }
       const expiresAt = loginWindowExpiry(session.user.id) ?? beginLoginWindow(session.user.id);
       if (expiresAt <= Date.now()) { void expire(); return; }
       scheduleExpiry(expiresAt);
@@ -12203,7 +12214,7 @@ export default function App() {
       if (event === "SIGNED_OUT") {
         clearLoginWindow();
         // After Delete my account, accountDeleted() goes to the sign-in page itself.
-        if (!accountDeletedRef.current) window.location.replace("/login");
+        if (!accountDeletedRef.current) toLogin();
       } else if (session) {
         setTimeout(() => accept(session), 0);
       }
