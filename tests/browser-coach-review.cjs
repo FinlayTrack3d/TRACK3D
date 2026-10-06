@@ -49,6 +49,28 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await tab.goto('http://localhost:3123/app');
     await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
     assert.equal(new URL(tab.url()).pathname, '/app', 'still signed in after the browser was closed');
+    // Signed in for 7 days from signing in, then signed out.
+    const DAY = 24 * 60 * 60 * 1000;
+    const signedIn = async (window) => {
+      await tab.evaluate(value => localStorage.setItem('track3d-login-window', JSON.stringify(value)), window);
+      await tab.goto('http://localhost:3123/app');
+    };
+    await signedIn({ userId: loginUser.id, startedAt: Date.now() - 6 * DAY, expiresAt: Date.now() + DAY });
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    assert.equal(new URL(tab.url()).pathname, '/app', 'still signed in after 6 days');
+    // Signed in 4 hours ago under the 3-hour rule: 7 days from that sign-in.
+    await signedIn({ userId: loginUser.id, expiresAt: Date.now() - 60 * 60 * 1000 });
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    assert.equal(new URL(tab.url()).pathname, '/app', 'a device signed in under the 3-hour rule gets 7 days');
+    // The window ends while the app is open: signed out then.
+    await signedIn({ userId: loginUser.id, startedAt: Date.now() - 7 * DAY + 12000 });
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 10000 });
+    await tab.waitForURL('**/login', { timeout: 30000 });
+    // Signed in 8 days ago (with the sign-in session still saved): straight to the sign-in page.
+    await tab.evaluate(auth => localStorage.setItem('track3d-auth', auth), JSON.stringify({ access_token: loginToken, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 30 * 86400, token_type: 'bearer', user: loginUser }));
+    await signedIn({ userId: loginUser.id, startedAt: Date.now() - 8 * DAY, expiresAt: Date.now() - DAY });
+    await tab.waitForURL('**/login', { timeout: 20000 });
+    assert.equal(await tab.evaluate(() => localStorage.getItem('track3d-login-window')), null, 'the ended window is cleared');
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });
     console.log('PASS persistlogin');
@@ -384,14 +406,34 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     // Pre-filled from last time (80 kg × 9 on set 1): one tap logs it.
     assert.equal(await page.getByLabel('Reps').inputValue(), '9');
     assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '80');
+    const colour = locator => locator.evaluate(element => getComputedStyle(element).color);
+    await page.waitForTimeout(400); // buttons fade between colours over 0.18 s
+    assert.equal(await colour(page.getByRole('button', { name: 'One rep more' })), 'rgb(0, 200, 255)', '± buttons are blue, not green');
+    assert.equal(await colour(page.getByRole('button', { name: '2.5 kg less' })), 'rgb(0, 200, 255)');
+    assert.equal(await colour(page.getByRole('button', { name: 'END WORKOUT' })), 'rgb(255, 45, 120)', 'END WORKOUT is red');
+    // Set 1's numbers are at full strength; after a logged set, the next
+    // set's pre-filled numbers are faint until changed.
+    const faint = async () => [await page.getByLabel('Reps').getAttribute('data-prefilled'), await page.getByLabel('Weight in kilograms').getAttribute('data-prefilled')];
+    assert.deepEqual(await faint(), [null, null]);
+    assert.equal(await colour(page.getByLabel('Reps')), 'rgb(8, 12, 16)');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 2 OF 3').waitFor();
     assert.equal(await page.getByLabel('Reps').inputValue(), '8', 'last time on set 2');
+    assert.deepEqual(await faint(), ['faint', 'faint'], 'set 2 starts faint');
+    assert.equal(await colour(page.getByLabel('Reps')), 'rgb(125, 140, 149)');
+    assert.equal(await colour(page.getByLabel('Weight in kilograms')), 'rgb(125, 140, 149)');
+    if (process.env.SHOT) await page.screenshot({ path: 'logger-faint.png' });
     await page.getByRole('button', { name: 'One rep more' }).click();
+    assert.deepEqual(await faint(), [null, 'faint'], 'a changed number is at full strength');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 3 OF 3').waitFor();
+    assert.deepEqual(await faint(), ['faint', 'faint']);
     await page.getByRole('button', { name: '2.5 kg more' }).click();
     assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '82.5');
+    assert.deepEqual(await faint(), ['faint', null]);
+    await page.getByLabel('Reps').fill('7');
+    assert.deepEqual(await faint(), [null, null], 'typed numbers are at full strength');
+    await page.getByLabel('Reps').fill('8');
     if (process.env.SHOT) await page.screenshot({ path: 'logger.png' });
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.waitForTimeout(800);
@@ -1353,10 +1395,18 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
     await page.getByRole('button', { name: 'CHAT WITH FITNESS COACH' }).click();
     const input = page.getByPlaceholder('Ask anything...');
+    // A question first, then the minimised chat, which shows the last two messages.
+    await input.fill('How many reps next?');
+    await input.press('Enter');
+    await page.getByText('Next set: 10 reps.').waitFor();
+    await page.getByRole('button', { name: 'MINIMISE' }).click();
     await input.fill('Swap this exercise permanently for incline press');
     await input.press('Enter');
+    // The button shows in the minimised chat too, and takes the request along.
     await page.getByRole('button', { name: 'OPEN CHANGE PLAN' }).click();
-    await page.getByPlaceholder('Tell the coach what you want to change...').waitFor();
+    const request = page.getByPlaceholder('Tell the coach what you want to change...');
+    await request.waitFor();
+    assert.equal(await request.inputValue(), 'Swap this exercise permanently for incline press');
     assert.equal(await page.getByText(/programme_exercise_id/).count(), 0);
   } else if (scenario === 'planchangebutton') {
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();

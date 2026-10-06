@@ -67,7 +67,7 @@ export default function PrivacyPage() {
     <p>TRACK3D doesn&apos;t use analytics, advertising or tracking cookies, and doesn&apos;t record your sessions. Our fonts are served from our own site, so pages don&apos;t contact other companies for them. Because we only use storage that is strictly necessary for the features you ask for, we don&apos;t need to ask for consent with a cookie banner.</p>
     <p>The app keeps these in your browser&apos;s local storage:</p>
     <ul>
-      <li>Your sign-in session, so you stay signed in, and the time you signed in, so you&apos;re signed out after 3 hours.</li>
+      <li>Your sign-in session, so you stay signed in, and the time you signed in, so you&apos;re signed out 7 days after signing in.</li>
       <li>Unsaved progress, such as a workout, morning routine or nutrition plan you&apos;re part-way through, so a reload or lost signal doesn&apos;t lose it.</li>
       <li>Your recent coach conversation and copies of your habits, so they show straight away and while you&apos;re offline.</li>
       <li>Small settings, such as kg or stone and notices you&apos;ve dismissed.</li>

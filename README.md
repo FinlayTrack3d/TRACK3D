@@ -4,6 +4,8 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 The fitness coach now uses a server-side, safety-first coaching layer with deterministic exercise progression, 14-day context, on-demand historical retrieval, persistent Coach memory, structured temporary actions, and explicit approval for permanent programme changes.
 
+Permanent changes asked for during a workout come back as a `propose_plan_change` action naming sessions and exercises (the same changes as Change Plan, checked by `lib/coaching/plan-change-reply.js`). The change waits in a Proposed change card under the coach's reply until APPROVE & SAVE. Approving saves the plan, and today's workout follows where that's safe (`applyPlanChangeToWorkout` in `lib/coaching/plan-change.js`): logged sets are never removed.
+
 Before enabling it in a deployed environment:
 
 1. Review and apply `supabase/migrations/202609290001_track3d_coaching_v12.sql` to a non-production Supabase branch first.

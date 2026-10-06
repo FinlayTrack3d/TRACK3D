@@ -16,6 +16,7 @@ import { buildCoachSystemBlocks } from "../../lib/coaching/system.js";
 import { WORKOUT_COACH_INSTRUCTIONS, WORKOUT_RESPONSE_SHAPE } from "../../lib/coaching/playbook.js";
 import { safetyDirective } from "../../lib/coaching/safety.js";
 import { isPlanChangeRequest } from "../../lib/coaching/plan-change.js";
+import { prepareAction } from "../../lib/coaching/actions.js";
 import { extractJsonObject } from "../../lib/coaching/questionnaire.js";
 import { openAnthropicStream, postAnthropicMessages, readAnthropicStream } from "../../lib/coaching/anthropic.js";
 import {
@@ -81,10 +82,24 @@ const SCENARIOS = [
   { id: 9, name: "Off-plan meal with no calories", ...area("nutrition_day"),
     turns: ["Nutrition day summary: 2/4 meals logged. Off plan: none (no calories entered). Meal notes: Dinner: large pepperoni pizza and two beers. Unlogged food with no calories: large pepperoni pizza and two beers. Logged total: 1010 kcal vs 2381 target (-1371) — incomplete, excludes the unlogged food. Protein: 85g vs 115g target. Training day. Give brief feedback."],
     checks: (reply) => [...checkAbsent(reply, /\bunder[- ]?(target|eat|eating|fuel)|not enough (fuel|food)|way under/i, "calls the day under target"), ...checkMentions(reply, /pizza|incomplete|not (included|counted)|estimate/i, "say the total is incomplete")] },
-  { id: 10, name: "Permanent swap mid-workout", ...WORKOUT, context: workoutState([{ setNumber: 1, weight: "26", reps: "9" }]),
+  { id: 10, name: "Permanent swap mid-workout", ...WORKOUT,
+    context: workoutState([{ setNumber: 1, weight: "26", reps: "9" }], { savedPlan: [{ name: "Push A", days: ["MON", "THU"], exercises: [{ name: "Dumbbell Bench Press", prescription: "3 × 8-10" }, { name: "Cable Fly", prescription: "3 × 12-15" }] }] }),
     turns: ["Swap Dumbbell Bench Press for Machine Chest Press permanently in my plan."],
-    checks: (reply) => [...checkNoInternalTerms(reply), ...checkMentions(reply, /CHANGE PLAN|change plan/i, "point to CHANGE PLAN")] },
+    checks: (reply, _turn, _level, raw) => [...checkNoInternalTerms(reply), ...checkPlanChangeProposed(raw, { kind: "replace_exercise", sessionName: "Push A", exerciseName: "Dumbbell Bench Press" }),
+      ...checkMentions(reply, /APPROVE & SAVE/i, "point to APPROVE & SAVE"), ...checkAbsent(reply, /\b(i'?ve|i have|has been|have been|is now|are now)\s+(swapped|replaced|changed|updated|saved)\b/i, "says the change is already made")] },
 ];
+
+// The reply proposes a plan change the app can save, naming the plan's own session and exercise.
+function checkPlanChangeProposed(raw, expected) {
+  const actions = (extractJsonObject(raw || "")?.actions || []).filter((action) => action?.type === "propose_plan_change");
+  for (const action of actions) {
+    try {
+      const { action: prepared } = prepareAction(action);
+      if (prepared.changes.some((change) => Object.entries(expected).every(([field, value]) => change[field] === value))) return [];
+    } catch { /* not a change the app can save */ }
+  }
+  return [`no propose_plan_change with ${JSON.stringify(expected)}`];
+}
 
 async function callCoach(scenario, tone, level, history, activePain) {
   const system = buildCoachSystemBlocks({ areaInstructions: scenario.instructions, kind: scenario.kind, personality: tone, experienceLevel: level, activePain, context: scenario.context || "" });
@@ -129,7 +144,7 @@ for (const scenario of SCENARIOS.filter((item) => !ONLY || ONLY.includes(item.id
           outcome = await callCoach(scenario, tone, level, history, activePain);
         }
         if (outcome.error) failures.push(`request failed: ${outcome.error}`);
-        else failures.push(...scenario.checks(outcome.reply, turnIndex, level), ...checkNoBlame(outcome.reply), ...checkNoDiagnosis(outcome.reply), ...checkNoInternalTerms(outcome.reply), ...checkPraiseHasEvidence(outcome.reply));
+        else failures.push(...scenario.checks(outcome.reply, turnIndex, level, outcome.raw), ...checkNoBlame(outcome.reply), ...checkNoDiagnosis(outcome.reply), ...checkNoInternalTerms(outcome.reply), ...checkPraiseHasEvidence(outcome.reply));
         history.push({ role: "assistant", content: outcome.raw || outcome.reply || "" });
         results.push({ scenario: scenario.id, name: scenario.name, level, tone, turn: turnIndex + 1, reply: outcome.reply, firstTextMs: outcome.firstTextMs, totalMs: outcome.totalMs, canned: Boolean(outcome.canned), failures: [...new Set(failures)] });
         console.log(`${failures.length ? "FAIL" : "pass"} #${scenario.id} ${level}/${tone} turn ${turnIndex + 1}  ${outcome.totalMs ?? "?"} ms${failures.length ? `  — ${[...new Set(failures)].join("; ")}` : ""}`);
