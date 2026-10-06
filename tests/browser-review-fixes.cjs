@@ -288,7 +288,7 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     await page.getByRole('button', { name: 'ASK', exact: true }).click();
     await page.waitForTimeout(1500);
     assert.equal(await page.getByText('Plan changes are made in Change Plan').count(), 0, 'question was not routed to Change Plan');
-    assert.equal(await page.getByRole('button', { name: /APPROVE & SAVE THESE CHANGES/ }).count(), 0);
+    assert.equal(await page.getByTestId('proposed-change').count(), 0, 'no change proposed for a question');
   } else {
     throw new Error('unknown scenario ' + scenario);
   }

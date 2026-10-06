@@ -1,29 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
-import { z } from "zod";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 import { buildCoachSystem } from "../../../lib/coaching/system.js";
-
-const prescriptionFields = {
-  sets: z.coerce.number().int().min(1).max(10).optional(),
-  reps: z.union([z.string().min(1), z.array(z.string().min(1)).min(1).max(10)]).optional(),
-  tempo: z.string().min(1).optional(),
-  reason: z.string().min(1),
-};
-
-const changeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("update_session_days"), sessionName: z.string().min(1), days: z.array(z.enum(["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])).min(1).max(7), reason: z.string().min(1) }),
-  z.object({ kind: z.literal("update_prescription"), sessionName: z.string().min(1), exerciseName: z.string().min(1), ...prescriptionFields }),
-  z.object({ kind: z.literal("replace_exercise"), sessionName: z.string().min(1), exerciseName: z.string().min(1), replacementName: z.string().min(1), ...prescriptionFields }),
-  z.object({ kind: z.literal("rename_exercise"), sessionName: z.string().min(1), exerciseName: z.string().min(1), replacementName: z.string().min(1), reason: z.string().min(1) }),
-  z.object({ kind: z.literal("remove_exercise"), sessionName: z.string().min(1), exerciseName: z.string().min(1), reason: z.string().min(1) }),
-  z.object({ kind: z.literal("add_exercise"), sessionName: z.string().min(1), replacementName: z.string().min(1), ...prescriptionFields }),
-]);
-
-const responseSchema = z.object({
-  message: z.string().min(1),
-  recommendation: z.enum(["clarify", "targeted", "full_rebuild"]),
-  changes: z.array(changeSchema).max(16).default([]),
-});
+import { readPlanChangeReply } from "../../../lib/coaching/plan-change-reply.js";
 
 function clientFor(request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
@@ -55,6 +33,8 @@ export async function POST(request) {
     if (!messages.some((message) => message.role === "user" && message.content.trim())) return Response.json({ error: "A change request is required" }, { status: 400 });
 
     const currentPlan = Array.isArray(body?.currentPlan) ? body.currentPlan : [];
+    // A change the coach proposed earlier that is still waiting in the app.
+    const pendingChanges = Array.isArray(body?.pendingChanges) ? body.pendingChanges.slice(0, 20).map((line) => String(line).slice(0, 200)) : [];
     const recentWorkouts = Array.isArray(body?.recentWorkouts) ? body.recentWorkouts.slice(0, 30) : [];
     const { data: historyData, error: historyError } = await supabase.rpc("search_training_history", {
       exercise_search: null,
@@ -71,12 +51,14 @@ export async function POST(request) {
 
 First determine whether the problem needs: (1) a small targeted change to session days, exercises, sets, or reps; (2) clarification with one concise question; or (3) a full plan rebuild because the goal, training frequency, equipment, limitations, or overall structure has materially changed. Prefer targeted changes when the issue is isolated. A change to which weekdays are available normally needs update_session_days, not a full rebuild, unless the number of weekly sessions or recovery structure must also change. Do not recommend a full rebuild merely because one exercise is disliked or one prescription needs adjusting.
 
-Use the current plan and training history. Never erase or rewrite completed workout history. Never say a change has been made, saved or applied: changes are only saved when the user presses Approve in the app, so describe them as proposed. Be honest when the evidence is limited. If pain or injury is mentioned, tell the user to stop the painful movement and seek qualified advice; do not diagnose.
+Use the current plan and training history. Never erase or rewrite completed workout history. Be honest when the evidence is limited. If pain or injury is mentioned, tell the user to stop the painful movement and seek qualified advice; do not diagnose.
 
-Only propose exact targeted changes when the user has supplied enough information or explicitly accepted your recommendation. Use exact session and exercise names from CURRENT PLAN. Rep prescriptions may be a string such as "8-12" or one string per set. A replacement is a different movement; a rename is only a label correction for the same movement, and preserves its history alias. A full rebuild is never applied automatically: recommend it and explain why.
+HOW CHANGES ARE SAVED: every change you put in "changes" appears under your message in a "Proposed change" card with APPROVE & SAVE and DISCARD buttons. Nothing is saved until the user taps APPROVE & SAVE. So never say a change has been made, removed, saved or applied. Describe changes as proposed (for example "I'd take Full Body Pump out of Friday, leaving five sessions") and end with "Tap APPROVE & SAVE to save it." Never describe a change in "message" that isn't in "changes". If CHANGE WAITING FOR APPROVAL is listed below, it is already in a card: don't propose it again; if the user asks whether it's saved or says they approve, tell them to tap APPROVE & SAVE on the Proposed change card (or DISCARD to keep their plan).
+
+Only propose exact targeted changes when the user has supplied enough information or explicitly accepted your recommendation. Use exact session and exercise names from CURRENT PLAN. To take a whole session out of the plan (its days become rest days), use remove_session; to change which days a session is on, use update_session_days. Rep prescriptions may be a string such as "8-12" or one string per set. A replacement is a different movement; a rename is only a label correction for the same movement, and preserves its history alias. Adding a new session is a full rebuild. A full rebuild is never applied automatically: recommend it and explain why.
 
 Return only JSON:
-{"message":"brief collaborative reply in plain text, at most 120 words, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"update_session_days|update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","days":["MON"],"exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
+{"message":"brief collaborative reply in plain text, at most 120 words, including at most one question","recommendation":"clarify|targeted|full_rebuild","changes":[{"kind":"remove_session|update_session_days|update_prescription|replace_exercise|rename_exercise|remove_exercise|add_exercise","sessionName":"exact session","days":["MON"],"exerciseName":"exact current exercise when applicable","replacementName":"new exercise when applicable","sets":3,"reps":"8-12","tempo":"3-0-1-0","reason":"why"}]}`;
     const { data: profile } = await supabase.from("coach_profiles").select("personality,experience_level").eq("user_id", user.id).maybeSingle();
     const system = buildCoachSystem({ areaInstructions: planChangeInstructions, kind: "conversation", personality: profile?.personality, experienceLevel: profile?.experience_level });
 
@@ -84,20 +66,14 @@ Return only JSON:
         model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
         max_tokens: 1800,
         system,
-        messages: [{ role: "user", content: `CURRENT PLAN\n${JSON.stringify(currentPlan)}\n\nRECENT LEGACY WORKOUTS\n${JSON.stringify(recentWorkouts)}\n\nSTRUCTURED EXERCISE HISTORY\n${JSON.stringify(structuredHistory || [])}` }, ...messages],
+        messages: [{ role: "user", content: `CURRENT PLAN\n${JSON.stringify(currentPlan)}\n\nRECENT LEGACY WORKOUTS\n${JSON.stringify(recentWorkouts)}\n\nSTRUCTURED EXERCISE HISTORY\n${JSON.stringify(structuredHistory || [])}${pendingChanges.length ? `\n\nCHANGE WAITING FOR APPROVAL (not saved yet)\n${pendingChanges.map((line) => `- ${line}`).join("\n")}` : ""}` }, ...messages],
       });
     if (!provider.ok) return Response.json({ error: provider.error }, { status: 502 });
     const payload = provider.payload;
     const text = payload.content?.map((block) => block.text || "").join("") || "";
     let result;
     try {
-      const raw = extractJson(text);
-      const validated = responseSchema.safeParse(raw);
-      result = validated.success ? validated.data : {
-        message: String(raw?.message || "I need one more detail before I can recommend a safe plan change."),
-        recommendation: ["clarify", "targeted", "full_rebuild"].includes(raw?.recommendation) ? raw.recommendation : "clarify",
-        changes: [],
-      };
+      result = readPlanChangeReply(extractJson(text));
     } catch {
       result = {
         message: text.replace(/```json|```/g, "").trim() || "I need one more detail before I can recommend a safe plan change.",
