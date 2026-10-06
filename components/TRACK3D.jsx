@@ -8857,7 +8857,7 @@ function AiTweaksBox({ meals, setMeals, macros, goal, allergies = [], preference
 const EMPTY_SWAP = { name: "", calories: "", protein: "", carbs: "", fats: "" };
 const SWAP_YELLOW = "#FFD23F";
 const SwapIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M7 4 3 8l4 4" /><path d="M3 8h13a4 4 0 0 1 4 4" /><path d="m17 20 4-4-4-4" /><path d="M21 16H8a4 4 0 0 1-4-4" />
   </svg>
 );
@@ -8923,11 +8923,12 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
                 <div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div>
               </button>
             ) : <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>}
+            <button aria-label={`${meal.name} went to plan`} aria-pressed={wentToPlan} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 36, background: wentToPlan ? "rgba(0,255,178,.16)" : "transparent", borderColor: wentToPlan ? NEON : BORDER }} onClick={() => commit({ ...results, [index]: true })}>✓</button>
+            {/* Swap sits between went-to-plan and didn't: a quiet outline until a meal is swapped. */}
             <button type="button" aria-label={`Swap ${meal.name}`} aria-pressed={Boolean(swap)} aria-expanded={swapOpen === index} title="Swap this meal" onClick={() => openSwap(index)}
-              style={{ width: 36, height: 36, minWidth: 36, padding: 0, borderRadius: "50%", border: `1px solid ${SWAP_YELLOW}`, background: swap ? SWAP_YELLOW : "rgba(255,210,63,.12)", color: swap ? "#06100D" : SWAP_YELLOW, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+              style={{ width: 30, height: 30, minWidth: 30, padding: 0, borderRadius: "50%", border: `1px solid ${swap || swapOpen === index ? "rgba(255,210,63,.6)" : "rgba(255,210,63,.28)"}`, background: swap ? "rgba(255,210,63,.14)" : "transparent", color: swap || swapOpen === index ? SWAP_YELLOW : "rgba(255,210,63,.6)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
               <SwapIcon />
             </button>
-            <button aria-label={`${meal.name} went to plan`} aria-pressed={wentToPlan} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 36, background: wentToPlan ? "rgba(0,255,178,.16)" : "transparent", borderColor: wentToPlan ? NEON : BORDER }} onClick={() => commit({ ...results, [index]: true })}>✓</button>
             <button aria-label={`${meal.name} did not go to plan`} aria-pressed={missed} className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "6px 10px", minHeight: 36, background: missed ? "rgba(255,45,120,.14)" : "transparent" }} onClick={() => commit({ ...results, [index]: { completed: false, note: typeof result === "object" && result ? result.note || "" : "" } })}>×</button>
           </div>
           {swap && <div data-testid="meal-swapped" style={{ marginTop: 5, fontSize: 10, color: SWAP_YELLOW }}>Swapped for {swap.name} · {swap.calories.toLocaleString("en-GB")} kcal · {swap.protein}g P</div>}
