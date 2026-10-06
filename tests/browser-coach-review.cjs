@@ -384,14 +384,34 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     // Pre-filled from last time (80 kg × 9 on set 1): one tap logs it.
     assert.equal(await page.getByLabel('Reps').inputValue(), '9');
     assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '80');
+    const colour = locator => locator.evaluate(element => getComputedStyle(element).color);
+    await page.waitForTimeout(400); // buttons fade between colours over 0.18 s
+    assert.equal(await colour(page.getByRole('button', { name: 'One rep more' })), 'rgb(0, 200, 255)', '± buttons are blue, not green');
+    assert.equal(await colour(page.getByRole('button', { name: '2.5 kg less' })), 'rgb(0, 200, 255)');
+    assert.equal(await colour(page.getByRole('button', { name: 'END WORKOUT' })), 'rgb(255, 45, 120)', 'END WORKOUT is red');
+    // Set 1's numbers are at full strength; after a logged set, the next
+    // set's pre-filled numbers are faint until changed.
+    const faint = async () => [await page.getByLabel('Reps').getAttribute('data-prefilled'), await page.getByLabel('Weight in kilograms').getAttribute('data-prefilled')];
+    assert.deepEqual(await faint(), [null, null]);
+    assert.equal(await colour(page.getByLabel('Reps')), 'rgb(8, 12, 16)');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 2 OF 3').waitFor();
     assert.equal(await page.getByLabel('Reps').inputValue(), '8', 'last time on set 2');
+    assert.deepEqual(await faint(), ['faint', 'faint'], 'set 2 starts faint');
+    assert.equal(await colour(page.getByLabel('Reps')), 'rgb(125, 140, 149)');
+    assert.equal(await colour(page.getByLabel('Weight in kilograms')), 'rgb(125, 140, 149)');
+    if (process.env.SHOT) await page.screenshot({ path: 'logger-faint.png' });
     await page.getByRole('button', { name: 'One rep more' }).click();
+    assert.deepEqual(await faint(), [null, 'faint'], 'a changed number is at full strength');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 3 OF 3').waitFor();
+    assert.deepEqual(await faint(), ['faint', 'faint']);
     await page.getByRole('button', { name: '2.5 kg more' }).click();
     assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '82.5');
+    assert.deepEqual(await faint(), ['faint', null]);
+    await page.getByLabel('Reps').fill('7');
+    assert.deepEqual(await faint(), [null, null], 'typed numbers are at full strength');
+    await page.getByLabel('Reps').fill('8');
     if (process.env.SHOT) await page.screenshot({ path: 'logger.png' });
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.waitForTimeout(800);
@@ -1353,10 +1373,18 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
     await page.getByRole('button', { name: 'CHAT WITH FITNESS COACH' }).click();
     const input = page.getByPlaceholder('Ask anything...');
+    // A question first, then the minimised chat, which shows the last two messages.
+    await input.fill('How many reps next?');
+    await input.press('Enter');
+    await page.getByText('Next set: 10 reps.').waitFor();
+    await page.getByRole('button', { name: 'MINIMISE' }).click();
     await input.fill('Swap this exercise permanently for incline press');
     await input.press('Enter');
+    // The button shows in the minimised chat too, and takes the request along.
     await page.getByRole('button', { name: 'OPEN CHANGE PLAN' }).click();
-    await page.getByPlaceholder('Tell the coach what you want to change...').waitFor();
+    const request = page.getByPlaceholder('Tell the coach what you want to change...');
+    await request.waitFor();
+    assert.equal(await request.inputValue(), 'Swap this exercise permanently for incline press');
     assert.equal(await page.getByText(/programme_exercise_id/).count(), 0);
   } else if (scenario === 'planchangebutton') {
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();

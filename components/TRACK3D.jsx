@@ -7,8 +7,8 @@ import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { normaliseExperience } from "../lib/coaching/system";
 import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
-import { applyCoachActionToProgramme, applyCoachActionToWorkout, coachActionChangeLines } from "../lib/coaching/ui-actions";
-import { applyPlanChangeProposal, describePlanChange, exerciseMatchesHistory, isApprovalReply, isPlanChangeRequest, planChangeSummary } from "../lib/coaching/plan-change";
+import { applyCoachActionToProgramme, applyCoachActionToWorkout, coachProposal, proposalsOverlap } from "../lib/coaching/ui-actions";
+import { applyPlanChangeProposal, applyPlanChangeToWorkout, describePlanChange, exerciseMatchesHistory, isApprovalReply, isPlanChangeRequest, planChangeSummary, planOutline } from "../lib/coaching/plan-change";
 import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
@@ -103,6 +103,8 @@ const BG = "#080C10";
 const SURFACE = "#0D1318";
 const SURFACE2 = "#111921";
 const BORDER = "#1A2530";
+// Pre-filled set logger numbers after a logged set (still editable).
+const FAINT_INPUT = "#7D8C95";
 
 const DEFAULT_HOME_TIME_ZONE = "Europe/London";
 
@@ -510,6 +512,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   const [conversationId, setConversationId] = useState(null);
   const [painActive, setPainActive] = useState(false); // an unresolved pain report shapes the coach's replies
   const [painNote, setPainNote] = useState("");
+  const [proposalHighlight, setProposalHighlight] = useState(0); // brings a waiting Proposed change card back into view
 
   const endRef = useRef(null);
   const messageListRef = useRef(null);
@@ -519,6 +522,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     try {
       const saved = JSON.parse(localStorage.getItem(`track3d-coach-${storageKey}`) || "null");
       if (Array.isArray(saved?.messages)) setMessages(saved.messages);
+      // Proposed changes stay under their messages until approved or discarded.
+      if (Array.isArray(saved?.actions)) setActions(saved.actions.filter(action => action?.scope === "permanent").map(({ deciding: _deciding, ...action }) => action));
       if (saved?.started || saved?.messages?.length) setStarted(true);
     } catch { /* Ignore an unreadable local draft. */ }
     setRestored(true);
@@ -534,8 +539,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
 
   useEffect(() => {
     if (!storageKey || !restored) return;
-    localStorage.setItem(`track3d-coach-${storageKey}`, JSON.stringify({ started, messages }));
-  }, [storageKey, restored, started, messages]);
+    localStorage.setItem(`track3d-coach-${storageKey}`, JSON.stringify({ started, messages, actions: actions.filter(action => action.scope === "permanent") }));
+  }, [storageKey, restored, started, messages, actions]);
 
   const scroll = () => messageListRef.current?.scrollTo({ top: messageListRef.current.scrollHeight, behavior: "smooth" });
 
@@ -543,6 +548,15 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     if (!msg.trim() || loading) return;
     // Close the phone keyboard so the screen returns to its normal size.
     document.activeElement?.blur?.();
+    // "I approve" in words: only the card saves, so point to it.
+    if (coachingV12 && !hidden && isApprovalReply(msg) && actions.some(action => action.scope === "permanent" && action.status === "pending_approval" && action.changed !== false)) {
+      setMessages([...messages, { role: "user", content: msg }, { role: "assistant", content: "That change isn't saved yet. Tap APPROVE & SAVE on the Proposed change card to save it, or DISCARD to keep your plan as it is." }]);
+      setInput("");
+      if (compact) setExpanded(true);
+      setProposalHighlight(count => count + 1);
+      setTimeout(scroll, 50);
+      return;
+    }
     setLoading(true);
     const updated = [...messages, { role: "user", content: msg, ...(hidden ? { hidden: true } : {}) }];
     setMessages(updated);
@@ -563,13 +577,19 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
         setConversationId(data.conversationId);
         // Each change sits under the reply that proposed it. Permanent changes
         // stay until approved or discarded (a newer one for the same exercise
-        // replaces a waiting one); temporary ones last until the next reply.
-        const incoming = (data.actions || []).map(action => ({ ...action, type: action.type || action.action_type, messageIndex: updated.length }));
-        const target = action => action.payload?.programmeExerciseId || action.id;
+        // or session replaces a waiting one); temporary ones last until the
+        // next reply. A permanent change's card (before → after) is worked
+        // out now, from the plan as it is before anything is saved.
+        const incoming = (data.actions || []).map(action => {
+          const typed = { ...action, type: action.type || action.action_type, messageIndex: updated.length };
+          return typed.scope === "permanent" ? { ...typed, ...coachProposal(planSessions || coachContext?.programme, typed) } : typed;
+        });
         setActions(current => [
-          ...current.filter(action => action.scope === "permanent").map(action => (action.status === "pending_approval" && incoming.some(next => next.scope === "permanent" && target(next) === target(action)) ? { ...action, status: "replaced" } : action)),
+          ...current.filter(action => action.scope === "permanent").map(action => (action.status === "pending_approval" && incoming.some(next => next.scope === "permanent" && proposalsOverlap(next, action)) ? { ...action, status: "replaced" } : action)),
           ...incoming,
         ]);
+        // The minimised chat is too small for a Proposed change card.
+        if (compact && incoming.some(action => action.scope === "permanent" && action.changed !== false)) setExpanded(true);
         setPainActive(Boolean(data.activePain));
         setPainNote("");
         setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet.", planChangeHint: Boolean(data.planChangeHint) }]);
@@ -639,8 +659,9 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   // (APPROVE & SAVE / DISCARD), temporary ones as before.
   const actionCard = action => {
     if (action.scope === "permanent") {
-      const status = action.status === "applied" ? "saved" : action.status === "rejected" ? "discarded" : action.status === "replaced" ? "replaced" : action.deciding ? "saving" : "pending";
-      return <ProposedChangeCard key={action.id} lines={coachActionChangeLines(planSessions || coachContext?.programme, action)} notes={action.payload?.reason ? [action.payload.reason] : []} status={status} error={action.error}
+      const card = action.lines ? action : { ...action, ...coachProposal(planSessions || coachContext?.programme, action) };
+      const status = action.status === "applied" ? "saved" : action.status === "rejected" ? "discarded" : action.status === "replaced" ? "replaced" : card.changed === false ? "unusable" : action.deciding ? "saving" : "pending";
+      return <ProposedChangeCard key={action.id} lines={card.lines} notes={card.notes} status={status} error={action.error} highlight={proposalHighlight}
         onApprove={() => decideStructuredAction(action, "approve")} onDiscard={() => decideStructuredAction(action, "reject")} />;
     }
     if (["rejected", "applied"].includes(action.status)) return null;
@@ -691,8 +712,10 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
           <div ref={messageListRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", maxHeight: compact ? (expanded ? "calc(100dvh - 190px)" : 112) : 260, marginBottom: compact ? 6 : 10, scrollbarWidth: "thin" }}>
             {shownEntries.map(({ m, index }, i) => <Fragment key={index}>{(() => {
               if (m.role === "note") return <div key={i} data-testid="coach-note" style={{ textAlign: "center", fontSize: 9, color: "#6F8792", letterSpacing: 1, margin: "6px 0" }}>{m.content}</div>;
-              const changePlanButton = m.planChangeHint && onOpenChangePlan ? <button key={`cp-${i}`} className="t3d-btn t3d-btn-sm" style={{ margin: "0 0 8px", fontSize: 8 }} onClick={onOpenChangePlan}>OPEN CHANGE PLAN</button> : null;
-              if (changePlanButton && i === messages.filter(message => !message.hidden).length - 1) {
+              // Opens Change Plan with the request that led here typed in.
+              const openChangePlan = () => onOpenChangePlan(messages.slice(0, index).reverse().find(message => message.role === "user" && !message.hidden)?.content || "");
+              const changePlanButton = m.planChangeHint && onOpenChangePlan ? <button key={`cp-${i}`} className="t3d-btn t3d-btn-sm" style={{ margin: "0 0 8px", fontSize: 8 }} onClick={openChangePlan}>OPEN CHANGE PLAN</button> : null;
+              if (changePlanButton && index === visibleEntries.at(-1)?.index) {
                 return <div key={i}><div className="t3d-ai-msg" style={{ background: SURFACE2, border: "1px solid rgba(0,255,178,.1)" }}><div className="t3d-ai-tag" style={{ color: NEON }}>AI</div><span style={{ color: "#E0EAF0", fontSize: 11, whiteSpace: "pre-wrap" }}>{cleanAiText(m.content)}</span></div>{changePlanButton}</div>;
               }
               const actionMatch = m.role === "assistant" ? m.content.match(/\[ACTION:(rename_exercise|remove_exercise|remove_sets|add_sets|log_set)\|([^|\]]+)(?:\|([^|\]]+))?\]/i) : null;
@@ -756,7 +779,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
               </div>
             )}
             {/* A change still waiting whose message isn't shown (the minimised chat shows the last two). */}
-            {coachingV12 && actions.filter(action => !shownIndexes.has(action.messageIndex) && (action.scope === "permanent" ? action.status === "pending_approval" : !["rejected", "applied"].includes(action.status))).map(actionCard)}
+            {coachingV12 && actions.filter(action => !shownIndexes.has(action.messageIndex) && (action.scope === "permanent" ? action.status === "pending_approval" && action.changed !== false : !["rejected", "applied"].includes(action.status))).map(actionCard)}
             <div ref={endRef} />
           </div>
           {messages.at(-1)?.role === "assistant" && isYesNoQuestion(messages.at(-1)?.content) && (
@@ -6056,13 +6079,13 @@ function withPlanApproval(sessions, now = new Date()) {
     }
   };
 
-  const buildWorkoutLogPayload = (setsToSave) => {
+  const buildWorkoutLogPayload = (setsToSave, session = activeSession) => {
     // A workout belongs to the day it started, even if it runs past midnight.
     const dateStr = getZonedDateInfo(new Date(workoutStart || Date.now()), homeTimeZone).dateKey;
-    const exerciseData = buildLoggedExercises(activeSession, setsToSave);
+    const exerciseData = buildLoggedExercises(session, setsToSave);
     const totalVol = workoutVolume(exerciseData);
     return {
-      user_id: user.id, date: dateStr, session_name: activeSession?.name || "Workout",
+      user_id: user.id, date: dateStr, session_name: session?.name || "Workout",
       exercises: exerciseData, total_volume: totalVol,
       duration_mins: workoutDurationMins({ startedAt: workoutStart, exercises: exerciseData }),
     };
@@ -6070,13 +6093,15 @@ function withPlanApproval(sessions, now = new Date()) {
 
   // Writes the workout's current sets to Supabase right away. Calls are
   // strictly serialized: the final write always runs after every autosave
-  // and callers can await the actual database result.
-  const persistWorkoutLog = (setsToSave, { finalize = false } = {}) => {
-    if (!user || !activeSession) return Promise.resolve(null);
+  // and callers can await the actual database result. session: the workout
+  // as just changed, before the next render has it in activeSession.
+  const persistWorkoutLog = (setsToSave, { finalize = false, session = activeSession } = {}) => {
+    if (!user || !session) return Promise.resolve(null);
     const setsSnapshot = structuredClone(setsToSave || {});
+    const sessionSnapshot = structuredClone(session);
     const perform = async () => {
       if (workoutFinalizedRef.current && !finalize) return null;
-      const payload = buildWorkoutLogPayload(setsSnapshot);
+      const payload = buildWorkoutLogPayload(setsSnapshot, sessionSnapshot);
       if (workoutLogIdRef.current) {
         const { error } = await supabase.from("workout_logs")
           .update({ ...payload, in_progress: !finalize })
@@ -6506,9 +6531,10 @@ function withPlanApproval(sessions, now = new Date()) {
 
   // The reps and weight shown in the set logger: what the user typed, else
   // the pre-filled target reps and last weight (setLoggerDefaults).
+  // prefilled says which are still the pre-filled numbers.
   const setInputsFor = eIdx => {
     const exercise = activeSession?.exercises?.[eIdx];
-    if (!exercise) return { weight: "", reps: "" };
+    if (!exercise) return { weight: "", reps: "", prefilled: { weight: false, reps: false } };
     const setIdx = getCurrentSetIdx(eIdx);
     const ranges = repTargets(exercise.reps, Number(exercise.sets) || 0);
     const lastSets = getLastSessionData(exercise);
@@ -6519,7 +6545,7 @@ function withPlanApproval(sessions, now = new Date()) {
       suggestedWeight: getWeightGuidance(exercise, setIdx)?.weight,
     });
     const typed = currentInputs[eIdx] || {};
-    return { weight: typed.weight ?? defaults.weight, reps: typed.reps ?? defaults.reps };
+    return { weight: typed.weight ?? defaults.weight, reps: typed.reps ?? defaults.reps, prefilled: { weight: typed.weight === undefined, reps: typed.reps === undefined } };
   };
   const stepSetInput = (field, delta) => {
     const current = setInputsFor(exerciseIdx);
@@ -6709,6 +6735,26 @@ function withPlanApproval(sessions, now = new Date()) {
   })) : null;
 
   const applyStructuredCoachAction = async action => {
+    // A plan change by name: saved to the plan, then today's workout follows
+    // it where that's safe (applyPlanChangeToWorkout).
+    if (action.type === "propose_plan_change") {
+      const changes = action.payload?.changes || [];
+      const updated = applyPlanChangeProposal(sessions, changes);
+      if (JSON.stringify(updated) === JSON.stringify(sessions)) return { ok: false, message: "Nothing was changed: those sessions or exercises aren't in your plan." };
+      const saved = await saveSplit(updated);
+      if (!saved.ok) return { ok: false, message: `Not saved: ${saved.error}. Your plan has not changed. Please try again.` };
+      const workoutNow = workoutInProgress && activeSession ? applyPlanChangeToWorkout({ workout: activeSession, exerciseIdx, setProgress, completedSets, currentInputs }, changes) : null;
+      if (workoutNow?.changed) {
+        setActiveSession(workoutNow.workout);
+        setExerciseIdx(workoutNow.exerciseIdx);
+        setSetProgress(workoutNow.setProgress);
+        setCompletedSets(workoutNow.completedSets);
+        setCurrentInputs(workoutNow.currentInputs);
+        // The saved workout follows too, so a reload doesn't bring back the old one.
+        if (Object.values(workoutNow.completedSets).some(sets => sets?.length)) persistWorkoutLog(workoutNow.completedSets, { session: workoutNow.workout }).catch(() => {});
+      }
+      return { ok: true, message: ["Saved: those changes are now in your plan.", workoutNow?.changed ? "Today's workout is updated too." : "", ...(workoutNow?.notes || [])].filter(Boolean).join(" ") };
+    }
     if (action.scope === "permanent") {
       const updated = applyCoachActionToProgramme(sessions, action);
       if (JSON.stringify(updated) === JSON.stringify(sessions)) return { ok: false, message: "Nothing was changed: that exercise is not in your saved plan." };
@@ -6738,16 +6784,19 @@ function withPlanApproval(sessions, now = new Date()) {
         coachContext={workoutInProgress && activeSession ? {
           // Between sets: today's session and the last 2 workouts with the same name only.
           programme: sessions.filter(session => session.name?.toLowerCase() === activeSession.name?.toLowerCase()),
+          // Every session in brief, so a plan change can name any of them.
+          savedPlan: planOutline(sessions),
           workoutId: activeSession.trainingSessionId || null,
           activeWorkout: structuredWorkoutState,
           gymContext: activeSession.gymContext || null,
           recentWorkoutsBySession: recentWorkoutsForCoach(history.filter(log => log.session_name?.toLowerCase() === activeSession.name?.toLowerCase()), { perSession: 2, maxSessions: 1 }),
-        } : { programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
+        } : { programme: sessions, savedPlan: planOutline(sessions), workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
         planSessions={sessions}
-        onOpenChangePlan={() => {
+        onOpenChangePlan={request => {
           if (!planChangeHasPending) { setPlanChangeMessages([]); setPlanChangeRecommendation(null); }
-          setPlanChangeInput("");
+          // The request from the workout chat, typed in ready to send.
+          setPlanChangeInput(typeof request === "string" ? request : "");
           setPlanChangeOpen(true);
           setView("home");
         }}
@@ -6825,7 +6874,11 @@ function withPlanApproval(sessions, now = new Date()) {
     const weightGuidance = getWeightGuidance(currentExercise, sIdx);
     const suggestedWeight = weightGuidance?.weight;
     const lastSets = getLastSessionData(currentExercise);
-    const { weight, reps } = setInputsFor(exerciseIdx);
+    const { weight, reps, prefilled } = setInputsFor(exerciseIdx);
+    // After a set is logged, the next set's pre-filled numbers are faint
+    // until changed, so it's clear the last set went in.
+    const faintReps = exerciseCompletedSets.length > 0 && prefilled.reps;
+    const faintWeight = exerciseCompletedSets.length > 0 && prefilled.weight;
     const valuesLookSwapped = Number(reps) >= 30 && Number(weight) > 0 && Number(weight) <= 30;
     const exerciseIsComplete = exerciseCompletedSets.length >= totalSets;
     const plannedSetCount = activeSession.exercises.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0);
@@ -6865,7 +6918,7 @@ function withPlanApproval(sessions, now = new Date()) {
             <div style={{ color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
               {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN
             </div>
-            <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 9 }} onClick={() => remainingSetCount > 0 ? setEndWorkoutConfirm(remainingSetCount) : finishWorkout()} disabled={workoutFinishing}>
+            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 9, borderColor: "rgba(255,45,120,.55)" }} onClick={() => remainingSetCount > 0 ? setEndWorkoutConfirm(remainingSetCount) : finishWorkout()} disabled={workoutFinishing}>
               {workoutFinishing ? "SAVING..." : "END WORKOUT"}
             </button>
           </div>
@@ -6908,10 +6961,10 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
-                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps}
+                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps} data-prefilled={faintReps ? "faint" : undefined}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                       placeholder="0"
-                      style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
+                      style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: faintReps ? FAINT_INPUT : "#080C10", outline: "none" }} />
                   </label>
                   <div className="workout-steppers">
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-label="One rep fewer" onClick={() => stepSetInput("reps", -1)}>−1</button>
@@ -6924,10 +6977,10 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
-                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight}
+                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight} data-prefilled={faintWeight ? "faint" : undefined}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                       placeholder={suggestedWeight || "0"}
-                      style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
+                      style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: faintWeight ? FAINT_INPUT : "#080C10", outline: "none" }} />
                   </label>
                   <div className="workout-steppers">
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-label="2.5 kg less" onClick={() => stepSetInput("weight", -2.5)}>−2.5</button>

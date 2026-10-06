@@ -2,7 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 import { prepareAction } from "../../../lib/coaching/actions.js";
 import { conversationTurns, needsHistoricalRetrieval } from "../../../lib/coaching/context.js";
 import { WORKOUT_COACH_INSTRUCTIONS, WORKOUT_RESPONSE_SHAPE as responseShape } from "../../../lib/coaching/playbook.js";
-import { buildCoachSystemBlocks, cleanCoachReply, PLAN_CHANGE_FROM_CHAT } from "../../../lib/coaching/system.js";
+import { buildCoachSystemBlocks, cleanCoachReply, PLAN_CHANGE_FROM_CHAT, PLAN_CHANGE_NOT_PREPARED, PLAN_CHANGE_READY } from "../../../lib/coaching/system.js";
+import { droppedChangesNote } from "../../../lib/coaching/plan-change-reply.js";
 import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { openAnthropicStream, partialJsonStringField, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
 import { readCoachAnswer } from "../../../lib/coaching/coach-answer.js";
@@ -179,17 +180,29 @@ export async function POST(request) {
       if (memoryRows.length) await supabase.from("coach_memories").upsert(memoryRows, { onConflict: "user_id,category,memory_key" });
 
       const cleaned = cleanCoachReply(answer.message);
-      // A permanent change the coach could not propose (no ids in the data) gets
-      // the plain CHANGE PLAN answer and a button.
-      const askedForPermanent = /\b(permanent(ly)?|for good|every (week|time)|from now on|in my plan|to my plan)\b/i.test(message) && !preparedActions.some(({ action }) => action.scope === "permanent");
+      // A plan change waits in a Proposed change card under the reply.
+      const proposedChange = (storedActions || []).some((action) => action.scope === "permanent");
+      // A plan change the coach described but the app couldn't prepare (or
+      // may not make while pain is active), or a reply pointing to APPROVE &
+      // SAVE with no change of its own and none still waiting: the reply
+      // must not point to a card that isn't there.
+      const cardWaiting = (context.actions || []).some((action) => action?.scope === "permanent" && action?.status === "pending_approval");
+      const lostPlanChange = !proposedChange && ((answer.actions || []).some((raw) => raw?.type === "propose_plan_change") || (!cardWaiting && /APPROVE\s*&\s*SAVE/i.test(cleaned.message)));
+      // A permanent change the coach didn't propose gets the plain CHANGE PLAN
+      // answer and a button.
+      const askedForPermanent = /\b(permanent(ly)?|for good|every (week|time)|from now on|in my plan|to my plan)\b/i.test(message) && !proposedChange;
+      let reply = cleaned.planChangeHint && proposedChange ? PLAN_CHANGE_READY : cleaned.message;
+      if (!cleaned.planChangeHint && lostPlanChange) reply = `${reply.replace(/[^.!?\n]*APPROVE\s*&\s*SAVE[^.!?\n]*[.!?]?/gi, "").trim()} ${PLAN_CHANGE_NOT_PREPARED}`.trim();
+      else if (!cleaned.planChangeHint && askedForPermanent && !reply.includes("CHANGE PLAN")) reply = `${reply} ${PLAN_CHANGE_FROM_CHAT}`.trim();
+      if (proposedChange) reply += droppedChangesNote(preparedActions.reduce((total, prepared) => total + prepared.droppedChanges, 0));
       const result = {
-        message: cleaned.message,
+        message: reply,
         insights: (answer.insights || []).filter((insight) => !cleanCoachReply(insight?.text).planChangeHint).slice(0, 3),
         actions: storedActions || [],
         activePain: activePain.length > 0,
-        planChangeHint: cleaned.planChangeHint || askedForPermanent,
+        // The OPEN CHANGE PLAN button, whenever the reply points there.
+        planChangeHint: !proposedChange && (cleaned.planChangeHint || askedForPermanent || lostPlanChange || /\bCHANGE PLAN\b/.test(reply)),
       };
-      if (askedForPermanent && !cleaned.planChangeHint && !result.message.includes("CHANGE PLAN")) result.message = `${result.message} ${PLAN_CHANGE_FROM_CHAT}`.trim();
       await supabase.from("coach_messages").insert({ user_id: user.id, conversation_id: conversationId, role: "assistant", content: result.message, structured_payload: result });
       return result;
     };
