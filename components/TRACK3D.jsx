@@ -5757,6 +5757,10 @@ function Fitness({ user, isActive = true }) {
   const [planChangeRecommendation, setPlanChangeRecommendation] = useState(null);
   // Bumped to bring a waiting Proposed change card back into view.
   const [planChangeHighlight, setPlanChangeHighlight] = useState(0);
+  // A change still waiting for approval keeps its conversation when Change
+  // Plan is opened again. (Defined here: the workout screen returns before
+  // the plan-change functions further down.)
+  const planChangeHasPending = planChangeMessages.some(message => ["pending", "saving"].includes(message.proposal?.status));
   const planChangeLogRef = useRef(null);
   // New messages scroll the plan-change chat to the bottom; a change waiting
   // for approval stays pinned in view there.
@@ -6741,7 +6745,12 @@ function withPlanApproval(sessions, now = new Date()) {
         } : { programme: sessions, workoutId: activeSession?.trainingSessionId || null, activeWorkout: structuredWorkoutState, gymContext: activeSession?.gymContext || null, recentLegacyWorkouts: history.slice(0, 14), recentWorkoutsBySession: recentWorkoutsForCoach(history) }}
         onStructuredAction={applyStructuredCoachAction}
         planSessions={sessions}
-        onOpenChangePlan={() => { openPlanChangeCoach(); setView("home"); }}
+        onOpenChangePlan={() => {
+          if (!planChangeHasPending) { setPlanChangeMessages([]); setPlanChangeRecommendation(null); }
+          setPlanChangeInput("");
+          setPlanChangeOpen(true);
+          setView("home");
+        }}
       />
     </div>
   );
@@ -6768,7 +6777,7 @@ function withPlanApproval(sessions, now = new Date()) {
                         setPlanChangeRecommendation(null);
                         setPlanChangeOpen(true);
                         // A change still waiting for approval keeps its conversation.
-                        askPlanChangeCoach(message.openChangePlan, pendingPlanProposal() ? planChangeMessages : planChangeIntro);
+                        askPlanChangeCoach(message.openChangePlan, planChangeHasPending ? planChangeMessages : planChangeIntro);
                       }}>OPEN CHANGE PLAN</button></div>}
                     </div>
                   ))}
@@ -7777,7 +7786,7 @@ function withPlanApproval(sessions, now = new Date()) {
 
   const openPlanChangeCoach = () => {
     // A change still waiting for approval keeps its conversation.
-    if (!pendingPlanProposal()) {
+    if (!planChangeHasPending) {
       setPlanChangeMessages(planChangeIntro);
       setPlanChangeRecommendation(null);
     }
