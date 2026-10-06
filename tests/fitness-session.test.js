@@ -116,8 +116,8 @@ test("weekly workout progress counts this week's real workouts plus the one just
     { id: 9, date: "2026-10-07", total_volume: 5000 },
   ];
   const sessions = [{ name: "Push", days: ["MON", "THU"] }, { name: "Pull", days: ["TUE"] }, { name: "Legs", days: ["sat"] }];
-  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", sessions, 9), { completed: 3, planned: 4 });
-  assert.deepEqual(weeklyWorkoutProgress([], "2026-10-07", [], null), { completed: 1, planned: 0 });
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", sessions, 9), { completed: 3, planned: 4, activities: 0 });
+  assert.deepEqual(weeklyWorkoutProgress([], "2026-10-07", [], null), { completed: 1, planned: 0, activities: 0 });
 });
 
 test("the stale-workout cleanup never finalises the workout in progress", () => {
@@ -134,6 +134,6 @@ test("the stale-workout cleanup never finalises the workout in progress", () => 
 
 test("an empty finished workout is not counted towards the week", () => {
   const history = [{ id: 1, date: "2026-10-05", total_volume: 3000 }];
-  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9, { countCurrent: false }), { completed: 1, planned: 0 });
-  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9), { completed: 2, planned: 0 });
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9, { countCurrent: false }), { completed: 1, planned: 0, activities: 0 });
+  assert.deepEqual(weeklyWorkoutProgress(history, "2026-10-07", [], 9), { completed: 2, planned: 0, activities: 0 });
 });
