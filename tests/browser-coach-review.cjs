@@ -811,7 +811,11 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 1 OF 3').waitFor();
     await page.getByText('TARGET: 8-10 REPS').waitFor();
-    const saved = JSON.parse(writes.filter(w => w.table === 'workout_logs' && w.body && (JSON.parse(w.body).exercises || [])[0]?.sets?.length === 4).at(-1).body);
+    // The workout saves in the background: wait for the save with all four sets.
+    const withFour = () => writes.filter(w => w.table === 'workout_logs' && w.body && (JSON.parse(w.body).exercises || [])[0]?.sets?.length === 4);
+    for (let i = 0; i < 50 && !withFour().length; i++) await page.waitForTimeout(100);
+    assert.ok(withFour().length, 'all four sets saved');
+    const saved = JSON.parse(withFour().at(-1).body);
     assert.deepEqual(saved.exercises[0].sets.map(set => set.repRange), ['6-8', '6-8', '8', '10']);
   } else if (scenario === 'mealswap') {
     await openNutrition();
