@@ -49,6 +49,28 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await tab.goto('http://localhost:3123/app');
     await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
     assert.equal(new URL(tab.url()).pathname, '/app', 'still signed in after the browser was closed');
+    // Signed in for 7 days from signing in, then signed out.
+    const DAY = 24 * 60 * 60 * 1000;
+    const signedIn = async (window) => {
+      await tab.evaluate(value => localStorage.setItem('track3d-login-window', JSON.stringify(value)), window);
+      await tab.goto('http://localhost:3123/app');
+    };
+    await signedIn({ userId: loginUser.id, startedAt: Date.now() - 6 * DAY, expiresAt: Date.now() + DAY });
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    assert.equal(new URL(tab.url()).pathname, '/app', 'still signed in after 6 days');
+    // Signed in 4 hours ago under the 3-hour rule: 7 days from that sign-in.
+    await signedIn({ userId: loginUser.id, expiresAt: Date.now() - 60 * 60 * 1000 });
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    assert.equal(new URL(tab.url()).pathname, '/app', 'a device signed in under the 3-hour rule gets 7 days');
+    // The window ends while the app is open: signed out then.
+    await signedIn({ userId: loginUser.id, startedAt: Date.now() - 7 * DAY + 12000 });
+    await tab.getByText('DAILY SCORE').waitFor({ timeout: 10000 });
+    await tab.waitForURL('**/login', { timeout: 30000 });
+    // Signed in 8 days ago (with the sign-in session still saved): straight to the sign-in page.
+    await tab.evaluate(auth => localStorage.setItem('track3d-auth', auth), JSON.stringify({ access_token: loginToken, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 30 * 86400, token_type: 'bearer', user: loginUser }));
+    await signedIn({ userId: loginUser.id, startedAt: Date.now() - 8 * DAY, expiresAt: Date.now() - DAY });
+    await tab.waitForURL('**/login', { timeout: 20000 });
+    assert.equal(await tab.evaluate(() => localStorage.getItem('track3d-login-window')), null, 'the ended window is cleared');
     await ctx.close();
     fs.rmSync(dir, { recursive: true, force: true });
     console.log('PASS persistlogin');

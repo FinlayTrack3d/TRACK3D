@@ -12165,13 +12165,18 @@ export default function App() {
       await supabase.auth.signOut({ scope: "local" });
       if (!cancelled) window.location.replace("/login");
     };
+    // Browsers run a timer of more than about 24 days at once, so a long
+    // sign-in window is checked again at least once a day.
+    const scheduleExpiry = expiresAt => {
+      clearTimeout(expiryTimer);
+      expiryTimer = setTimeout(() => (Date.now() >= expiresAt ? void expire() : scheduleExpiry(expiresAt)), Math.min(expiresAt - Date.now(), 24 * 60 * 60 * 1000));
+    };
     const accept = session => {
       if (cancelled) return;
       if (!session) { window.location.replace("/login"); return; }
       const expiresAt = loginWindowExpiry(session.user.id) ?? beginLoginWindow(session.user.id);
       if (expiresAt <= Date.now()) { void expire(); return; }
-      clearTimeout(expiryTimer);
-      expiryTimer = setTimeout(expire, expiresAt - Date.now());
+      scheduleExpiry(expiresAt);
       setUser(previous => previous?.id === session.user.id ? previous : session.user);
       setAuthError("");
       setAuthLoading(false);
