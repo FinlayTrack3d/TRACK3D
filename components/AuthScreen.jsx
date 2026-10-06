@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { beginLoginWindow, loginWindowExpiry } from "../lib/login-window";
+import { HEALTH_CONSENT_TEXT, signUpConsentMetadata } from "../lib/account";
 import PublicShell from "./PublicShell";
 import styles from "./PublicPages.module.css";
 
@@ -14,15 +15,19 @@ const COPY = {
   reset: { title: "Choose a new password", intro: "Use at least eight characters and keep it unique to TRACK3D.", submit: "UPDATE PASSWORD" },
 };
 
-export default function AuthScreen({ mode }) {
+// notice: a message to show first, such as after the account was deleted.
+export default function AuthScreen({ mode, notice = "" }) {
   const copy = COPY[mode];
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(notice);
   const [isError, setIsError] = useState(false);
+  // Sign-up only: consent to storing health information. Separate from the
+  // Terms, never ticked in advance, and required.
+  const [healthConsent, setHealthConsent] = useState(false);
 
   useEffect(() => {
     if (mode === "reset") return;
@@ -54,7 +59,10 @@ export default function AuthScreen({ mode }) {
     }
 
     if (mode === "signup") {
-      const { error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${window.location.origin}/app` } });
+      if (!healthConsent) return fail("To create an account, tick the box to agree to TRACK3D storing your health information.");
+      // The consent goes with the new account, and the database records it
+      // on the profile (time and policy version).
+      const { error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${window.location.origin}/app`, data: signUpConsentMetadata() } });
       if (error) return fail(error.message);
       setMessage("Check your email to confirm your account.");
       setLoading(false);
@@ -105,6 +113,11 @@ export default function AuthScreen({ mode }) {
         </label>}
 
         {needsConfirmation && <p className={styles.hint}>Use eight or more characters. A longer, unique passphrase is easiest to remember and safest.</p>}
+
+        {mode === "signup" && <label className={styles.consent}>
+          <input type="checkbox" name="healthConsent" required checked={healthConsent} onChange={event => setHealthConsent(event.target.checked)} />
+          <span>{HEALTH_CONSENT_TEXT} <Link href="/privacy#health-data">How we use it</Link>. You can withdraw consent at any time.</span>
+        </label>}
         {message && <div role={isError ? "alert" : "status"} className={`${styles.message} ${isError ? styles.error : ""}`}>{message}</div>}
 
         <button className={`${styles.primaryButton} ${styles.submit}`} type="submit" disabled={loading}>{loading ? "PLEASE WAIT..." : copy.submit}</button>

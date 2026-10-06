@@ -23,7 +23,9 @@ with expected(table_name, column_name) as (values
   ('weekly_reports', 'diet_suggestions'), ('weekly_reports', 'created_at'),
   ('nutrition_plans', 'setup'),
   ('user_profiles', 'user_id'), ('user_profiles', 'height_cm'), ('user_profiles', 'date_of_birth'),
-  ('user_profiles', 'sex'), ('user_profiles', 'updated_at')
+  ('user_profiles', 'sex'), ('user_profiles', 'updated_at'),
+  ('user_profiles', 'health_consent_at'), ('user_profiles', 'health_consent_version'),
+  ('user_profiles', 'health_consent_withdrawn_at')
 )
 select 'missing column' as problem, e.table_name, e.column_name
 from expected e
@@ -51,8 +53,33 @@ union all
 select case when r.oid is null then 'missing table'
             when not r.relrowsecurity then 'row level security off'
             else 'missing policy' end, t.table_name, null
-from (values ('habits'), ('habit_completions'), ('daily_goals'), ('coach_memory'), ('weekly_reports'), ('user_profiles')) as t(table_name)
+from (values ('habits'), ('habit_completions'), ('daily_goals'), ('coach_memory'), ('weekly_reports'), ('user_profiles'), ('data_exports')) as t(table_name)
 left join pg_class r on r.relname = t.table_name and r.relnamespace = 'public'::regnamespace and r.relkind = 'r'
 where r.oid is null or not r.relrowsecurity
    or not exists (select 1 from pg_policies p where p.schemaname = 'public' and p.tablename = t.table_name)
+union all
+-- Profile -> Account: health data consent, Download my data and Delete my account.
+select 'missing function', f.name, null
+from (values ('export_my_data'), ('delete_my_account'), ('set_health_consent'), ('record_signup_health_consent')) as f(name)
+where not exists (select 1 from pg_proc p where p.proname = f.name and p.pronamespace = 'public'::regnamespace)
+union all
+-- Health data consent ticked at sign-up is recorded on the profile.
+select 'missing trigger', 'auth.users', 'record_signup_health_consent'
+where not exists (select 1 from pg_trigger t where t.tgname = 'record_signup_health_consent' and t.tgrelid = 'auth.users'::regclass)
+union all
+-- Every other table holding users' rows (including ones made by hand in the
+-- dashboard) must only let each user reach their own. chat_requests and
+-- account_password_checks are only used by database functions, so they have
+-- row level security on and no policies.
+select case when not c.relrowsecurity then 'row level security off' else 'missing policy' end, c.relname::text, 'user_id table'
+from pg_class c
+join pg_attribute a on a.attrelid = c.oid and a.attname = 'user_id' and not a.attisdropped
+where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
+  and c.relname not in ('habits', 'habit_completions', 'daily_goals', 'coach_memory', 'weekly_reports', 'user_profiles', 'data_exports', 'chat_requests', 'account_password_checks')
+  and (not c.relrowsecurity or not exists (select 1 from pg_policies p where p.schemaname = 'public' and p.tablename = c.relname))
+union all
+-- Users must be able to delete their own progress photos.
+select 'missing storage policy', 'storage.objects', 'checkin-photos delete'
+where not exists (select 1 from pg_policies p where p.schemaname = 'storage' and p.tablename = 'objects'
+                  and p.cmd = 'DELETE' and p.qual like '%checkin-photos%')
 order by 1, 2, 3;

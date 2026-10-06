@@ -1,4 +1,14 @@
 import { Geist, Geist_Mono } from "next/font/google";
+// Inter and Orbitron are served from this site (not loaded from Google), so
+// pages make no requests to other sites for fonts.
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/orbitron/400.css";
+import "@fontsource/orbitron/600.css";
+import "@fontsource/orbitron/700.css";
+import "@fontsource/orbitron/900.css";
 import "./globals.css";
 
 const geistSans = Geist({

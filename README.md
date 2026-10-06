@@ -12,6 +12,16 @@ Before enabling it in a deployed environment:
 
 Legacy `workout_logs` writes remain authoritative and continue if the additive migration is not installed. Normalized V1.2 session/set writes fail softly until it is available. The migration is intentionally additive and does not backfill legacy workout JSON; write a backfill only after validating representative production rows.
 
+## Privacy and account controls
+
+- Health data consent is a separate, required tick box at sign-up. Existing users are asked once, at their next visit. It can be withdrawn in Profile → Account. The wording and version are in `lib/account.js`.
+- Profile → Account also has Download my data (a ZIP with one JSON file per table plus the progress photos, once a day) and Delete my account (password, then type DELETE).
+- These need `supabase/migrations/202610060001_privacy_account.sql` (Supabase Dashboard → SQL Editor). Afterwards, `supabase/check_schema.sql` should return no rows.
+- After deleting a test account, put its user id in `supabase/verify_account_deleted.sql` and run it: every line should be 0.
+- Calorie minimums (1,200 kcal for women, 1,500 for men, 1,350 when sex isn't given) are `CALORIE_FLOOR` in `lib/nutrition-safety.js`.
+- The privacy notice needs the controller's name and contact email: `CONTROLLER` in `app/privacy/page.js`.
+- There are no analytics or tracking cookies, and fonts are served from the site, so no cookie banner is needed. If analytics are ever added, they must not load until the user accepts them.
+
 ## Getting Started
 
 First, run the development server:
