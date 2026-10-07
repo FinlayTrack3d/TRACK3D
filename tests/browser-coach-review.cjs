@@ -367,8 +367,9 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(await page.getByTestId('next-up').getByText('Upper A').count(), 0, 'no second continue card');
     await banner.click();
     await page.getByText('SET 2 OF 3').waitFor();
-    assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '80', 'weight from the set just logged');
-    assert.equal(await page.getByLabel('Reps').inputValue(), '8', 'reps from the bottom of the target range');
+    // Suggested faintly: the weight and reps of the set just logged.
+    assert.equal(await page.getByLabel('Weight in kilograms').getAttribute('placeholder'), '80', 'weight from the set just logged');
+    assert.equal(await page.getByLabel('Reps').getAttribute('placeholder'), '9', 'reps from the set just logged');
     await page.waitForTimeout(500);
     assert.equal(writes.filter(w => w.table === 'workout_logs').length, 0, 'opening the workout writes nothing');
     await page.getByRole('button', { name: 'Log set' }).click();
@@ -1018,7 +1019,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
     await page.getByText('SET 1 OF 3').waitFor();
     // Last time this was logged as "Dumbbell Goblet Squat": 18 kg carries over.
-    assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '18');
+    assert.equal(await page.getByLabel('Weight in kilograms').getAttribute('placeholder'), '18');
     await page.getByText(/LAST TIME/).first().waitFor();
   } else if (scenario === 'weekcount') {
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();
