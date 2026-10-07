@@ -11,7 +11,8 @@
 //  nutritionorder, dashlog, libraryedit, restdaybuild, restdayai, weeklybadge, fitnessrest, headerprofile,
 //  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
-//  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror, longname
+//  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror, longname,
+//  hyroxdetails, emptyback, switchworkout, sidebarkeys, fitnessa11y, dashloading, taptargets
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -148,7 +149,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     nutrition_logs: [
       ...(scenario === 'offplancap' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 3720, total_protein: 85, meals_completed: { 0: true, 1: true, _review_complete: true }, off_plan_food: 'large pizza', off_plan_calories: 2420 }]
         : scenario === 'offplanmacros' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 1000, total_protein: 70, meals_completed: { 0: true, _off_plan: { protein: 30, carbs: 50, fats: 10 }, _review_complete: false }, off_plan_food: 'toast', off_plan_calories: 400 }]
-        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'weeklyplanstart', 'profilelive', 'profileexperience', 'mealswap', 'mealswapdash'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
+        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'hyroxdetails', 'weeklyplanstart', 'profilelive', 'profileexperience', 'mealswap', 'mealswapdash'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
       { id: 'n0', user_id: user.id, date: yesterday, total_calories: 2050, total_protein: 130, meals_completed: [true, true, true] },
     ],
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
@@ -159,7 +160,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       ] : scenario === 'nextupworkout' ? [{ id: 41, user_id: user.id, date: yesterday, session_name: 'Lower A', in_progress: true, total_volume: 500, duration_mins: 20, created_at: `${yesterday}T18:00:00Z`, exercises: [{ name: 'Squat', sets: [{ weight: '100', reps: '5' }] }] }]
       : scenario === 'setprefill' ? [{ id: 'old', user_id: user.id, date: shiftKey(today, -7), session_name: 'Push A', in_progress: false, total_volume: 2000, duration_mins: 40, created_at: `${shiftKey(today, -7)}T18:00:00Z`, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '9' }, { weight: '80', reps: '8' }, { weight: '80', reps: '8' }] }] }]
       : scenario === 'weeklybadge' ? [{ id: 'wl', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [] }] : scenario === 'dashexcludes' ? [{ id: 'w1', user_id: user.id, date: today, session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '6', personalBest: { type: 'weight_pb', label: 'Weight PB' } }, { weight: '80', reps: '5' }] }] }] : [],
-    workout_splits: ['loadwrites', 'setprefill', 'nextupworkout', 'nextupmorning', 'nextupslow', 'nextupmorningslow', 'longname'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: ['loadwrites', 'nextupslow'].includes(scenario) ? 'Upper A' : 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: scenario === 'longname' ? 'Single-Arm Dumbbell Bent-Over Row (Bench Supported)' : 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }]
+    workout_splits: ['loadwrites', 'setprefill', 'nextupworkout', 'nextupmorning', 'nextupslow', 'nextupmorningslow', 'longname', 'emptyback', 'fitnessa11y', 'dashloading'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: ['loadwrites', 'nextupslow'].includes(scenario) ? 'Upper A' : 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: scenario === 'longname' ? 'Single-Arm Dumbbell Bent-Over Row (Bench Supported)' : 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }]
       : scenario === 'fitnessrest' ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach', 'planchangebutton'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
   // New scenarios' data.
@@ -172,8 +173,8 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     tables.user_profiles = [{ user_id: user.id, height_cm: '178.0', date_of_birth: '1995-01-01', sex: 'male' }];
   }
   if (scenario === 'habitlink') Object.assign(tables, { habits: [{ id: 'h2', user_id: user.id, name: 'Stretch or move', category: 'daily', created_at: '2026-01-01T00:00:00Z' }], habit_completions: [] });
-  if (['activitylog', 'activitynextup'].includes(scenario)) tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [
-    ...(scenario === 'activitynextup' ? [{ name: 'HYROX', kind: 'activity', activityType: 'hyrox', days: [dayCodes[todayDow]], duration_mins: 60, exercises: [], approval: { approved: true } }] : []),
+  if (['activitylog', 'activitynextup', 'hyroxdetails'].includes(scenario)) tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [
+    ...(['activitynextup', 'hyroxdetails'].includes(scenario) ? [{ name: 'HYROX', kind: 'activity', activityType: 'hyrox', days: [dayCodes[todayDow]], duration_mins: 60, exercises: [], approval: { approved: true } }] : []),
     { name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
   ] }];
   if (scenario === 'smallfixes') {
@@ -188,6 +189,12 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     { name: 'Push A', days: ['MON'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
     { name: 'Pull A', days: ['WED'], exercises: [{ name: 'Row', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
   ] }];
+  if (['switchworkout', 'taptargets'].includes(scenario)) tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
+    { name: 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+    { name: 'Pull A', days: [dayCodes[(todayDow + 2) % 7]], exercises: [{ name: 'Row', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+  ] }];
+  // Today's morning and end-of-day check-in are both done, and a workout is scheduled.
+  if (scenario === 'dashloading') Object.assign(tables, { morning_checkins: [{ user_id: user.id, date: today, score: 8, data: {} }], end_of_day: [{ id: 'e1', user_id: user.id, date: today }] });
   // Rep targets saved as one string, as a coach reply or an import sometimes left them.
   if (scenario === 'repsplit') tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
     { name: 'Upper A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 4, reps: '6-8,6-8,8,10' }, { name: 'Row', sets: 3, reps: ['8-10,8-10,12', '8-10,8-10,12', '8-10,8-10,12'] }], approval: { approved: true } },
@@ -238,6 +245,15 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: `${today}T08:00:00Z`, sessions: [{ name: 'Push A', days: ['MON', 'THU'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
     tables.workout_logs = [{ id: 'old', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Old Plan Day', in_progress: false, total_volume: 2000, duration_mins: 40, exercises: [] }];
   }
+  if (scenario === 'dashloading') await context.addInitScript(() => {
+    window.__defaultsShown = [];
+    new MutationObserver(() => {
+      const text = document.body?.innerText || '';
+      for (const shown of ['Rest day. Nothing scheduled.', 'Set your daily calorie target first.', 'NOT DONE YET', 'READY TO CLOSE OUT YOUR DAY?']) {
+        if (text.includes(shown) && !window.__defaultsShown.includes(shown)) window.__defaultsShown.push(shown);
+      }
+    }).observe(document, { childList: true, subtree: true, characterData: true });
+  });
   const writes = [];
   const reads = [];
   const chats = [];
@@ -319,6 +335,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     // Slow reads for one tab, so a Next up tap arrives while it is still loading.
     if (scenario === 'nextupslow' && table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true' && url.searchParams.get('date')?.startsWith('eq.')) await new Promise(resolve => setTimeout(resolve, 3000));
     if (scenario === 'nextupmorningslow' && table === 'morning_checkins' && url.searchParams.get('limit') === '30') await new Promise(resolve => setTimeout(resolve, 3000));
+    if (scenario === 'dashloading' && table === 'end_of_day') await new Promise(resolve => setTimeout(resolve, 2500));
     const dateParam = url.searchParams.get('date');
     const dateMatches = r => !dateParam || (dateParam.startsWith('eq.') ? String(r.date) === dateParam.slice(3) : dateParam.startsWith('lt.') ? String(r.date) < dateParam.slice(3) : true);
     if (table === 'workout_logs' && url.searchParams.get('in_progress') === 'eq.true') rows = ['loadwrites', 'nextupslow', 'nextupworkout', 'stalework'].includes(scenario) ? rows.filter(r => r.in_progress && dateMatches(r)) : [];
@@ -500,12 +517,151 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.deepEqual(writes.map(w => `${w.method} ${w.table}`), [], 'yesterday\'s unfinished workout is not closed just by opening the app');
     await page.getByTestId('next-up-action').click();
     await page.getByText('SET 1 OF 3').waitFor({ timeout: 10000 });
-    const started = writes.filter(w => w.table === 'workout_logs' && w.method === 'POST');
-    assert.equal(started.length, 1, 'one tap started the workout');
     // Starting a workout closes yesterday's unfinished one, and only that row.
     const closed = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body === '{"in_progress":false}');
     assert.equal(closed.length, 1);
     assert.match(decodeURIComponent(closed[0].url), /id=in\.\(41\)/);
+    // Nothing is saved as a workout until a set is logged; then it is, from when it started.
+    await page.waitForTimeout(500);
+    assert.equal(writes.filter(w => w.table === 'workout_logs' && w.method === 'POST').length, 0, 'starting saves no workout');
+    await page.getByLabel('Weight in kilograms').fill('60');
+    await page.getByRole('button', { name: 'Log set' }).click();
+    await page.getByText('SET 2 OF 3').waitFor();
+    await page.waitForTimeout(500);
+    const started = writes.filter(w => w.table === 'workout_logs' && w.method === 'POST');
+    assert.equal(started.length, 1, 'the first set saved the workout');
+    const row = JSON.parse(started[0].body);
+    assert.deepEqual(row.exercises[0].sets.map(set => `${set.weight}x${set.reps}`), ['60x10']);
+    assert.equal(row.in_progress, true);
+    assert.ok(Date.parse(row.created_at) <= Date.parse(row.exercises[0].sets[0].at), 'dated from when it started');
+  } else if (scenario === 'emptyback') {
+    // Opened and left with nothing logged: no workout stays active, and nothing is saved.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
+    await page.getByText('SET 1 OF 3').waitFor({ timeout: 10000 });
+    await page.getByRole('button', { name: '← BACK TO FITNESS' }).click();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).waitFor();
+    assert.equal(await page.getByText('CONTINUE ACTIVE WORKOUT').count(), 0);
+    await page.getByRole('button', { name: /DASHBOARD$/ }).last().click();
+    await page.getByText('SCHEDULED TODAY').waitFor();
+    assert.equal(await page.getByTestId('active-banner-fitness').count(), 0, 'no active workout banner');
+    await page.reload();
+    await page.getByText('SCHEDULED TODAY').waitFor({ timeout: 20000 });
+    await page.waitForTimeout(1000);
+    assert.equal(await page.getByTestId('active-banner-fitness').count(), 0, 'not brought back by a reload');
+    assert.deepEqual(writes.filter(w => w.table === 'workout_logs').map(w => w.method), [], 'no workout saved');
+  } else if (scenario === 'switchworkout') {
+    // With sets logged, starting another workout asks first; the logged sets are kept either way.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
+    await page.getByText('SET 1 OF 3').waitFor({ timeout: 10000 });
+    await page.getByLabel('Weight in kilograms').fill('60');
+    await page.getByRole('button', { name: 'Log set' }).click();
+    await page.getByText('SET 2 OF 3').waitFor();
+    await page.getByRole('button', { name: '← BACK TO FITNESS · PROGRESS SAVED' }).click();
+    await page.getByRole('button', { name: 'Switch workout' }).click();
+    const other = page.locator('.t3d-card').filter({ has: page.getByRole('heading', { name: 'OTHER WORKOUTS' }) }).getByRole('button', { name: /^Pull A/ });
+    await other.click();
+    const dialog = page.getByRole('alertdialog', { name: 'START PULL A?' });
+    await dialog.waitFor();
+    assert.match(await dialog.textContent(), /Push A has 1 set logged/);
+    await dialog.getByRole('button', { name: 'KEEP PUSH A' }).click();
+    assert.equal(await page.getByRole('alertdialog').count(), 0);
+    await page.getByText('CONTINUE ACTIVE WORKOUT').waitFor();
+    // Restarting the same workout asks too, and keeping it closes everything.
+    await page.getByRole('button', { name: 'Restart it' }).click();
+    await page.getByRole('button', { name: 'START WORKOUT', exact: true }).click();
+    const restart = page.getByRole('alertdialog', { name: 'RESTART PUSH A?' });
+    await restart.waitFor();
+    assert.match(await restart.textContent(), /Push A has 1 set logged\. Restarting finishes this one now and starts Push A again; its sets stay saved\./);
+    await restart.getByRole('button', { name: 'KEEP PUSH A' }).click();
+    assert.equal(await page.getByRole('button', { name: 'START WORKOUT', exact: true }).count(), 0, 'the options are closed');
+    assert.equal(writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH').length, 0, 'kept: nothing finished');
+    await other.click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'START PULL A' }).click();
+    await page.getByText('SET 1 OF 3').waitFor({ timeout: 10000 });
+    assert.equal(await page.getByTestId('exercise-name').textContent(), 'Row');
+    const finished = writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH' && w.body === '{"in_progress":false}');
+    assert.equal(finished.length, 1, 'Push A finished, with its set');
+    assert.match(decodeURIComponent(finished[0].url), /id=eq\.wlog-new/);
+  } else if (scenario === 'sidebarkeys') {
+    // Desktop: the sidebar's sections are buttons, reached and opened with the keyboard.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const item = name => page.locator('nav.t3d-sidebar').getByRole('button', { name, exact: true });
+    await item('DASHBOARD').waitFor();
+    assert.equal(await item('DASHBOARD').getAttribute('aria-current'), 'page');
+    await item('DASHBOARD').focus();
+    await page.keyboard.press('Tab');
+    assert.ok(await item('MORNING').evaluate(el => el === document.activeElement), 'Tab reaches Morning');
+    await page.keyboard.press('Tab');
+    assert.ok(await item('FITNESS').evaluate(el => el === document.activeElement), 'then Fitness');
+    assert.equal(await item('FITNESS').evaluate(el => getComputedStyle(el).outlineStyle), 'solid', 'the focus shows');
+    await page.keyboard.press('Enter');
+    await page.getByRole('heading', { level: 1, name: 'FITNESS' }).waitFor();
+    assert.equal(await item('FITNESS').getAttribute('aria-current'), 'page');
+    assert.equal(await item('DASHBOARD').getAttribute('aria-current'), null);
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Space');
+    await page.getByRole('heading', { level: 1, name: 'NUTRITION' }).waitFor();
+  } else if (scenario === 'fitnessa11y') {
+    // Screen readers: Fitness has headings, and its buttons and boxes say what they are for.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('heading', { level: 1, name: 'FITNESS' }).waitFor();
+    await page.getByRole('heading', { level: 2, name: 'YOUR WEEKLY PLAN' }).waitFor();
+    for (const name of ['RECOMMENDED NEXT SESSION', 'AI COACH', 'THIS WEEK · MON TO SUN', 'WORKOUT HISTORY']) {
+      assert.equal(await page.getByRole('heading', { level: 2, name }).count(), 1, `${name} is a heading`);
+    }
+    await page.getByRole('button', { name: 'EDIT SESSIONS' }).click();
+    const editor = page.getByRole('dialog', { name: 'EDIT SESSIONS' });
+    await editor.getByRole('button', { name: 'Remove Bench Press from Push A' }).waitFor();
+    await editor.getByRole('textbox', { name: 'Bench Press set 2 reps' }).waitFor();
+    await editor.getByRole('spinbutton', { name: 'Bench Press sets' }).waitFor();
+    const tree = await editor.ariaSnapshot();
+    assert.doesNotMatch(tree, /- (textbox|spinbutton)(:|$)/m, 'every box has a name');
+    assert.doesNotMatch(await page.locator('body').ariaSnapshot(), /button "[^"\w]{1,2}"/, 'no button named only by a symbol');
+  } else if (scenario === 'dashloading') {
+    // While today's data loads, the cards say so instead of showing defaults.
+    const card = title => page.locator('.t3d-card').filter({ has: page.locator('.t3d-ctitle', { hasText: new RegExp(`^${title}$`) }) });
+    assert.equal(await card('CALORIES').getByText('Loading...').count(), 1);
+    assert.equal(await card('FITNESS TODAY').getByText('Loading...').count(), 1);
+    await card('CALORIES').getByText('EATEN OF 2,100 TARGET').waitFor({ timeout: 10000 });
+    assert.match(await card('FITNESS TODAY').textContent(), /Push A.*SCHEDULED TODAY/);
+    assert.match(await card('MORNING ROUTINE').textContent(), /DONE · SCORE 8\/10/);
+    await page.getByText('DAY CHECKED IN').waitFor();
+    assert.deepEqual(await page.evaluate(() => window.__defaultsShown), [], 'no default shown before the data loaded');
+  } else if (scenario === 'taptargets') {
+    // Phone width: every button, link, box and handle is at least 44 × 44 px.
+    const small = () => page.evaluate(() => [...document.querySelectorAll('button, a[href], input:not([type=hidden]), select, textarea, summary, [role=button]')].flatMap(el => {
+      const box = el.getBoundingClientRect(), style = getComputedStyle(el);
+      // Hidden, or a link inside a sentence (exempt).
+      if (!box.width || !box.height || style.visibility === 'hidden' || el.closest('[aria-hidden="true"]') || (el.tagName === 'A' && style.display === 'inline')) return [];
+      const name = (el.getAttribute('aria-label') || el.innerText || el.placeholder || el.type || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      return box.width < 44 || box.height < 44 ? [`${el.tagName.toLowerCase()} "${name}" ${Math.round(box.width)}×${Math.round(box.height)}`] : [];
+    }));
+    const found = {};
+    await page.getByText('EATEN OF 2,100 TARGET').waitFor();
+    found.dashboard = await small();
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    // The rest timer on, so its controls are measured too.
+    await page.getByRole('button', { name: 'OFF', exact: true }).click();
+    await page.getByRole('button', { name: '90s' }).waitFor();
+    await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
+    await page.getByText('SET 1 OF 3').waitFor({ timeout: 10000 });
+    await page.getByLabel('Weight in kilograms').fill('60');
+    await page.getByRole('button', { name: 'Log set' }).click();
+    await page.getByText('SET 2 OF 3').waitFor();
+    await page.getByRole('button', { name: 'SKIP' }).waitFor();
+    found.workout = await small();
+    await page.getByRole('button', { name: '← BACK TO FITNESS · PROGRESS SAVED' }).click();
+    await page.getByRole('heading', { level: 2, name: 'YOUR WEEKLY PLAN' }).waitFor();
+    found.fitness = await small();
+    for (const tab of ['MORNING', 'NUTRITION', 'HABITS']) {
+      await page.getByRole('button', { name: new RegExp(`${tab}$`) }).last().click();
+      await page.getByRole('heading', { level: 1, name: tab }).waitFor();
+      await page.waitForTimeout(800);
+      found[tab.toLowerCase()] = await small();
+    }
+    for (const [screen, list] of Object.entries(found)) assert.deepEqual(list, [], `${screen}: ${list.join('; ')}`);
   } else if (scenario === 'nextupslow') {
     // Tapped while Fitness is still loading: once it has loaded, the
     // unfinished workout is continued, not replaced by a new one.
@@ -710,7 +866,12 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByTestId('log-activity').click();
     const form = page.getByTestId('activity-form');
     await form.getByRole('button', { name: 'RUN', exact: true }).click();
+    // The minutes are required: SAVE ACTIVITY is off, and says why, until they're in.
+    assert.equal(await form.getByRole('button', { name: /SAVE ACTIVITY/ }).isDisabled(), true);
+    await form.getByText('Enter the minutes (2 or more) to save.').waitFor();
     await form.getByLabel('Minutes').fill('45');
+    assert.equal(await form.getByRole('button', { name: /SAVE ACTIVITY/ }).isDisabled(), false);
+    assert.equal(await form.getByText('Enter the minutes (2 or more) to save.').count(), 0);
     await form.getByLabel('Distance in km').fill('5');
     await form.getByRole('button', { name: 'HARD', exact: true }).click();
     if (process.env.SHOT) await page.screenshot({ path: 'activity.png' });
@@ -732,6 +893,15 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.locator(`[data-workout-day="${freeDay}"]`).getByText('HYROX · 60 min').waitFor();
     const split = JSON.parse(writes.filter(w => w.table === 'workout_splits').at(-1).body);
     assert.deepEqual(split.sessions.at(-1), { name: 'HYROX', kind: 'activity', activityType: 'hyrox', days: [freeDay], duration_mins: 60, exercises: [], approval: { approved: true } });
+  } else if (scenario === 'hyroxdetails') {
+    // An activity has no exercise list: its preview says "details" and shows what it is.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: 'View HYROX details' }).click();
+    const details = page.getByTestId('plan-preview').getByTestId('activity-details');
+    await details.waitFor();
+    assert.match(await details.textContent(), /HYROX · about 60 minutes/);
+    assert.match(await details.textContent(), /no exercises or sets/);
+    assert.equal(await page.getByRole('button', { name: /View HYROX exercises/ }).count(), 0);
   } else if (scenario === 'activitynextup') {
     // A planned activity due today: Next up logs it in one tap.
     await page.getByTestId('next-up-title').filter({ hasText: 'HYROX' }).waitFor();

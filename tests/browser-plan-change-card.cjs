@@ -3,7 +3,7 @@
 // Browser checks for the Proposed change card: a change the coach proposes
 // shows directly under its message with before → after lines, APPROVE & SAVE
 // and DISCARD; it scrolls into view and stays in sight while it waits.
-// Scenarios: cardremove, carddiscard, cardreplace, coachcard, workoutcard
+// Scenarios: cardremove, carddiscard, cardreplace, coachcard, workoutcard, cardaftererror
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'cardremove';
@@ -32,11 +32,16 @@ const BASE = 'http://localhost:3123';
   // The fitness coach is in the workout screen: one session, every day.
   const everyDay = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
   if (scenario === 'coachcard') split.sessions = [{ ...split.sessions[0], days: everyDay }];
-  if (scenario === 'workoutcard') split.sessions = [{ name: 'Push A', days: everyDay, approval: approved, exercises: [
+  if (['workoutcard', 'cardaftererror'].includes(scenario)) split.sessions = [{ name: 'Push A', days: everyDay, approval: approved, exercises: [
     { name: 'Bench Press', sets: 4, reps: sets(4, '8-10') },
     { name: 'Shoulder Press', sets: 3, reps: sets(3, '10') },
     { name: 'Cable Fly', sets: 3, reps: sets(3, '12-15') },
   ] }];
+  // A chat saved by an earlier version, which kept an error reply.
+  if (scenario === 'cardaftererror') await context.addInitScript(({ id }) => {
+    const key = `track3d-coach-fitness-${id}`;
+    if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify({ started: true, messages: [{ role: 'user', content: 'How heavy should bench be?' }, { role: 'assistant', content: 'Coach returned an invalid response.' }], actions: [] }));
+  }, { id: user.id });
   const planRequests = [];
   const coachRequests = [];
   const coachActions = [];
@@ -57,6 +62,7 @@ const BASE = 'http://localhost:3123';
       if (url.pathname === '/api/coach') {
         const body = JSON.parse(req.postData() || '{}');
         coachRequests.push(body);
+        if (/are you busy/i.test(body.message)) return route.fulfill({ status: 503, json: { error: 'The coach is busy. Try again in a minute.' } });
         // Plan changes by name, as the workout coach proposes them.
         const planChange = (id, message, changes) => route.fulfill({ json: { message, insights: [], activePain: false, conversationId: 'c1', actions: [
           { id, action_type: 'propose_plan_change', scope: 'permanent', status: 'pending_approval', payload: { type: 'propose_plan_change', scope: 'permanent', reason: 'Shorter session.', changes } },
@@ -263,6 +269,36 @@ const BASE = 'http://localhost:3123';
     // Kept with the chat, so the cards stay under their messages after a reload.
     const kept = await page.evaluate(id => JSON.parse(localStorage.getItem(`track3d-coach-fitness-${id}`)).actions.map(action => `${action.id} ${action.status}`), user.id);
     assert.deepEqual(kept, ['act-plan-1 applied', 'act-plan-2 rejected']);
+  } else if (scenario === 'cardaftererror') {
+    // An error reply, then a proposed change: neither error is kept, and after
+    // a reload the card is still under its own message.
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    await page.getByText('EXERCISE 1 OF 3').waitFor();
+    await page.getByLabel('Weight in kilograms').fill('60');
+    await page.getByRole('button', { name: 'Log set' }).click();
+    await page.getByText('SET 2 OF 4').waitFor();
+    // The saved chat was already started, so it opens as it was left.
+    await page.getByText('How heavy should bench be?').waitFor();
+    assert.equal(await page.getByText('Coach returned an invalid response.').count(), 0, 'the old error reply is gone');
+    const input = page.getByPlaceholder('Ask anything...');
+    await input.fill('are you busy');
+    await input.press('Enter');
+    await page.getByText('The coach is busy. Try again in a minute.').waitFor();
+    await input.fill('Take cable fly out of my plan and make bench 3 sets');
+    await input.press('Enter');
+    await page.getByTestId('proposed-change').getByText('Push A: Cable Fly 3 × 12-15 → removed').waitFor();
+    const saved = await page.evaluate(id => JSON.parse(localStorage.getItem(`track3d-coach-fitness-${id}`)), user.id);
+    assert.deepEqual(saved.messages.map(message => message.content.slice(0, 22)), ['How heavy should bench', 'are you busy', 'Take cable fly out of ', "I'd take Cable Fly out"]);
+    assert.equal(saved.actions[0].messageIndex, 3, 'the card is saved against its message');
+    await page.reload();
+    await page.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    // Fitness opens back in the workout.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByText('EXERCISE 1 OF 3').waitFor();
+    const card = page.getByTestId('proposed-change');
+    await card.getByText('Push A: Cable Fly 3 × 12-15 → removed').waitFor({ state: 'attached' });
+    assert.equal((await cardState(card, "I'd take Cable Fly out of Push A")).underMessage, true, 'still under its message after a reload');
+    assert.equal(await page.getByText('The coach is busy. Try again in a minute.').count(), 0, 'the error reply is not kept');
   } else {
     throw new Error('unknown scenario ' + scenario);
   }

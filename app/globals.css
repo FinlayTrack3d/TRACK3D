@@ -55,7 +55,7 @@ a {
 .workout-log-set { width: 82px; min-height: 72px; margin-bottom: 16px; padding: 8px; font: 800 10px "Orbitron", monospace; letter-spacing: 1px; }
 .workout-field { min-width: 0; }
 .workout-steppers { display: flex; gap: 6px; margin-top: 8px; }
-.workout-steppers .t3d-btn { flex: 1; min-height: 40px; padding: 6px 4px; font-size: 11px; background: rgba(0,200,255,.08); border-color: rgba(0,200,255,.45); color: #00C8FF; }
+.workout-steppers .t3d-btn { flex: 1; min-height: 44px; padding: 6px 4px; font-size: 11px; background: rgba(0,200,255,.08); border-color: rgba(0,200,255,.45); color: #00C8FF; }
 .workout-steppers .t3d-btn:hover { background: rgba(0,200,255,.16); }
 .workout-progress { color: #8bd5aa; background: rgba(139,213,170,.09); border-radius: 4px; padding: 2px 4px; }
 .workout-replace { color: #ffac52 !important; border-color: #ff942b !important; background: rgba(255,148,43,.1) !important; }
