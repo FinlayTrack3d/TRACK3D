@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dayStreak, habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks.js";
+import { countsForMorningStreak, dayStreak, habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks.js";
 
 const today = "2026-10-05";
 
@@ -45,4 +45,19 @@ test("morning streak counts finished check-ins only", () => {
   assert.equal(morningStreak(checkins, today), 3);
   assert.equal(morningStreak([...checkins.slice(0, 3), { date: today, data: {} }], today), 4);
   assert.equal(morningStreak([{ date: "2026-10-03", data: {} }, { date: "2026-10-04", data: { routineSkipped: true } }], today), 0);
+});
+
+test("a morning under half done is logged but doesn't count towards the streak", () => {
+  const today = "2026-10-07";
+  const checkins = [
+    { date: "2026-10-04", score: 8, data: {} },
+    { date: "2026-10-05", score: 2, data: {} },
+    { date: "2026-10-06", score: 6, data: { loggedAfter: true } },
+    { date: today, score: 5, data: {} },
+  ];
+  assert.equal(isCompletedMorning(checkins[1]), true, "still a finished check-in");
+  assert.equal(countsForMorningStreak(checkins[1]), false);
+  assert.equal(countsForMorningStreak(checkins[3]), true, "5/10 is half the routine");
+  assert.equal(morningStreak(checkins, today), 2);
+  assert.equal(countsForMorningStreak({ date: today, data: {} }), true, "a finished morning saved without a score counts");
 });

@@ -14,7 +14,7 @@ import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, repTargets, requestedBudget, splitRepTargets } from "../lib/workout";
-import { habitStreak, isCompletedMorning, morningStreak, shiftDateKey, streakBeforeToday } from "../lib/streaks";
+import { countsForMorningStreak, habitStreak, morningStreak, shiftDateKey, STREAK_MIN_MORNING_SCORE, streakBeforeToday } from "../lib/streaks";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach, weeklyFactsKey } from "../lib/weekly-report";
 import { nextUpItems } from "../lib/next-up";
@@ -327,8 +327,8 @@ const css = `
   .t3d-btn:disabled { opacity: .35; cursor: not-allowed; }
   .t3d-btn-sm { padding: 6px 12px; font-size: 9px; }
   .t3d-btn-red { background: rgba(255,45,120,.07); border-color: rgba(255,45,120,.25); color: #FF2D78; }
-  /* Phones and touch screens: every button is at least a 44px tap. */
-  @media (pointer: coarse), (max-width: 768px) { .t3d-btn, .t3d-bnav-item { min-height: 44px; } }
+  /* Phones and touch screens: every button and box is at least a 44px tap. */
+  @media (pointer: coarse), (max-width: 768px) { .t3d-btn, .t3d-bnav-item, .t3d-input, .t3d-ai-input { min-height: 44px; } }
   .t3d-ai-msg { margin-bottom: 8px; padding: 10px 13px; border-radius: 6px; font-size: 12px; line-height: 1.55; animation: t3dfade .3s ease; }
   .t3d-ai-tag { font-family: 'Orbitron', monospace; font-size: 8px; letter-spacing: 2px; margin-bottom: 5px; }
   .t3d-ai-input { flex: 1; background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 12px; outline: none; transition: border-color .18s; }
@@ -1272,6 +1272,16 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
 
   const handlePointerUp = () => setDragIdx(null);
 
+  // Keyboard: the arrow keys move the task, and the focus stays on its handle.
+  const handleHandleKey = (event, index) => {
+    const to = event.key === "ArrowUp" ? index - 1 : event.key === "ArrowDown" ? index + 1 : null;
+    if (to === null) return;
+    event.preventDefault();
+    if (to < 0 || to >= scheduledTasks.length || scheduledTasks[to]?.id === "checkin" || scheduledTasks[index]?.id === "checkin") return;
+    reorderTo(index, to);
+    requestAnimationFrame(() => document.querySelector(`[data-row-index="${to}"] [data-move-handle]`)?.focus());
+  };
+
   // AI Coach reorder/retime: returns the tasks in a new order, each keyed
   // back to the task it currently is, with an optional revised duration -
   // this lets the coach both restructure and retime the routine at once.
@@ -1350,9 +1360,9 @@ Current tasks: ${JSON.stringify(tasks)}.`,
     <div className="t3d-fade">
       <div className="t3d-card">
 
-        <div className="t3d-ctitle" style={{ marginBottom: 20 }}>
+        <h2 className="t3d-ctitle" style={{ marginBottom: 20 }}>
           EDIT MORNING ROUTINE
-        </div>
+        </h2>
 
         <div style={{ marginBottom: 24 }}>
           <div style={{
@@ -1441,7 +1451,7 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                 data-row-index={i}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "32px 1fr 1fr 44px",
+                  gridTemplateColumns: "44px 1fr 1fr 44px",
                   gap: 8,
                   alignItems: "center",
                   padding: "10px 0",
@@ -1450,13 +1460,21 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   background: dragIdx === i ? "rgba(0,255,178,.04)" : "transparent"
                 }}
               >
-                <div
+                <button
+                  type="button"
+                  data-move-handle
+                  disabled={locked}
                   onPointerDown={e => handlePointerDown(e, i)}
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                   onPointerCancel={handlePointerUp}
-                  aria-label={locked ? undefined : `Drag to move ${task.name}`}
+                  onKeyDown={e => handleHandleKey(e, i)}
+                  aria-label={locked ? "Check-in stays last" : `Move ${task.name || `task ${i + 1}`}: drag, or use the up and down arrow keys`}
                   style={{
+                    background: "none",
+                    border: 0,
+                    padding: 0,
+                    minWidth: 44,
                     gridRow: "1 / span 2",
                     cursor: locked ? "default" : "grab",
                     color: "#8AABB8",
@@ -1470,13 +1488,13 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   }}
                 >
                   {locked ? "🔒" : "≡"}
-                </div>
+                </button>
 
                 {/* Name gets its own full-width line so it is readable on a phone. */}
                 <div style={{ gridColumn: "2 / 4", minWidth: 0 }}>
                   <input
                     className="t3d-input"
-                    aria-label="Task name"
+                    aria-label={`Task ${i + 1} name`}
                     value={task.name}
                     disabled={locked}
                     onChange={e => updateTask(i, "name", e.target.value)}
@@ -1507,6 +1525,7 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                   <input
                     type="time"
                     className="t3d-input"
+                    aria-label={`${task.name || `Task ${i + 1}`} start time`}
                     value={task.scheduledTime || ""}
                     onChange={e => updateTask(i, "scheduledTime", e.target.value)}
                     style={{ padding: "9px 6px", colorScheme: "dark", marginTop: 3 }}
@@ -1521,6 +1540,7 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                     max="180"
                     inputMode="numeric"
                     className="t3d-input"
+                    aria-label={`${task.name || `Task ${i + 1}`} minutes`}
                     value={task.duration ?? ""}
                     onChange={e => updateTask(i, "duration", e.target.value)}
                     style={{ padding: "9px 6px", textAlign: "center", marginTop: 3 }}
@@ -1537,7 +1557,7 @@ Current tasks: ${JSON.stringify(tasks)}.`,
           borderRadius: 7,
           marginBottom: 20
         }}>
-          <div className="t3d-ctitle">ADD TASK</div>
+          <h2 className="t3d-ctitle">ADD TASK</h2>
 
           <div style={{
             display: "grid",
@@ -1668,7 +1688,7 @@ function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setSched
   return (
     <div className="t3d-fade">
       <div className="t3d-card">
-        <div className="t3d-ctitle" style={{ marginBottom: 16 }}>ALTERNATING DAYS</div>
+        <h2 className="t3d-ctitle" style={{ marginBottom: 16 }}>ALTERNATING DAYS</h2>
         <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 20 }}>
           Turn this on to rotate between different versions of your morning - for example a Training Day and a Rest Day - instead of the same tasks every day. Changes save automatically.
         </p>
@@ -1686,7 +1706,7 @@ function RotationSetupScreen({ dayGroups, setDayGroups, scheduledTasks, setSched
                 <div key={group.id} style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                     <div style={{ fontSize: 9, color: "#4A6070", width: 16 }}>{index + 1}</div>
-                    <input className="t3d-input" value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="e.g. Training Day" style={{ flex: 1 }} />
+                    <input className="t3d-input" aria-label={`Rotation day ${index + 1} name`} value={group.name} onChange={e => renameGroup(group.id, e.target.value)} placeholder="e.g. Training Day" style={{ flex: 1 }} />
                     {dayGroups.length > 2 && (
                       <button className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label={`Remove ${group.name}`} style={{ minWidth: 44, minHeight: 44 }} onClick={() => removeGroup(group.id)}>×</button>
                     )}
@@ -1766,6 +1786,7 @@ function MorningSection({ user }) {
   const today = useZonedDateKey(homeTimeZone);
   const previousTodayRef = useRef(today);
   const [view, setView] = useState("home");
+  const [rotationFrom, setRotationFrom] = useState("home"); // Alternating Days goes back to where it was opened
   // Each screen change starts at the top, not wherever the last screen was scrolled to.
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
   const [setupStep, setSetupStep] = useState(0);
@@ -2793,7 +2814,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           if (!checkinData.wakeTiming?.actual) return;
           setView("checkin");
         }}>
-          <div className="t3d-ctitle">WHAT TIME DID YOU WAKE UP?</div>
+          <h2 className="t3d-ctitle">WHAT TIME DID YOU WAKE UP?</h2>
           <p style={{ fontSize: 12, color: "#8AABB8" }}>Your planned wake-up time was {wakeTime}. Enter when you actually woke up.</p>
           <label style={{ fontSize: 12 }}>
             Actual wake-up time
@@ -2825,11 +2846,19 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const formSteps = allSteps.filter(step => step.id !== "checkin");
     const plannedRoutineMinutes = routinePlannedMinutes;
     const toggleStyle = selected => ({ flex: 1, minHeight: 44, borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" });
+    // Logging a morning afterwards needs the wake-up time, the routine time
+    // and an answer for every task: nothing is assumed done or not done.
+    const unansweredTicks = formSteps.filter(step => step.type === "tick" && typeof editSubmissionData[step.id || step.name] !== "boolean");
+    const logMissing = isLogCheckin ? [
+      ...(editSubmissionData.wakeTiming?.actual ? [] : ["your wake-up time"]),
+      ...(Number(editSubmissionData.routineTiming?.actualMinutes) > 0 ? [] : ["how long the routine took"]),
+      ...(unansweredTicks.length ? [`done or not done for ${unansweredTicks.length === 1 ? unansweredTicks[0].name : `${unansweredTicks.length} tasks`}`] : []),
+    ] : [];
     return (
       <div className={`t3d-fade ${isRoughCheckin || isLogCheckin ? "t3d-rough-checkin" : ""}`}>
         <form className="t3d-card" onSubmit={async event => {
           event.preventDefault();
-          if (savingCheckin) return;
+          if (savingCheckin || logMissing.length) return;
           setSavingCheckin(true);
           setSubmissionError("");
           try {
@@ -2877,7 +2906,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             setSavingCheckin(false);
           }
         }}>
-          <div className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : isLogCheckin ? "LOG THIS MORNING" : isPastEntry ? `EDIT ${new Date(`${formDate}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }).toUpperCase()}` : "EDIT TODAY'S SUBMISSION"}</div>
+          <h2 className="t3d-ctitle">{isRoughCheckin ? "ROUGH MORNING CHECK-IN" : isLogCheckin ? "LOG THIS MORNING" : isPastEntry ? `EDIT ${new Date(`${formDate}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" }).toUpperCase()}` : "EDIT TODAY'S SUBMISSION"}</h2>
           <p style={{ fontSize: 12, color: "#8AABB8" }}>
             {isRoughCheckin
               ? "Add whatever you remember. It does not need to be perfect, and you can leave anything blank."
@@ -2886,8 +2915,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 : "Correct your answers to reflect what actually happened."}
           </p>
           <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
-            Actual wake-up time
-            <input className="t3d-input" type="time" style={{ marginTop: 8, colorScheme: "dark" }}
+            Actual wake-up time{isLogCheckin ? " (required)" : ""}
+            <input className="t3d-input" type="time" required={isLogCheckin} style={{ marginTop: 8, colorScheme: "dark" }}
               value={editSubmissionData.wakeTiming?.actual || ""}
               onChange={event => setEditSubmissionData(data => ({ ...data, wakeTiming: {
                 ...data.wakeTiming,
@@ -2897,8 +2926,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               } }))} />
           </label>
           <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
-            Routine time (minutes)
-            <input className="t3d-input" type="number" inputMode="numeric" min="1" max="600" style={{ marginTop: 8 }}
+            Routine time (minutes){isLogCheckin ? " (required)" : ""}
+            <input className="t3d-input" type="number" inputMode="numeric" min="1" max="600" required={isLogCheckin} style={{ marginTop: 8 }}
               placeholder={plannedRoutineMinutes ? `Planned: ${plannedRoutineMinutes} min` : "Minutes"}
               value={editSubmissionData.routineTiming?.actualMinutes ?? ""}
               onChange={event => setEditSubmissionData(data => ({ ...data, routineTiming: {
@@ -2937,7 +2966,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   <div role="group" aria-label={step.name} style={{ display: "flex", gap: 8, marginTop: 8 }}>
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value === true} style={toggleStyle(value === true)}
                       onClick={() => setEditSubmissionData(data => ({ ...data, [key]: true }))}>✓ DONE</button>
-                    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value !== true} style={{ ...toggleStyle(value !== true), ...(value !== true ? { borderColor: NEON3, color: NEON3, background: "rgba(255,45,120,.08)" } : {}) }}
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={value === false} style={{ ...toggleStyle(value === false), ...(value === false ? { borderColor: NEON3, color: NEON3, background: "rgba(255,45,120,.08)" } : {}) }}
                       onClick={() => setEditSubmissionData(data => ({ ...data, [key]: false }))}>✗ NOT DONE</button>
                   </div>
                 )}
@@ -2978,8 +3007,9 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             );
           })}
           {submissionError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{submissionError}</p>}
+          {logMissing.length > 0 && <p id="log-morning-missing" data-testid="log-morning-missing" style={{ color: "#FFB547", fontSize: 11, lineHeight: 1.5, margin: "16px 0 0" }}>To save, add {logMissing.join(", ").replace(/, ([^,]*)$/, " and $1")}.</p>}
           <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-            <button className="t3d-btn" type="submit" disabled={savingCheckin}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : isLogCheckin ? "SAVE MORNING" : "SAVE CHANGES"}</button>
+            <button className="t3d-btn" type="submit" disabled={savingCheckin || logMissing.length > 0} aria-describedby={logMissing.length ? "log-morning-missing" : undefined}>{savingCheckin ? "SAVING..." : isRoughCheckin ? "SAVE ROUGH CHECK-IN" : isLogCheckin ? "SAVE MORNING" : "SAVE CHANGES"}</button>
             <button className="t3d-btn t3d-btn-red" type="button" disabled={savingCheckin} onClick={() => setView("home")}>CANCEL</button>
           </div>
         </form>
@@ -3005,15 +3035,15 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           <>
             <div className="t3d-grid3">
               <div className="t3d-card" style={{ textAlign: "center" }}>
-                <div className="t3d-ctitle">WAKE UP</div>
+                <h2 className="t3d-ctitle">WAKE UP</h2>
                 <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{wakeTime}</div>
               </div>
               <div className="t3d-card" style={{ textAlign: "center" }}>
-                <div className="t3d-ctitle">FINISH BY</div>
+                <h2 className="t3d-ctitle">FINISH BY</h2>
                 <div className="t3d-sval" style={{ color: NEON2, fontSize: 24 }}>{finishTime}</div>
               </div>
               <div className="t3d-card" style={{ textAlign: "center" }}>
-                <div className="t3d-ctitle">TASKS</div>
+                <h2 className="t3d-ctitle">TASKS</h2>
                 <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 24 }}>{allSteps.length}</div>
               </div>
             </div>
@@ -3024,10 +3054,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 const oldestLoaded = history[history.length - 1]?.date;
                 const streak = morningStreak([...history, ...olderCheckins.filter(entry => !oldestLoaded || entry.date < oldestLoaded)], today);
                 if (!streak || skippedToday) return null;
-                const doneToday = history.some(entry => entry.date === today && isCompletedMorning(entry));
+                const doneToday = history.some(entry => entry.date === today && countsForMorningStreak(entry));
+                const loggedToday = history.some(entry => entry.date === today && !entry.data?.inProgress);
                 return (
                   <div data-testid="morning-streak" style={{ display: "inline-block", marginBottom: 18, padding: "6px 14px", border: "1px solid rgba(255,140,0,.45)", borderRadius: 20, background: "rgba(255,140,0,.07)", fontFamily: "'Orbitron',monospace", fontSize: 10, letterSpacing: 1.5, color: "#FF8C00" }}>
-                    🔥 {streak}-DAY MORNING STREAK{doneToday ? "" : " · FINISH TODAY TO KEEP IT GOING"}
+                    🔥 {streak}-DAY MORNING STREAK{doneToday ? "" : loggedToday ? ` · TODAY WAS UNDER ${STREAK_MIN_MORNING_SCORE}/10, SO IT DOESN'T COUNT` : " · FINISH TODAY TO KEEP IT GOING"}
                   </div>
                 );
               })()}
@@ -3036,8 +3067,10 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   <div style={{ fontSize: 40, marginBottom: 12 }}>{skippedToday ? "↗" : "✅"}</div>
                   <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, color: NEON, letterSpacing: 2, marginBottom: 8 }}>
                     {skippedToday ? "RESET FOR TOMORROW" : (() => {
-                      const todayData = history.find(h => h.date === today)?.data;
-                      return todayData?.roughCheckin || todayData?.loggedAfter ? "MORNING LOGGED" : "MORNING COMPLETE";
+                      const todayEntry = history.find(h => h.date === today);
+                      const todayData = todayEntry?.data;
+                      // Under half the routine done: logged, not "complete".
+                      return todayEntry && !countsForMorningStreak(todayEntry) ? "MORNING LOGGED" : todayData?.roughCheckin || todayData?.loggedAfter ? "MORNING LOGGED" : "MORNING COMPLETE";
                     })()}
                   </div>
                   {skippedToday ? (
@@ -3200,6 +3233,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                         cursor: "pointer",
                         fontSize: 10,
                         padding: "3px 6px",
+                        minHeight: 44,
                         textDecoration: "underline",
                       }}
                     >
@@ -3242,7 +3276,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             {/* Today's schedule */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE{alternatingOn && rotationDay ? ` · ${dayGroupName(rotationDay).toUpperCase()}` : ""}</div>
+                <h2 className="t3d-ctitle" style={{ margin: 0 }}>TODAY&apos;S SCHEDULE{alternatingOn && rotationDay ? ` · ${dayGroupName(rotationDay).toUpperCase()}` : ""}</h2>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
   <button
     className="t3d-btn t3d-btn-sm"
@@ -3255,7 +3289,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   <button
     className="t3d-btn t3d-btn-sm"
     style={{ minHeight: 44 }}
-    onClick={() => setView("rotationSetup")}
+    onClick={() => { setRotationFrom("home"); setView("rotationSetup"); }}
   >
     ALTERNATING DAYS
   </button>
@@ -3280,7 +3314,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
             {/* 7-day chart */}
             <div className="t3d-card" style={{ marginBottom: 16 }}>
-              <div className="t3d-ctitle">7-DAY MORNING SCORES <span style={{ color: "#6F8792" }}>· OUT OF 10</span></div>
+              <h2 className="t3d-ctitle">7-DAY MORNING SCORES <span style={{ color: "#6F8792" }}>· OUT OF 10</span></h2>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80, padding: "0 4px" }}>
                 {last7.map((d, i) => (
                   <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
@@ -3306,12 +3340,12 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
             {/* History accordion */}
             <div className="t3d-card">
-              <div
-                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
-                onClick={() => setHistoryOpen(h => !h)}>
-                <div className="t3d-ctitle" style={{ margin: 0 }}>MORNING HISTORY</div>
-                <div style={{ color: "#E0EAF0", fontSize: 14, transition: "transform .2s", transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▾</div>
-              </div>
+              <h2 className="t3d-ctitle" style={{ margin: 0 }}>
+              <button type="button" aria-expanded={historyOpen} onClick={() => setHistoryOpen(h => !h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", minHeight: 44, padding: 0, background: "none", border: 0, color: "inherit", font: "inherit", letterSpacing: "inherit", textTransform: "inherit", textAlign: "left", cursor: "pointer" }}>
+                MORNING HISTORY
+                <span aria-hidden="true" style={{ color: "#E0EAF0", fontSize: 14, transition: "transform .2s", transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)" }}>▾</span>
+              </button>
+            </h2>
               {historyOpen && (
                 <div style={{ marginTop: 16 }}>
                   {history.length === 0 ? (
@@ -3330,7 +3364,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                               {new Date(`${entry.date}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" })}
                             </div>
                             <div style={{ flex: 1, fontSize: 10, color: "#8AABB8" }}>
-                              {data.routineSkipped ? "Skipped" : unfinished ? "Started · not finished" : data.roughCheckin ? "Rough check-in" : data.loggedAfter ? "Logged afterwards" : "Completed"}
+                              {data.routineSkipped ? "Skipped" : unfinished ? "Started · not finished" : !countsForMorningStreak(entry) ? `Under half done · not in streak` : data.roughCheckin ? "Rough check-in" : data.loggedAfter ? "Logged afterwards" : "Completed"}
                             </div>
                             <div style={{
                               fontFamily: "'Orbitron',monospace", fontSize: 13, fontWeight: 700,
@@ -3392,7 +3426,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
         scheduledTasks={scheduledTasks}
         setScheduledTasks={setScheduledTasks}
         dayGroups={dayGroups}
-        onOpenRotationSetup={() => setView("rotationSetup")}
+        onOpenRotationSetup={() => { setRotationFrom("editRoutine"); setView("rotationSetup"); }}
         onCancel={() => setView("home")}
         onRebuild={() => setConfirmChangeRoutine(true)}
         onSave={async () => {
@@ -3418,7 +3452,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
         scheduledTasks={scheduledTasks}
         setScheduledTasks={setScheduledTasks}
         trainingDays={trainingDays}
-        onDone={() => setView("editRoutine")}
+        onDone={() => setView(rotationFrom)}
       />
     );
   }
@@ -3446,7 +3480,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           </div>
           {setupStep === 0 && (
             <div>
-              <div className="t3d-ctitle">WHAT TIME DO YOU WANT TO WAKE UP?</div>
+              <h2 className="t3d-ctitle">WHAT TIME DO YOU WANT TO WAKE UP?</h2>
               <div style={{ display: "flex", justifyContent: "center", margin: "32px 0" }}>
                 <input type="time" value={wakeTime} onChange={e => setWakeTime(e.target.value)}
                   style={{ background: SURFACE2, border: `1px solid ${NEON}`, borderRadius: 8, padding: "16px 24px", color: NEON, fontSize: 28, outline: "none", textAlign: "center", colorScheme: "dark", minWidth: 180 }} />
@@ -3460,7 +3494,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
           {setupStep === 1 && (
             <div>
-              <div className="t3d-ctitle">CHOOSE YOUR MORNING HABITS</div>
+              <h2 className="t3d-ctitle">CHOOSE YOUR MORNING HABITS</h2>
 
               {/* Selected habits */}
               <div style={{ display: "none" }}>
@@ -5479,11 +5513,12 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           <div className="t3d-ctitle">DO YOUR DAILY HABITS</div>
           {habits.length === 0 && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
           {habits.map(h => (
-            <div key={h.id} className="t3d-hrow" onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}>
-              <div className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</div>
-              <div className="t3d-hname" style={{ color: h.done ? "#E0EAF0" : "#4A6070" }}>{h.name}</div>
-              <div className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</div>
-            </div>
+            <button type="button" key={h.id} className="t3d-hrow" aria-pressed={Boolean(h.done)} aria-label={`${h.name}, ${habitStreak(h)} day streak`} onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}
+              style={{ width: "100%", minHeight: 44, background: "none", border: 0, borderBottom: `1px solid ${BORDER}`, color: "inherit", font: "inherit", textAlign: "left" }}>
+              <span className={`t3d-hcheck ${h.done?"done":""}`}>{h.done?"✓":""}</span>
+              <span className="t3d-hname" style={{ color: h.done ? "#E0EAF0" : "#4A6070" }}>{h.name}</span>
+              <span className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</span>
+            </button>
           ))}
         </div>
         {todayData.loaded && dashboardMeals.length > 0 && (
@@ -8847,10 +8882,12 @@ function withPlanApproval(sessions, now = new Date()) {
           )}
 
           <div className="t3d-card">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setHistoryOpen(h => !h)}>
-              <h2 className="t3d-ctitle" style={{ margin: 0 }}>WORKOUT HISTORY</h2>
-              <div style={{ color: "#E0EAF0", fontSize: 14, transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</div>
-            </div>
+            <h2 className="t3d-ctitle" style={{ margin: 0 }}>
+              <button type="button" aria-expanded={historyOpen} onClick={() => setHistoryOpen(h => !h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", minHeight: 44, padding: 0, background: "none", border: 0, color: "inherit", font: "inherit", letterSpacing: "inherit", textTransform: "inherit", textAlign: "left", cursor: "pointer" }}>
+                WORKOUT HISTORY
+                <span aria-hidden="true" style={{ color: "#E0EAF0", fontSize: 14, transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</span>
+              </button>
+            </h2>
             {historyOpen && (
               <div style={{ marginTop: 16 }}>
                 {emptyHistoryCount > 0 && (
@@ -9127,7 +9164,9 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
   const [openMeal, setOpenMeal] = useState(null);
   const [swapOpen, setSwapOpen] = useState(null);
   const [swapDraft, setSwapDraft] = useState(EMPTY_SWAP);
-  const [keepSwap, setKeepSwap] = useState(true);
+  // Saving a swap to the library is a choice, not the default.
+  const [keepSwap, setKeepSwap] = useState(false);
+  const [lastChange, setLastChange] = useState(""); // what the last tap did, and how to undo it
   const commit = async updated => {
     onResultsChange(updated);
     setStatus("SAVING...");
@@ -9137,7 +9176,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
   };
   const openSwap = index => {
     setSwapDraft(EMPTY_SWAP);
-    setKeepSwap(true);
+    setKeepSwap(false);
     setSwapOpen(current => (current === index ? null : index));
   };
   // Today's meal becomes the one chosen; the plan itself is unchanged.
@@ -9148,6 +9187,22 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
     const saved = await commit(updated);
     if (saved && addToLibrary && onAddToLibrary) onAddToLibrary(updated[index].swap);
   };
+  // ✓ and × are toggles: tapping the one already chosen clears the meal again.
+  const withoutResult = index => Object.fromEntries(Object.entries(results || {}).filter(([key]) => key !== String(index)));
+  const setMealStatus = (index, meal, status) => {
+    const result = results[index];
+    const current = mealWasMissed(result) ? "missed" : mealWasCompleted(result) && !mealSwap(result) ? "done" : null;
+    if (current === status) {
+      setLastChange(`${meal.name}: cleared.`);
+      return commit(withoutResult(index));
+    }
+    setLastChange(status === "done"
+      ? `${meal.name}: went to plan. Tap ✓ again to undo.`
+      : `${meal.name}: didn't go to plan. Add what you had below, or tap × again to undo.`);
+    return commit({ ...results, [index]: status === "done" ? true : { completed: false, note: typeof result === "object" && result ? result.note || "" : "" } });
+  };
+  // Today's other planned meals aren't offered as swaps; the library's other meals are.
+  const plannedNames = new Set(meals.map(item => String(item?.name || "").trim().toLowerCase()));
   const undoSwap = index => {
     const rest = Object.fromEntries(Object.entries(results || {}).filter(([key]) => key !== String(index)));
     setSwapOpen(null);
@@ -9175,7 +9230,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
         const detailsOpen = showDetails && openMeal === index;
         const swap = mealSwap(result);
         const wentToPlan = mealWasCompleted(result) && !swap;
-        const swapOptions = (library || []).filter(item => item?.name && !isFlexibleMeal(item) && item.name.trim().toLowerCase() !== String(meal.name || "").trim().toLowerCase());
+        const swapOptions = (library || []).filter(item => item?.name && !isFlexibleMeal(item) && !plannedNames.has(item.name.trim().toLowerCase()));
         return <div key={`${meal.name}-${index}`} style={{ padding: compact ? "8px 0" : "10px 0", borderBottom: `1px solid ${BORDER}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
             {showDetails ? (
@@ -9184,7 +9239,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
                 <div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div>
               </button>
             ) : <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, color: "#E0EAF0" }}>{meal.name}</div><div style={{ fontSize: 9, color: "#6F8792" }}>{meal.calories || 0} kcal {meal.time ? `· ${meal.time}` : ""}</div></div>}
-            <button aria-label={`${meal.name} went to plan`} aria-pressed={wentToPlan} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 44, minWidth: 44, background: wentToPlan ? "rgba(0,255,178,.16)" : "transparent", borderColor: wentToPlan ? NEON : BORDER }} onClick={() => commit({ ...results, [index]: true })}>✓</button>
+            <button aria-label={`${meal.name} went to plan`} aria-pressed={wentToPlan} className="t3d-btn t3d-btn-sm" style={{ padding: "6px 10px", minHeight: 44, minWidth: 44, background: wentToPlan ? "rgba(0,255,178,.16)" : "transparent", borderColor: wentToPlan ? NEON : BORDER }} onClick={() => setMealStatus(index, meal, "done")}>✓</button>
             {/* Swap sits between went-to-plan and didn't: a quiet outline until a meal is swapped. */}
             <button type="button" aria-label={`Swap ${meal.name}`} aria-pressed={Boolean(swap)} aria-expanded={swapOpen === index} title="Swap this meal" onClick={() => openSwap(index)}
               style={{ width: 44, height: 44, minWidth: 44, padding: 0, border: 0, background: "transparent", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
@@ -9193,7 +9248,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
                 <SwapIcon />
               </span>
             </button>
-            <button aria-label={`${meal.name} did not go to plan`} aria-pressed={missed} className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "6px 10px", minHeight: 44, minWidth: 44, background: missed ? "rgba(255,45,120,.14)" : "transparent" }} onClick={() => commit({ ...results, [index]: { completed: false, note: typeof result === "object" && result ? result.note || "" : "" } })}>×</button>
+            <button aria-label={`${meal.name} did not go to plan`} aria-pressed={missed} className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ padding: "6px 10px", minHeight: 44, minWidth: 44, background: missed ? "rgba(255,45,120,.14)" : "transparent" }} onClick={() => setMealStatus(index, meal, "missed")}>×</button>
           </div>
           {swap && <div data-testid="meal-swapped" style={{ marginTop: 5, fontSize: 10, color: SWAP_YELLOW }}>Swapped for {swap.name} · {swap.calories.toLocaleString("en-GB")} kcal · {swap.protein}g P</div>}
           {swapOpen === index && (
@@ -9208,7 +9263,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
                     </button>
                   ))}
                 </div>
-              ) : <div style={{ fontSize: 10, color: "#6F8792", marginBottom: 12 }}>No other meals saved yet. Make your own below.</div>}
+              ) : <div style={{ fontSize: 10, color: "#6F8792", marginBottom: 12 }}>No other meals in your library yet (today&apos;s planned meals aren&apos;t listed). Make your own below.</div>}
               <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>OR MAKE YOUR OWN</div>
               <input className="t3d-input" aria-label="Swap meal name" placeholder="e.g. Chicken wrap" value={swapDraft.name} onChange={event => { const value = event.target.value; setSwapDraft(draft => ({ ...draft, name: value })); }} style={{ marginBottom: 6 }} />
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
@@ -9245,7 +9300,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
           </div>}
         </div>;
       })}
-      {status && <div role="status" style={{ color: status === "COULD NOT SAVE" ? NEON3 : NEON, fontSize: 9, marginTop: 9 }}>{status}</div>}
+      {status && <div role="status" style={{ color: status === "COULD NOT SAVE" ? NEON3 : NEON, fontSize: 9, marginTop: 9 }}>{lastChange && status !== "COULD NOT SAVE" ? `${lastChange} ` : ""}{status}</div>}
     </div>
   );
 }
@@ -10082,6 +10137,16 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   // ── DAY REVIEW ────────────────────────────────────────────────────────────
   if (view === "review") {
     const meals = activeMeals;
+    // Leaves the review without saving its answers; what was saved before stays.
+    const reviewBack = (
+      <button type="button" className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14, minHeight: 44 }} onClick={() => {
+        const savedToday = logs.find(log => log.date === today);
+        setMealResults(savedToday?.meals_completed || {});
+        setOffPlanFood(savedToday?.off_plan_food || "");
+        setOffPlanCals(String(savedToday?.off_plan_calories || ""));
+        setView("home");
+      }}>← BACK TO NUTRITION</button>
+    );
     const isOffPlanStep = reviewStep === meals.length;
     const isCompleteStep = reviewStep > meals.length;
 
@@ -10098,6 +10163,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
       return (
         <div className="t3d-fade">
+          {reviewBack}
           <div className="t3d-card" style={{ textAlign: "center", padding: 32 }}>
             <div style={{ fontSize: 40, marginBottom: 16 }}>📊</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: NEON, letterSpacing: 3, marginBottom: 24 }}>DAY COMPLETE</div>
@@ -10158,6 +10224,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     if (isOffPlanStep) {
       return (
         <div className="t3d-fade">
+          {reviewBack}
           <div className="t3d-card">
             <div className="t3d-progress-dots">
               {[...meals.map((_,i)=>i), "offplan"].map((_,i) => <div key={i} className={`t3d-dot-step ${i===reviewStep?"active":i<reviewStep?"done":""}`} />)}
@@ -10204,6 +10271,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
       const updateFlexibleResult = (key, value) => setMealResults(results => ({ ...results, [reviewStep]: { ...flexibleResult, completed: false, [key]: value } }));
       return (
         <div className="t3d-fade">
+          {reviewBack}
           <div className="t3d-card">
             <div className="t3d-progress-dots">
               {[...meals.map((_,i)=>i), "offplan"].map((_,i) => <div key={i} className={`t3d-dot-step ${i===reviewStep?"active":i<reviewStep?"done":""}`} />)}
@@ -10230,6 +10298,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     }
     return (
       <div className="t3d-fade">
+        {reviewBack}
         <div className="t3d-card">
           <div className="t3d-progress-dots">
             {[...meals.map((_,i)=>i), "offplan"].map((_,i) => <div key={i} className={`t3d-dot-step ${i===reviewStep?"active":i<reviewStep?"done":""}`} />)}
@@ -10356,7 +10425,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
       <div className="t3d-fade">
         <div className="t3d-card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 12 }}>
-            <div className="t3d-ctitle" style={{ margin: 0 }}>{plan ? "EDIT YOUR PLAN" : "SET UP YOUR NUTRITION"}</div>
+            <h2 className="t3d-ctitle" style={{ margin: 0 }}>{plan ? "EDIT YOUR PLAN" : "SET UP YOUR NUTRITION"}</h2>
             <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={leaveSetup}>✕ CLOSE</button>
           </div>
           {/* An existing plan can jump to any part; a new one goes in order. */}
@@ -10377,7 +10446,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* Step 0: Goals */}
           {setupStep === 0 && !setupMode && (
             <div>
-              <div className="t3d-ctitle">HOW WOULD YOU LIKE TO SET YOUR TARGETS?</div>
+              <h2 className="t3d-ctitle">HOW WOULD YOU LIKE TO SET YOUR TARGETS?</h2>
               <button className="t3d-btn" style={{ width: "100%", textAlign: "left", whiteSpace: "normal", padding: 16, marginBottom: 10 }} onClick={() => { setSetupMode("guided"); setUseCustomTargets(false); }}>
                 STEP-BY-STEP SETUP
                 <span style={{ display: "block", marginTop: 5, color: "#8AABB8", fontFamily: "'Inter',sans-serif", fontSize: 11, fontWeight: 400 }}>Use your weight, height, age, goal and activity to calculate a starting target.</span>
@@ -10394,7 +10463,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
           {setupStep === 0 && setupMode === "guided" && (
             <div>
-              <div className="t3d-ctitle">YOUR GOALS & STATS</div>
+              <h2 className="t3d-ctitle">YOUR GOALS & STATS</h2>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setSetupMode(null)}>← CHANGE SETUP METHOD</button>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))", gap: 8, marginBottom: 6 }}>
                 <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>WEIGHT (kg)
@@ -10465,7 +10534,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
           {setupStep === 0 && setupMode === "custom" && (
             <div>
-              <div className="t3d-ctitle">ENTER YOUR DAILY TARGETS</div>
+              <h2 className="t3d-ctitle">ENTER YOUR DAILY TARGETS</h2>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setSetupMode(null)}>← CHANGE SETUP METHOD</button>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginBottom: 14 }}>
                 {[["CALORIES", customCalories, setCustomCalories], ["PROTEIN (g)", customProtein, setCustomProtein], ["CARBS (g)", customCarbs, setCustomCarbs], ["FATS (g)", customFats, setCustomFats]].map(([label, value, setter]) => (
@@ -10540,7 +10609,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               {targetMinimumProblem ? minimumAlert(targetMinimumProblem, "calorie-minimum") : lossWarningFor(finalMacros.calories) && lossAlert(lossWarningFor(finalMacros.calories), "weekly-loss-warning")}
 
               <div style={{ marginBottom: 16 }}>
-                <div className="t3d-ctitle">HOW MUCH STRUCTURE DO YOU WANT?</div>
+                <h2 className="t3d-ctitle">HOW MUCH STRUCTURE DO YOU WANT?</h2>
                 {[
                   ["hybrid", "HYBRID · RECOMMENDED", "Repeat the meals that help you stay consistent. Use flexible macro targets for the rest."],
                   ["flexible", "FLEXIBLE MACROS", "Choose your own food each day and log the macros for each meal."],
@@ -10572,7 +10641,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* Step 2: Meals */}
           {setupStep === 2 && calculatedMacros && (
             <div>
-              <div className="t3d-ctitle">ABOUT YOUR DAY</div>
+              <h2 className="t3d-ctitle">ABOUT YOUR DAY</h2>
               <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 120px) minmax(0, 1fr)", gap: 8, marginBottom: 6 }}>
                 <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>WAKE-UP TIME
                   <input className="t3d-input" type="time" aria-label="Wake-up time" value={wakeTime} onChange={e => changeWakeTime(e.target.value)} style={{ marginTop: 5 }} />
@@ -10598,7 +10667,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               {editingRestDay && !restBuildMode && !restDayMeals.length ? (
                 // Starting the rest day plan: copying the training day is the quickest way.
                 <div data-testid="rest-day-start">
-                  <div className="t3d-ctitle">BUILD YOUR REST DAY MEALS</div>
+                  <h2 className="t3d-ctitle">BUILD YOUR REST DAY MEALS</h2>
                   <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 12 }}>Rest days are usually a little lighter. Your rest day target is {restTarget.calories.toLocaleString("en-GB")} kcal: about 12% fewer calories, mostly from carbs, with the same protein.</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11 }} disabled={!planMeals.length} onClick={() => { setRestDayMeals(planMeals.map(meal => ({ ...meal }))); setRestBuildMode("own"); }}>
@@ -10620,7 +10689,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 </div>
               ) : !buildMode ? (
                 <div>
-                  <div className="t3d-ctitle">BUILD YOUR {hasRestDayPlan ? "TRAINING DAY " : ""}MEALS</div>
+                  <h2 className="t3d-ctitle">BUILD YOUR {hasRestDayPlan ? "TRAINING DAY " : ""}MEALS</h2>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11 }} onClick={() => setBuildMode("own")}>
                       📝 Build my own meals
@@ -10684,7 +10753,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               })() : (
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                    <div className="t3d-ctitle" style={{ margin: 0 }}>{editingRestDay ? "REST DAY MEALS" : buildMode==="ai"?"AI MEAL PLAN":buildMode==="common"?"COMMON MEALS":"YOUR MEALS"}</div>
+                    <h2 className="t3d-ctitle" style={{ margin: 0 }}>{editingRestDay ? "REST DAY MEALS" : buildMode==="ai"?"AI MEAL PLAN":buildMode==="common"?"COMMON MEALS":"YOUR MEALS"}</h2>
                     <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => { setBuildMode(null); setCurrentMeals([]); if (editingRestDay) setRestPlanNote(""); }}>{editingRestDay ? "START AGAIN" : "CHANGE"}</button>
                   </div>
 
@@ -10775,7 +10844,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               {/* Rest days: same as training days, or their own meals */}
               {!editingRestDay && !showAiQuestions && !aiMealLoading && planMeals.length > 0 && nutritionStyle !== "flexible" && (
                 <div data-testid="rest-day-choice" style={{ marginBottom: 12, padding: 12, border: `1px solid ${BORDER}`, borderRadius: 7 }}>
-                  <div className="t3d-ctitle" style={{ marginBottom: 6 }}>REST DAYS</div>
+                  <h2 className="t3d-ctitle" style={{ marginBottom: 6 }}>REST DAYS</h2>
                   <div style={{ fontSize: 10, color: "#8AABB8", marginBottom: 8 }}>On days with no workout, eat:</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 }}>
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-pressed={!hasRestDayPlan} style={{ whiteSpace: "normal", ...optionStyle(!hasRestDayPlan) }} onClick={() => setHasRestDayPlan(false)}>THE SAME MEALS</button>
@@ -10802,7 +10871,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* Step 3: Review, with a link to change each part */}
           {setupStep === 3 && (
             <div>
-              <div className="t3d-ctitle">REVIEW YOUR PLAN</div>
+              <h2 className="t3d-ctitle">REVIEW YOUR PLAN</h2>
               <PlanReviewSection title="TARGETS" testId="review-section-targets" onEdit={() => setSetupStep(0)}>
                 <div style={{ color: "#E0EAF0" }}>{finalMacros.calories.toLocaleString("en-GB")} kcal · {finalMacros.protein} g protein · {finalMacros.carbs} g carbs · {finalMacros.fats} g fat</div>
                 {preparedRestDayMeals.length > 0 && <div>Rest days: {restTarget.calories.toLocaleString("en-GB")} kcal, about 12% lighter (from carbs, the same protein).</div>}
@@ -10982,7 +11051,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     <div className="t3d-fade">
       {setupDraft && (
         <div className="t3d-card" data-testid="setup-draft" style={{ marginBottom: 16, borderColor: "rgba(255,181,71,.45)" }}>
-          <div className="t3d-ctitle" style={{ color: "#FFB547" }}>UNSAVED PLAN CHANGES</div>
+          <h2 className="t3d-ctitle" style={{ color: "#FFB547" }}>UNSAVED PLAN CHANGES</h2>
           <div style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6, marginBottom: 10 }}>You started changing your nutrition plan and didn&apos;t save it. Your changes are kept on this device.</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="t3d-btn t3d-btn-sm" onClick={() => restoreSetupDraft(setupDraft)}>CONTINUE EDITING →</button>
@@ -11002,7 +11071,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
         <>
           {planMinimumProblem && (
             <div className="t3d-card" role="alert" data-testid="plan-below-minimum" style={{ marginBottom: 16, borderColor: "rgba(255,77,109,.5)", background: "rgba(255,77,109,.05)" }}>
-              <div className="t3d-ctitle" style={{ color: "#FF4D6D" }}>YOUR PLAN IS BELOW THE MINIMUM</div>
+              <h2 className="t3d-ctitle" style={{ color: "#FF4D6D" }}>YOUR PLAN IS BELOW THE MINIMUM</h2>
               <div style={{ fontSize: 11, color: "#FFD0D8", lineHeight: 1.6, marginBottom: 8 }}>{planMinimumProblem}</div>
               <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>{EATING_SUPPORT_TEXT}</div>
               <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup()}>EDIT PLAN →</button>
@@ -11011,7 +11080,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* Today: log meals as they happen, then the day review */}
           <div className="t3d-card" data-testid="nutrition-today" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>LOG AS YOU GO</div>
+              <h2 className="t3d-ctitle" style={{ margin: 0 }}>LOG AS YOU GO</h2>
               <div role="group" aria-label="Today is a" style={{ display: "flex", gap: 6 }}>
                 <button className="t3d-btn t3d-btn-sm" aria-pressed={isTrainingDay} style={{ background: isTrainingDay?"rgba(0,255,178,.12)":"transparent", borderColor: isTrainingDay?NEON:BORDER, color: isTrainingDay?NEON:"#E0EAF0" }} onClick={() => setIsTrainingDay(true)}>TRAINING DAY</button>
                 <button className="t3d-btn t3d-btn-sm" aria-pressed={!isTrainingDay} style={{ background: !isTrainingDay?"rgba(0,200,255,.12)":"transparent", borderColor: !isTrainingDay?NEON2:BORDER, color: !isTrainingDay?NEON2:"#E0EAF0" }} onClick={() => setIsTrainingDay(false)}>REST DAY</button>
@@ -11046,7 +11115,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
           <div className="t3d-card" data-testid="today-targets" style={{ marginBottom: 16, padding: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>REMAINING TODAY</div>
+              <h2 className="t3d-ctitle" style={{ margin: 0 }}>REMAINING TODAY</h2>
               <div style={{ fontSize: 9, color: todayTargets.restDay ? NEON2 : "#8AABB8" }}>{todayTargets.restDay ? "REST DAY" : "TRAINING DAY"} TARGET · {todayTargets.calories.toLocaleString("en-GB")} KCAL</div>
             </div>
             {offPlanRoughCalories > 0 && <div data-testid="offplan-rough" style={{ color: "#8AABB8", fontSize: 9, lineHeight: 1.5, marginBottom: 6 }}>Includes a rough protein, carbs and fat split for {Math.round(offPlanRoughCalories).toLocaleString("en-GB")} kcal of extra food logged without them.</div>}
@@ -11057,7 +11126,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
           {showTargetSuggestion && (
             <div className="t3d-card" role="status" data-testid="target-suggestion" style={{ marginBottom: 16, borderColor: "rgba(0,200,255,.45)", background: "rgba(0,200,255,.04)" }}>
-              <div className="t3d-ctitle" style={{ color: NEON2 }}>UPDATE YOUR TARGETS?</div>
+              <h2 className="t3d-ctitle" style={{ color: NEON2 }}>UPDATE YOUR TARGETS?</h2>
               <div style={{ fontSize: 11, color: "#C5D6DC", lineHeight: 1.6, marginBottom: 10 }}>
                 With your profile ({targetSuggestion.stats.height} cm, age {targetSuggestion.stats.age}, {String(targetSuggestion.stats.sex).toLowerCase()}) and {targetSuggestion.stats.weight} kg, {targetSuggestion.stats.goal} and {String(targetSuggestion.stats.activityLevel).toLowerCase()}, your target works out at <strong>{targetSuggestion.targets.calories.toLocaleString("en-GB")} kcal</strong> and {targetSuggestion.targets.protein} g protein. Your plan uses {Number(plan.daily_calories).toLocaleString("en-GB")} kcal.
               </div>
@@ -11071,17 +11140,17 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* Stats */}
           <div className="t3d-grid3">
             <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">{todayTargets.restDay ? "REST DAY TARGET" : "DAILY TARGET"}</div>
+              <h2 className="t3d-ctitle">{todayTargets.restDay ? "REST DAY TARGET" : "DAILY TARGET"}</h2>
               <div className="t3d-sval" style={{ color: NEON, fontSize: 22 }}>{todayTargets.calories}</div>
               <div className="t3d-slabel">KCAL</div>
             </div>
             <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">ON PLAN STREAK</div>
+              <h2 className="t3d-ctitle">ON PLAN STREAK</h2>
               <div className="t3d-sval" style={{ color: streak>=3?"#FF8C00":NEON2 }}>{streak}{streak>=3?" 🔥":""}</div>
               <div className="t3d-slabel">DAYS</div>
             </div>
             <div className="t3d-card" style={{ textAlign: "center" }}>
-              <div className="t3d-ctitle">PROTEIN TARGET</div>
+              <h2 className="t3d-ctitle">PROTEIN TARGET</h2>
               <div className="t3d-sval" style={{ color: "#FF8C00", fontSize: 22 }}>{todayTargets.protein}g</div>
               <div className="t3d-slabel">PER DAY</div>
             </div>
@@ -11090,7 +11159,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* The plan: a summary per day type (the meals themselves are in LOG AS YOU GO) */}
           <div className="t3d-card" data-testid="your-plan" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 6 }}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>YOUR PLAN · {planStyle === "hybrid" ? "HYBRID" : planStyle === "flexible" ? "FLEXIBLE MACROS" : "FIXED MEALS"}</div>
+              <h2 className="t3d-ctitle" style={{ margin: 0 }}>YOUR PLAN · {planStyle === "hybrid" ? "HYBRID" : planStyle === "flexible" ? "FLEXIBLE MACROS" : "FIXED MEALS"}</h2>
               <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup()}>EDIT PLAN</button>
             </div>
             <div data-testid="plan-style" style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{planStyleText}</div>
@@ -11127,7 +11196,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           </div>
 
           {activeNutritionStyle !== "fixed" && <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle">PLAN TOMORROW &amp; THE WEEK</div>
+            <h2 className="t3d-ctitle">PLAN TOMORROW &amp; THE WEEK</h2>
             <div style={{ color: "#8AABB8", fontSize: 10, lineHeight: 1.55, marginBottom: 12 }}>Decide the night before what you are aiming for. Repeated meals, library meals and flexible slots can all be mixed.</div>
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 7, marginBottom: 10 }}>
               {planningDates.map(date => <button key={date.key} className="t3d-btn t3d-btn-sm" onClick={() => setPlannerDate(date.key)} style={{ flex: "0 0 auto", background: plannerDate === date.key ? "rgba(0,200,255,.12)" : "transparent", borderColor: plannerDate === date.key ? NEON2 : BORDER, color: plannerDate === date.key ? NEON2 : "#8AABB8" }}>{date.label}{weeklyMealPlan[date.key]?.length ? ` · ${weeklyMealPlan[date.key].length}` : ""}</button>)}
@@ -11156,7 +11225,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
 
           <div className="t3d-card" data-testid="meal-library" style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><div className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</div><div style={{ color: "#8AABB8", fontSize: 9 }}>Meals you like that aren&apos;t in your plan, ready for planning the week. Your plan&apos;s meals are in LOG AS YOU GO.</div></div><div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}><button className="t3d-btn t3d-btn-sm" onClick={() => (showLibraryForm ? closeLibraryForm() : setShowLibraryForm(true))}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button><button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => openMealEditor(false)}>EDIT MEAL PLAN →</button></div></div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><h2 className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</h2><div style={{ color: "#8AABB8", fontSize: 9 }}>Meals you like that aren&apos;t in your plan, ready for planning the week. Your plan&apos;s meals are in LOG AS YOU GO.</div></div><div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}><button className="t3d-btn t3d-btn-sm" onClick={() => (showLibraryForm ? closeLibraryForm() : setShowLibraryForm(true))}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button><button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => openMealEditor(false)}>EDIT MEAL PLAN →</button></div></div>
             {showLibraryForm && <div style={{ padding: 11, background: SURFACE2, borderRadius: 6, marginBottom: 10 }}>
               <input className="t3d-input" placeholder="Meal name" value={libraryMealDraft.name} onChange={event => setLibraryMealDraft(meal => ({ ...meal, name: event.target.value }))} style={{ marginBottom: 8 }} />
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
@@ -11178,7 +11247,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
           {/* 7-day chart */}
           <div className="t3d-card" style={{ marginBottom: 16 }}>
-            <div className="t3d-ctitle">7-DAY CALORIES</div>
+            <h2 className="t3d-ctitle">7-DAY CALORIES</h2>
             <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80, padding: "0 4px" }}>
               {last7Logs.map((d, i) => {
                 const cals = d.log?.total_calories||0;
@@ -11200,7 +11269,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           {/* Weekly summary */}
           <div className="t3d-card" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setWeeklyOpen(w=>!w)}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SUMMARY</div>
+              <h2 className="t3d-ctitle" style={{ margin: 0 }}>WEEKLY SUMMARY</h2>
               <div style={{ color: "#E0EAF0", fontSize: 14, transform: weeklyOpen?"rotate(180deg)":"rotate(0deg)", transition: "transform .2s" }}>▾</div>
             </div>
             {weeklyOpen && (
@@ -11216,10 +11285,12 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
           {/* History */}
           <div className="t3d-card">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setHistoryOpen(h=>!h)}>
-              <div className="t3d-ctitle" style={{ margin: 0 }}>NUTRITION HISTORY</div>
-              <div style={{ color: "#E0EAF0", fontSize: 14, transform: historyOpen?"rotate(180deg)":"rotate(0deg)", transition: "transform .2s" }}>▾</div>
-            </div>
+            <h2 className="t3d-ctitle" style={{ margin: 0 }}>
+              <button type="button" aria-expanded={historyOpen} onClick={() => setHistoryOpen(h => !h)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", minHeight: 44, padding: 0, background: "none", border: 0, color: "inherit", font: "inherit", letterSpacing: "inherit", textTransform: "inherit", textAlign: "left", cursor: "pointer" }}>
+                NUTRITION HISTORY
+                <span aria-hidden="true" style={{ color: "#E0EAF0", fontSize: 14, transform: historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .2s" }}>▾</span>
+              </button>
+            </h2>
             {historyOpen && (
               <div style={{ marginTop: 16 }}>
                 {logs.length===0 ? (
@@ -11227,12 +11298,17 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 ) : logs.map((log, i) => {
                   const completed = countCompletedMeals(log.meals_completed);
                   const total = plan?.meals?.length||1;
+                  // Meals marked as not to plan, and whether any food has no calories yet,
+                  // so a day isn't shown as "0 kcal" when food was eaten.
+                  const missedCount = Object.entries(log.meals_completed || {}).filter(([key, value]) => !key.startsWith("_") && mealWasMissed(value)).length;
+                  const caloriesMissing = !(Number(log.total_calories) > 0) && (missedCount > 0 || unloggedFoodFromLog(log).length > 0);
+                  const reviewOpen = log.meals_completed && !Array.isArray(log.meals_completed) && log.meals_completed._review_complete === false;
                   return (
                     <div key={i} style={{ padding: "12px 0", borderBottom: `1px solid ${BORDER}` }}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                         <div style={{ fontSize: 10, color: "#E0EAF0", fontFamily: "'Orbitron',monospace" }}>{dateKeyLabel(log.date, { weekday: "short", day: "numeric", month: "short" })}</div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          <div style={{ fontSize: 10, color: completed/total>=0.8?NEON:"#FF8C00" }}>{completed}/{total} meals</div>
+                          <div style={{ fontSize: 10, color: completed/total>=0.8?NEON:"#FF8C00" }}>{completed}/{total} on plan{missedCount ? ` · ${missedCount} not` : ""}{reviewOpen ? " · review not done" : ""}</div>
                           <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => {
                             setMealResults(log.meals_completed||{});
                             setOffPlanFood(log.off_plan_food||"");
@@ -11245,7 +11321,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 12, fontSize: 10, color: "#E0EAF0" }}>
-                        <span style={{ color: NEON }}>{log.total_calories} kcal</span>
+                        <span style={{ color: caloriesMissing ? "#FFB547" : NEON }}>{caloriesMissing ? "kcal not logged yet" : `${log.total_calories} kcal`}</span>
                         <span style={{ color: NEON2 }}>{log.total_protein}g P</span>
                         {log.off_plan_food && <span style={{ color: "#FF8C00" }}>+ off plan</span>}
                       </div>
@@ -11769,6 +11845,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 function HabitsPage({ habits, setHabits }) {
   const [adding, setAdding] = useState(false);
   const [newHabit, setNewHabit] = useState({ name: "" });
+  const [renaming, setRenaming] = useState(null); // { id, name } while a habit is being renamed
   const cats = [...new Set(habits.map(h => h.category))];
   const remainingSuggestions = POPULAR_DAILY_HABITS.filter(suggestion => !habits.some(habit => habit.name.toLowerCase() === suggestion.name.toLowerCase()));
   const addHabit = (habit = newHabit) => {
@@ -11778,6 +11855,15 @@ function HabitsPage({ habits, setHabits }) {
     setNewHabit({ name: "" });
     setAdding(false);
   };
+  // Renaming keeps the habit's streak and today's tick.
+  const renameTaken = renaming && habits.some(habit => habit.id !== renaming.id && habit.name.toLowerCase() === renaming.name.trim().toLowerCase());
+  const renameHabit = () => {
+    const name = renaming?.name.trim();
+    if (!name || renameTaken) return;
+    setHabits(current => current.map(habit => (habit.id === renaming.id ? { ...habit, name } : habit)));
+    setRenaming(null);
+  };
+  const bestStreak = habits.length ? Math.max(...habits.map(habitStreak)) : 0;
   return (
     <div className="t3d-fade">
       {habits.length === 0 && (
@@ -11793,24 +11879,24 @@ function HabitsPage({ habits, setHabits }) {
       )}
       <div className="t3d-grid3">
         <div className="t3d-card">
-          <div className="t3d-ctitle">COMPLETION RATE</div>
+          <h2 className="t3d-ctitle">COMPLETION RATE</h2>
           <div className="t3d-sval" style={{ color: NEON }}>{habits.length ? Math.round((habits.filter(h=>h.done).length/habits.length)*100) : 0}%</div>
           <div className="t3d-slabel">TODAY</div>
         </div>
         <div className="t3d-card">
-          <div className="t3d-ctitle">BEST STREAK</div>
-          <div className="t3d-sval" style={{ color: "#FF8C00" }}>{habits.length ? Math.max(...habits.map(habitStreak)) : 0}</div>
-          <div className="t3d-slabel">DAYS</div>
+          <h2 className="t3d-ctitle">BEST STREAK</h2>
+          <div className="t3d-sval" style={{ color: "#FF8C00" }}>{bestStreak}</div>
+          <div className="t3d-slabel">{bestStreak === 1 ? "DAY" : "DAYS"}</div>
         </div>
         <div className="t3d-card">
-          <div className="t3d-ctitle">TOTAL HABITS</div>
+          <h2 className="t3d-ctitle">TOTAL HABITS</h2>
           <div className="t3d-sval" style={{ color: NEON2 }}>{habits.length}</div>
           <div className="t3d-slabel">ACTIVE HABITS</div>
         </div>
       </div>
       {habits.length > 0 && remainingSuggestions.length > 0 && (
         <div className="t3d-card" style={{ marginBottom: 14 }}>
-          <div className="t3d-ctitle">POPULAR DAILY HABITS</div>
+          <h2 className="t3d-ctitle">POPULAR DAILY HABITS</h2>
           <div style={{ fontSize: 10, color: "#6F8792", marginBottom: 10 }}>Optional ideas — keep your list focused.</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7, opacity: .65 }}>
             {remainingSuggestions.map(habit => <button key={habit.name} className="t3d-btn t3d-btn-sm" style={{ whiteSpace: "normal" }} onClick={() => addHabit(habit)}>+ {habit.name}</button>)}
@@ -11819,25 +11905,42 @@ function HabitsPage({ habits, setHabits }) {
       )}
       {cats.map(cat => (
         <div className="t3d-card" key={cat} style={{ marginBottom: 14 }}>
-          <div className="t3d-ctitle">{cat.toUpperCase()}</div>
+          <h2 className="t3d-ctitle">{cat.toUpperCase()}</h2>
           {habits.filter(h => h.category === cat).map(h => (
             <div key={h.id} className="t3d-hrow">
-              <button aria-label={`${h.done ? "Unselect" : "Complete"} ${h.name}`} onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x,done:!x.done} : x))} className={`t3d-hcheck ${h.done?"done":""}`} style={{ background: h.done ? "rgba(0,255,178,.1)" : "transparent", color: NEON, cursor: "pointer" }}>{h.done?"✓":""}</button>
+              <button type="button" aria-label={`${h.done ? "Unselect" : "Complete"} ${h.name}`} aria-pressed={Boolean(h.done)} onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x,done:!x.done} : x))} style={{ width: 44, height: 44, flexShrink: 0, padding: 0, border: 0, background: "transparent", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                <span className={`t3d-hcheck ${h.done?"done":""}`} style={{ width: 26, height: 26, color: NEON }}>{h.done ? "✓" : ""}</span>
+              </button>
               <div className="t3d-hname" style={{ color: h.done?"#E0EAF0":"#8AABB8" }}>{h.name}</div>
               <div className="t3d-pbar" style={{ flex: 1, margin: "0 14px" }}>
                 <div className="t3d-pfill" style={{ width: `${Math.min((habitStreak(h)/30)*100,100)}%`, background: habitStreak(h)>=7?"#FF8C00":NEON }} />
               </div>
               <div className={`t3d-hstreak ${habitStreak(h)>=7?"fire":""}`}>{habitStreak(h)>=7?"🔥":"◆"} {habitStreak(h)}d</div>
-              <button aria-label={`Remove ${h.name}`} onClick={() => setHabits(current => current.filter(item => item.id !== h.id))} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 16, padding: 4 }}>×</button>
+              <button type="button" aria-label={`Rename ${h.name}`} onClick={() => setRenaming({ id: h.id, name: h.name })} style={{ border: 0, background: "transparent", color: "#8AABB8", cursor: "pointer", fontSize: 10, minWidth: 44, minHeight: 44, padding: 0, textDecoration: "underline" }}>edit</button>
+              <button type="button" aria-label={`Remove ${h.name}`} onClick={() => setHabits(current => current.filter(item => item.id !== h.id))} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 16, minWidth: 44, minHeight: 44, padding: 0 }}>×</button>
             </div>
           ))}
         </div>
       ))}
       {habits.length > 0 && <button className="t3d-btn" onClick={() => setAdding(true)}>+ ADD NEW HABIT</button>}
+      {renaming && (
+        <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: 20 }}>
+          <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="rename-habit-title" style={{ width: "100%", maxWidth: 360 }}>
+            <h2 id="rename-habit-title" className="t3d-ctitle" style={{ color: NEON }}>RENAME HABIT</h2>
+            <input className="t3d-input" autoFocus aria-label="Habit name" value={renaming.name} onChange={event => { const name = event.target.value; setRenaming(value => ({ ...value, name })); }} onKeyDown={event => event.key === "Enter" && renameHabit()} />
+            {renameTaken && <div role="alert" style={{ fontSize: 10, color: "#FFB547", marginTop: 6 }}>You already have a habit with that name.</div>}
+            <div style={{ fontSize: 10, color: "#6F8792", marginTop: 6 }}>Its streak and today&apos;s tick stay as they are.</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setRenaming(null)}>CANCEL</button>
+              <button className="t3d-btn" style={{ flex: 1 }} disabled={!renaming.name.trim() || renameTaken} onClick={renameHabit}>SAVE NAME</button>
+            </div>
+          </div>
+        </div>
+      )}
       {adding && (
         <div style={{ position: "fixed", inset: 0, height: "100dvh", background: "rgba(0,0,0,.9)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: 20 }}>
           <div className="t3d-card" style={{ width: "100%", maxWidth: 360 }}>
-            <div className="t3d-ctitle" style={{ color: NEON }}>ADD A DAILY HABIT</div>
+            <h2 className="t3d-ctitle" style={{ color: NEON }}>ADD A DAILY HABIT</h2>
             <input className="t3d-input" autoFocus placeholder="What do you want to do each day?" value={newHabit.name} onChange={event => setNewHabit(value => ({ ...value, name: event.target.value }))} onKeyDown={event => event.key === "Enter" && addHabit()} />
             <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
               <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, borderColor: BORDER, color: "#8AABB8" }} onClick={() => setAdding(false)}>CANCEL</button>

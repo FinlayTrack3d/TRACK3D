@@ -12,7 +12,8 @@
 //  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
 //  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror, longname,
-//  hyroxdetails, emptyback, switchworkout, sidebarkeys, fitnessa11y, dashloading, taptargets
+//  hyroxdetails, emptyback, switchworkout, sidebarkeys, fitnessa11y, dashloading, taptargets,
+//  mealtoggle, morninglog, morninglow, routinekeys, habitsedit
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -149,7 +150,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     nutrition_logs: [
       ...(scenario === 'offplancap' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 3720, total_protein: 85, meals_completed: { 0: true, 1: true, _review_complete: true }, off_plan_food: 'large pizza', off_plan_calories: 2420 }]
         : scenario === 'offplanmacros' ? [{ id: 'n1', user_id: user.id, date: today, total_calories: 1000, total_protein: 70, meals_completed: { 0: true, _off_plan: { protein: 30, carbs: 50, fats: 10 }, _review_complete: false }, off_plan_food: 'toast', off_plan_calories: 400 }]
-        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'hyroxdetails', 'weeklyplanstart', 'profilelive', 'profileexperience', 'mealswap', 'mealswapdash'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
+        : ['dashlog', 'nutritionorder', 'loadwrites', 'setprefill', 'nextupmorning', 'nextupworkout', 'nextupslow', 'nextupmorningslow', 'newdash', 'planwarning', 'restday', 'targetsuggest', 'targetkeep', 'logextra', 'logextradash', 'editordraft', 'habitlink', 'activitylog', 'activitynextup', 'hyroxdetails', 'weeklyplanstart', 'profilelive', 'profileexperience', 'mealswap', 'mealswapdash', 'mealtoggle'].includes(scenario) ? [] : [{ id: 'n1', user_id: user.id, date: today, total_calories: 1300, total_protein: 85, meals_completed: { 0: true, 1: true, 2: { completed: false, note: 'large pepperoni pizza and two beers' }, _review_complete: scenario !== 'reviewskip' }, off_plan_food: scenario === 'reviewskip' || scenario === 'dashexcludes' ? '' : 'large pepperoni pizza, two beers', off_plan_calories: null }]),
       { id: 'n0', user_id: user.id, date: yesterday, total_calories: 2050, total_protein: 130, meals_completed: [true, true, true] },
     ],
     daily_debrief: [{ overall_score: 7, task_scores: {} }],
@@ -193,6 +194,22 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     { name: 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
     { name: 'Pull A', days: [dayCodes[(todayDow + 2) % 7]], exercises: [{ name: 'Row', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
   ] }];
+  // A routine with tasks to tick, for the Morning checks.
+  if (['morninglog', 'morninglow', 'routinekeys', 'taptargets'].includes(scenario)) tables.morning_routines = [{ user_id: user.id, wake_time: '06:00', day_groups: [], tasks: [
+    { id: 'sleep', name: "Log last night's sleep", type: 'sleep', icon: '😴', duration: 1, scheduledTime: '06:00' },
+    { id: 'custom-1', name: 'Walk the dog', type: 'tick', icon: '▸', duration: 20, scheduledTime: '06:01' },
+    { id: 'custom-2', name: 'Stretch', type: 'tick', icon: '▸', duration: 10, scheduledTime: '06:21' },
+    { id: 'checkin', name: 'TRACK3D Morning Check-in', type: 'tick', icon: '📱', duration: 2, scheduledTime: '06:31' } ] }];
+  // Two good mornings, then today at 2/10.
+  if (scenario === 'morninglow') tables.morning_checkins = [
+    { user_id: user.id, date: shiftKey(today, -2), score: 8, data: { 'custom-1': true, 'custom-2': true } },
+    { user_id: user.id, date: yesterday, score: 7, data: { 'custom-1': true, 'custom-2': false } },
+    { user_id: user.id, date: today, score: 2, data: { 'custom-1': false, 'custom-2': false, loggedAfter: true } },
+  ];
+  // One habit, done yesterday: a 1-day streak.
+  if (['habitsedit', 'taptargets'].includes(scenario)) Object.assign(tables, { habits: [{ id: 'h1', user_id: user.id, name: 'Read 10 pages', category: 'daily', created_at: '2026-01-01T00:00:00Z' }], habit_completions: [{ user_id: user.id, habit_id: 'h1', date: yesterday, done: true }] });
+  // A day with a meal marked not to plan and no calories, its review not done.
+  if (scenario === 'nutritionhistory') tables.nutrition_logs.push({ id: 'n2', user_id: user.id, date: shiftKey(today, -2), total_calories: 0, total_protein: 0, meals_completed: { 1: { completed: false, note: '' }, _review_complete: false }, off_plan_food: '', off_plan_calories: null });
   // Today's morning and end-of-day check-in are both done, and a workout is scheduled.
   if (scenario === 'dashloading') Object.assign(tables, { morning_checkins: [{ user_id: user.id, date: today, score: 8, data: {} }], end_of_day: [{ id: 'e1', user_id: user.id, date: today }] });
   // Rep targets saved as one string, as a coach reply or an import sometimes left them.
@@ -661,7 +678,110 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       await page.waitForTimeout(800);
       found[tab.toLowerCase()] = await small();
     }
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.getByRole('button', { name: 'EDIT ROUTINE' }).click();
+    await page.getByRole('heading', { name: 'EDIT MORNING ROUTINE' }).waitFor();
+    found.routineEditor = await small();
     for (const [screen, list] of Object.entries(found)) assert.deepEqual(list, [], `${screen}: ${list.join('; ')}`);
+  } else if (scenario === 'mealtoggle') {
+    // ✓ and × are toggles: tapping the chosen one again clears the meal, and it says so.
+    await openNutrition();
+    const log = page.getByTestId('nutrition-today');
+    const logWrites = () => writes.filter(w => w.table === 'nutrition_logs');
+    const nextWrite = async count => {
+      for (let i = 0; i < 50 && logWrites().length <= count; i++) await page.waitForTimeout(100);
+      assert.ok(logWrites().length > count, 'saved');
+      return JSON.parse(logWrites().at(-1).body).meals_completed;
+    };
+    const missed = log.getByRole('button', { name: 'Lunch did not go to plan' });
+    let count = logWrites().length;
+    await missed.click();
+    assert.equal((await nextWrite(count))[1].completed, false);
+    await log.getByText("Lunch: didn't go to plan. Add what you had below, or tap × again to undo.", { exact: false }).waitFor();
+    assert.equal(await missed.getAttribute('aria-pressed'), 'true');
+    count = logWrites().length;
+    await missed.click();
+    assert.equal((await nextWrite(count))[1], undefined, 'tapping × again undoes it');
+    assert.equal(await missed.getAttribute('aria-pressed'), 'false');
+    const onPlan = log.getByRole('button', { name: 'Breakfast went to plan' });
+    count = logWrites().length;
+    await onPlan.click();
+    assert.equal((await nextWrite(count))[0], true);
+    count = logWrites().length;
+    await onPlan.click();
+    assert.equal((await nextWrite(count))[0], undefined, 'tapping ✓ again undoes it');
+    // Day Review has a way back to Nutrition.
+    await page.getByRole('button', { name: /DAY REVIEW/ }).click();
+    await page.getByRole('button', { name: '← BACK TO NUTRITION' }).click();
+    await page.getByRole('button', { name: /DAY REVIEW/ }).waitFor();
+  } else if (scenario === 'morninglog') {
+    // Logging a morning afterwards needs the wake-up time, the routine time and every task's answer.
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.getByRole('button', { name: /ALREADY DONE IT/ }).click();
+    await page.getByText('LOG THIS MORNING').waitFor();
+    const save = page.getByRole('button', { name: 'SAVE MORNING' });
+    assert.equal(await save.isDisabled(), true);
+    assert.equal(await page.getByTestId('log-morning-missing').textContent(), 'To save, add your wake-up time, how long the routine took and done or not done for 2 tasks.');
+    for (const name of ['Walk the dog', 'Stretch']) assert.equal(await page.getByRole('group', { name }).getByRole('button', { pressed: true }).count(), 0, `${name} starts unanswered`);
+    await page.getByLabel(/Actual wake-up time/).fill('06:10');
+    await page.getByLabel(/Routine time \(minutes\)/).fill('35');
+    await page.getByRole('group', { name: 'Walk the dog' }).getByRole('button', { name: '✓ DONE' }).click();
+    assert.equal(await page.getByTestId('log-morning-missing').textContent(), 'To save, add done or not done for Stretch.');
+    assert.equal(await save.isDisabled(), true);
+    await page.getByRole('group', { name: 'Stretch' }).getByRole('button', { name: '✗ NOT DONE' }).click();
+    assert.equal(await page.getByTestId('log-morning-missing').count(), 0);
+    await save.click();
+    for (let i = 0; i < 50 && !writes.some(w => w.table === 'morning_checkins'); i++) await page.waitForTimeout(100);
+    const row = JSON.parse(writes.filter(w => w.table === 'morning_checkins').at(-1).body);
+    assert.equal(row.data['custom-1'], true);
+    assert.equal(row.data['custom-2'], false);
+    assert.equal(row.data.wakeTiming.actual, '06:10');
+    assert.equal(row.data.routineTiming.actualMinutes, 35);
+  } else if (scenario === 'morninglow') {
+    // 2/10 is logged, not "complete", and doesn't add to the streak.
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    const streak = page.getByTestId('morning-streak');
+    await streak.waitFor();
+    assert.equal((await streak.textContent()).trim(), "🔥 2-DAY MORNING STREAK · TODAY WAS UNDER 5/10, SO IT DOESN'T COUNT");
+    await page.getByText('MORNING LOGGED').waitFor();
+    assert.equal(await page.getByText('MORNING COMPLETE').count(), 0);
+    await page.getByRole('button', { name: 'MORNING HISTORY' }).click();
+    await page.getByText('Under half done · not in streak').waitFor();
+    assert.equal(await page.getByText('Under half done · not in streak').count(), 1, 'only today');
+  } else if (scenario === 'routinekeys') {
+    // The routine editor's handles move tasks with the arrow keys; fields have their own names.
+    await page.getByRole('button', { name: /MORNING$/ }).last().click();
+    await page.getByRole('button', { name: 'EDIT ROUTINE' }).click();
+    const walk = page.getByRole('button', { name: /^Move Walk the dog/ });
+    await walk.focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await page.getByLabel('Task 3 name').inputValue(), 'Walk the dog');
+    assert.equal(await page.getByLabel('Task 2 name').inputValue(), 'Stretch');
+    assert.ok(await page.getByRole('button', { name: /^Move Walk the dog/ }).evaluate(el => el === document.activeElement), 'the focus stays on the moved task');
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await page.getByLabel('Task 3 name').inputValue(), 'Walk the dog', 'the check-in stays last');
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await page.getByLabel('Task 2 name').inputValue(), 'Walk the dog');
+    await page.getByLabel('Stretch start time').waitFor();
+    await page.getByLabel('Stretch minutes').waitFor();
+    // Alternating Days goes back to where it was opened from.
+    await page.getByRole('button', { name: '← CANCEL' }).click();
+    await page.getByRole('button', { name: 'ALTERNATING DAYS' }).click();
+    await page.getByRole('button', { name: 'DONE', exact: true }).click();
+    await page.getByRole('button', { name: 'EDIT ROUTINE' }).waitFor();
+  } else if (scenario === 'habitsedit') {
+    await page.getByRole('button', { name: /HABITS$/ }).last().click();
+    const best = page.locator('.t3d-card').filter({ has: page.getByRole('heading', { name: 'BEST STREAK' }) });
+    await best.getByText('DAY', { exact: true }).waitFor();
+    assert.equal(await best.getByText('DAYS', { exact: true }).count(), 0, '1 DAY, not 1 DAYS');
+    await page.getByRole('button', { name: 'Rename Read 10 pages' }).click();
+    const dialog = page.getByRole('dialog', { name: 'RENAME HABIT' });
+    await dialog.getByLabel('Habit name').fill('Read 20 pages');
+    await dialog.getByRole('button', { name: 'SAVE NAME' }).click();
+    await page.getByRole('button', { name: 'Complete Read 20 pages' }).waitFor();
+    for (let i = 0; i < 30 && !writes.some(w => w.table === 'habits' && /Read 20 pages/.test(w.body || '')); i++) await page.waitForTimeout(100);
+    const renamed = JSON.parse(writes.filter(w => w.table === 'habits' && /Read 20 pages/.test(w.body || '')).at(-1).body);
+    assert.equal(renamed.id, 'h1', 'the same habit, renamed');
   } else if (scenario === 'nextupslow') {
     // Tapped while Fitness is still loading: once it has loaded, the
     // unfinished workout is continued, not replaced by a new one.
@@ -1138,8 +1258,9 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     const panel = log.getByTestId('swap-panel');
     await panel.getByText('SWAP LUNCH FOR').waitFor();
     if (process.env.SHOT) await page.screenshot({ path: 'swap.png' });
-    // Library meals are offered, not the planned meal itself.
-    assert.equal(await panel.getByTestId('swap-option').filter({ hasText: /^Lunch/ }).count(), 0);
+    // Library meals are offered, not today's planned meals.
+    assert.deepEqual(await panel.getByTestId('swap-option').locator('span:first-child').allTextContents(), ['Protein Pancakes']);
+    assert.equal(await panel.getByLabel('Save it to my meal library').isChecked(), false, 'saving to the library is not the default');
     await panel.getByTestId('swap-option').filter({ hasText: 'Protein Pancakes' }).click();
     await log.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Protein Pancakes · 450 kcal · 35g P' }).waitFor();
     let saved = await nextLogWrite(count);
@@ -1154,6 +1275,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await panel.getByLabel('Swap meal name').fill('Chicken wrap');
     await panel.getByLabel('Swap meal KCAL').fill('600');
     await panel.getByLabel('Swap meal P (g)').fill('40');
+    await panel.getByLabel('Save it to my meal library').check();
     await panel.getByRole('button', { name: 'SWAP IT IN ✓' }).click();
     await log.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Chicken wrap · 600 kcal · 40g P' }).waitFor();
     saved = await nextLogWrite(count);
@@ -1245,6 +1367,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await card.getByRole('button', { name: 'Swap Lunch' }).click();
     await card.getByTestId('swap-panel').getByLabel('Swap meal name').fill('Sushi');
     await card.getByTestId('swap-panel').getByLabel('Swap meal KCAL').fill('500');
+    await card.getByTestId('swap-panel').getByLabel('Save it to my meal library').check();
     await card.getByTestId('swap-panel').getByRole('button', { name: 'SWAP IT IN ✓' }).click();
     await card.getByTestId('meal-swapped').filter({ hasText: 'Swapped for Sushi · 500 kcal' }).waitFor();
     for (let i = 0; i < 20 && !writes.some(w => w.table === 'nutrition_plans' && /Sushi/.test(w.body || '')); i++) await page.waitForTimeout(100);
@@ -1460,7 +1583,10 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.waitForTimeout(1500);
     assert.equal(await page.getByText("This page couldn't load").count(), 0);
     const historyText = await page.locator('body').textContent();
-    assert.match(historyText, /2\/3|2 of 3|2 meals/i, 'completed meals counted');
+    assert.match(historyText, /2\/3 on plan · 1 not/, 'meals on plan and not counted');
+    // Nothing on plan and no calories, but a meal marked not to plan: not shown as "0 kcal".
+    assert.match(historyText, /0\/3 on plan · 1 not · review not done/);
+    await page.getByText('kcal not logged yet').waitFor();
   } else if (scenario === 'roundup' || scenario === 'roundupfail') {
     await page.getByRole('button', { name: /END OF DAY CHECK-IN/ }).click();
     const next = () => page.getByRole('button', { name: /^(NEXT →|SEE MY ROUNDUP →)$/ }).click();
