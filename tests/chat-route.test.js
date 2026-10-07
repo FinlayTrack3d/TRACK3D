@@ -11,11 +11,12 @@ process.env.ANTHROPIC_API_KEY = "test-key";
 let rateResult = { data: "ok", status: 200 };
 let profile = null;
 let providerStatus = 200;
+let userId = "user-1"; // each user has their own request limit
 const calls = [];
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input?.url || input);
   calls.push({ url, body: init.body });
-  if (url.includes("/auth/v1/user")) return Response.json({ id: "user-1", aud: "authenticated" });
+  if (url.includes("/auth/v1/user")) return Response.json({ id: userId, aud: "authenticated" });
   if (url.includes("/rest/v1/rpc/chat_rate_check")) {
     return rateResult.status === 200 ? Response.json(rateResult.data) : Response.json({ message: "function not found" }, { status: rateResult.status });
   }
@@ -123,6 +124,20 @@ test("builders never stream, and a provider failure before streaming is a normal
   providerStatus = 529;
   const failed = await post({ ...ask, stream: true });
   assert.equal(failed.status, 502);
-  assert.match((await failed.json()).error, /Overloaded/);
+  // The provider's own text stays in the server logs; the user gets a plain message.
+  const error = (await failed.json()).error;
+  assert.equal(error, "The coach is busy right now. Please try again in a minute.");
+  assert.doesNotMatch(error, /Overloaded|provider/);
   providerStatus = 200;
+});
+
+test("the reply length is set per area on the server, not by the request", async () => {
+  userId = "user-2";
+  calls.length = 0;
+  await post({ ...ask, responseTokens: 6000 });
+  assert.equal(JSON.parse(calls.find((call) => call.url.includes("anthropic")).body).max_tokens, 1000, "a chat can't ask for a long reply");
+  calls.length = 0;
+  await post({ area: "programme_builder", messages: [{ role: "user", content: "Build my programme" }], responseTokens: 6000 });
+  assert.equal(JSON.parse(calls.find((call) => call.url.includes("anthropic")).body).max_tokens, 6000);
+  userId = "user-1";
 });

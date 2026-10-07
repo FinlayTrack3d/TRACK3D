@@ -12472,7 +12472,13 @@ export default function App() {
     return "";
   };
 
-  const signOut = async () => { clearLoginWindow(); await supabase.auth.signOut({ scope: "local" }); window.location.replace("/login"); };
+  // Coach chats can hold health details, so they don't stay on the device after signing out.
+  const signOut = async () => {
+    clearLoginWindow();
+    try { Object.keys(localStorage).filter(key => key.startsWith("track3d-coach-")).forEach(key => localStorage.removeItem(key)); } catch { /* storage unavailable */ }
+    await supabase.auth.signOut({ scope: "local" });
+    window.location.replace("/login");
+  };
 
   // After Delete my account: nothing of the account is left in this browser.
   const accountDeleted = async () => {
