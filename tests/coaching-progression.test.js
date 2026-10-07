@@ -69,3 +69,18 @@ test("an uneven set pattern only asks for a rest and form check after repeated o
   assert.equal(result.decision, "hold");
   assert.notEqual(result.cue, "CHECK REST & FORM");
 });
+
+test("each set is judged against its own rep range", () => {
+  // 6-8, 6-8, 8-10 and a 6-rep back-off set: all at the top of their own range.
+  const result = evaluateProgression({ repRange: "6-8", repRanges: ["6-8", "6-8", "8-10", "6"], currentWeight: 60, sets: sets(8, 8, 10, 6) });
+  assert.equal(result.decision, "progress");
+  assert.equal(result.nextWeight, 62.5);
+  assert.equal(evaluateProgression({ repRange: "6-8", repRanges: ["6-8", "6-8", "8-10", "6"], currentWeight: 60, sets: sets(8, 8, 9, 6) }).decision, "hold");
+  assert.equal(evaluateProgression({ repRange: "6-8", currentWeight: 60, sets: sets(8, 8, 10, 6) }).decision, "hold", "one range for all sets, as before");
+});
+
+test("a warm-up next to the working weight isn't taken as the weight step", () => {
+  assert.equal(inferIncrement({ currentWeight: 42.5, equipmentHistory: [20, 42.5] }).increment, 2.5);
+  assert.equal(inferIncrement({ currentWeight: 50, equipmentHistory: [40, 45, 50] }).increment, 5);
+  assert.equal(inferIncrement({ currentWeight: 42.5, equipmentHistory: [40, 42.5, 45] }).increment, 2.5);
+});

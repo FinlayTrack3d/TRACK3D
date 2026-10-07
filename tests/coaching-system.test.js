@@ -70,3 +70,17 @@ test("the stable prompt is cached; data, level and tone come after it", async ()
   assert.match(withPain[0].text, /^ACTIVE PAIN/);
   assert.equal(withPain.some((block) => block.cache_control), false, "a pain request is not cached");
 });
+
+test("coaches recommend and ask when unsure, never invent plan reasons, and know plan changes need approval", async () => {
+  const { SHARED_RULES, COACHING_GUIDELINES, TONES } = await import("../lib/coaching/system.js");
+  const { WORKOUT_COACH_INSTRUCTIONS } = await import("../lib/coaching/playbook.js");
+  assert.match(SHARED_RULES, /still give your best recommendation, then ask one short question/);
+  assert.match(SHARED_RULES, /Never invent reasons for how the user's plan or targets are set up/);
+  assert.doesNotMatch(SHARED_RULES, /You cannot change the saved plan from a chat/);
+  assert.match(SHARED_RULES, /only saved when the user approves it in the app/);
+  assert.doesNotMatch(TONES.strict.spec, /no questions back/i, "PUSH ME may ask when it needs to be sure");
+  assert.match(COACHING_GUIDELINES, /one more rep than last time/);
+  assert.match(COACHING_GUIDELINES, /2 or more reps over the top of its range/);
+  assert.match(WORKOUT_COACH_INSTRUCTIONS, /doesn't name an exercise is about the current exercise/);
+  assert.match(WORKOUT_COACH_INSTRUCTIONS, /Never defend it with a reason the data doesn't give/);
+});

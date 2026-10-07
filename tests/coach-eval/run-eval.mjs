@@ -87,6 +87,17 @@ const SCENARIOS = [
     turns: ["Swap Dumbbell Bench Press for Machine Chest Press permanently in my plan."],
     checks: (reply, _turn, _level, raw) => [...checkNoInternalTerms(reply), ...checkPlanChangeProposed(raw, { kind: "replace_exercise", sessionName: "Push A", exerciseName: "Dumbbell Bench Press" }),
       ...checkMentions(reply, /APPROVE & SAVE/i, "point to APPROVE & SAVE"), ...checkAbsent(reply, /\b(i'?ve|i have|has been|have been|is now|are now)\s+(swapped|replaced|changed|updated|saved)\b/i, "says the change is already made")] },
+  { id: 11, name: "Set question without the exercise", ...WORKOUT,
+    context: JSON.stringify({ activeWorkout: [{ exercise: "Incline Dumbbell Press", isCurrentExercise: true, targetSets: 3, repRangeTarget: ["6-8", "6-8", "6-8"], loggedSets: [{ setNumber: 1, weight: "24", reps: "8" }],
+      nextSet: { setNumber: 2, weight: "24", reps: "8", why: "Last time 7 × 24 kg. Aim for 8." } }, { exercise: "Cable Fly", isCurrentExercise: false, targetSets: 3, repRangeTarget: ["12-15", "12-15", "12-15"], loggedSets: [] }] }),
+    turns: ["What should I do for the next set?"],
+    checks: (reply) => [...checkMentions(reply, /incline dumbbell press/i, "name the current exercise"), ...checkMentions(reply, /\b24\b/, "quote the app's 24 kg"), ...checkMentions(reply, /\b8\b/, "quote the aim of 8 reps")] },
+  { id: 12, name: "Lower last set in the plan", ...WORKOUT,
+    context: JSON.stringify({ activeWorkout: [{ exercise: "Bench Press", isCurrentExercise: true, targetSets: 4, repRangeTarget: ["6-8", "6-8", "8-10", "6"], loggedSets: [] }],
+      savedPlan: [{ name: "Push A", days: ["MON"], exercises: [{ name: "Bench Press", prescription: "4 × 6-8/6-8/8-10/6" }] }] }),
+    turns: ["Why is set 4 only 6 reps?", "Is that optimal?"],
+    checks: (reply, turn) => [...checkAbsent(reply, /built into the plan|programmed back-?off|by design|deliberate(ly)?/i, "invents a reason for the plan"),
+      ...(turn === 1 ? checkMentions(reply, /APPROVE & SAVE|change (it|set 4)|update (it|set 4)/i, "offer to change it") : [])] },
 ];
 
 // The reply proposes a plan change the app can save, naming the plan's own session and exercise.

@@ -50,6 +50,8 @@ a {
 
 .workout-set-fields { display: grid; grid-template-columns: minmax(0,1fr) 82px minmax(0,1fr); align-items: end; gap: 12px; }
 .workout-number { width: 100% !important; height: 104px !important; font-size: 34px !important; }
+/* Suggested reps and weight: faint until changed (placeholders, so typing replaces them). */
+.workout-number::placeholder { color: #7D8C95; opacity: 1; }
 .workout-log-set { width: 82px; min-height: 72px; margin-bottom: 16px; padding: 8px; font: 800 10px "Orbitron", monospace; letter-spacing: 1px; }
 .workout-field { min-width: 0; }
 .workout-steppers { display: flex; gap: 6px; margin-top: 8px; }
