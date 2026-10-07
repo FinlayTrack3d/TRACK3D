@@ -5,11 +5,11 @@ import { beginLoginWindow, loginWindowExpiry, clearLoginWindow } from "../lib/lo
 import { resolveActivePain, streamCoachMessage } from "../lib/coaching/coach-client";
 import { COACH_PERSONALITIES } from "../lib/coaching/personality";
 import { normaliseExperience } from "../lib/coaching/system";
-import { detectPersonalBest, evaluateProgression } from "../lib/coaching/progression";
+import { detectPersonalBest, evaluateProgression, inferIncrement } from "../lib/coaching/progression";
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout, coachProposal, proposalsOverlap } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, applyPlanChangeToWorkout, describePlanChange, exerciseMatchesHistory, isApprovalReply, isPlanChangeRequest, planChangeSummary, planOutline } from "../lib/coaching/plan-change";
-import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerDefaults, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
+import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerSuggestion, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -103,8 +103,6 @@ const BG = "#080C10";
 const SURFACE = "#0D1318";
 const SURFACE2 = "#111921";
 const BORDER = "#1A2530";
-// Pre-filled set logger numbers after a logged set (still editable).
-const FAINT_INPUT = "#7D8C95";
 
 const DEFAULT_HOME_TIME_ZONE = "Europe/London";
 
@@ -342,6 +340,7 @@ const css = `
   .t3d-input { background: #111921; border: 1px solid #31434F; border-radius: 5px; padding: 10px 12px; color: #E0EAF0; font-size: 13px; line-height: 1.4; outline: none; transition: border-color .18s; width: 100%; }
   .t3d-input:focus { border-color: rgba(0,255,178,.35); }
   .t3d-input::placeholder { color: #1E2E3A; }
+  .t3d-input.t3d-minutes::placeholder { color: #8AABB8; }
   .t3d-checkin-step { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 20px; }
   .t3d-big-btn { width: 100%; padding: 18px; font-family: 'Orbitron', monospace; font-size: 13px; letter-spacing: 3px; border-radius: 8px; cursor: pointer; transition: all .2s; border: none; }
   .t3d-tick-btn { background: rgba(0,255,178,.1); border: 2px solid #00FFB2; color: #00FFB2; padding: 16px 32px; font-family: 'Orbitron', monospace; font-size: 20px; border-radius: 8px; cursor: pointer; transition: all .2s; margin: 8px; }
@@ -1057,7 +1056,7 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
 function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setScheduledTasks, dayGroups = [], onOpenRotationSetup, onSave, onRebuild, onCancel }) {
   const [newTaskName, setNewTaskName] = useState("");
   const [newTaskTime, setNewTaskTime] = useState("");
-  const [newTaskDuration, setNewTaskDuration] = useState(10);
+  const [newTaskDuration, setNewTaskDuration] = useState(""); // empty: 10 minutes, shown faintly
   const [dragIdx, setDragIdx] = useState(null);
   const durationTimerRef = useRef(null);
 
@@ -1204,7 +1203,7 @@ function MorningRoutineEditor({ wakeTime, setWakeTime, scheduledTasks, setSchedu
 
     setNewTaskName("");
     setNewTaskTime("");
-    setNewTaskDuration(10);
+    setNewTaskDuration("");
   };
 
   const recalcFromWake = (list) => {
@@ -1541,7 +1540,8 @@ Current tasks: ${JSON.stringify(tasks)}.`,
                 min="1"
                 max="180"
                 aria-label="Minutes"
-                className="t3d-input"
+                className="t3d-input t3d-minutes"
+                placeholder="10"
                 value={newTaskDuration}
                 onChange={e => setNewTaskDuration(e.target.value)}
                 style={{ paddingRight: 32 }}
@@ -1754,7 +1754,7 @@ function MorningSection({ user }) {
   const [wakeTime, setWakeTime] = useState("06:00");
   const [selectedTasks, setSelectedTasks] = useState([]);
   const [customTask, setCustomTask] = useState("");
-  const [customTaskDuration, setCustomTaskDuration] = useState(10);
+  const [customTaskDuration, setCustomTaskDuration] = useState(""); // empty: 10 minutes, shown faintly
   const [scheduledTasks, setScheduledTasks] = useState([]);
   const [setupReviewVisited, setSetupReviewVisited] = useState(false);
   const DEFAULT_DAY_GROUPS = [{ id: "A", name: "Day A" }, { id: "B", name: "Day B" }];
@@ -2050,7 +2050,7 @@ function MorningSection({ user }) {
     ]);
 
     setCustomTask("");
-    setCustomTaskDuration(10);
+    setCustomTaskDuration("");
   };
 
   const buildSchedule = (orderedTasks) => {
@@ -3690,7 +3690,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       min="1"
                       max="180"
                       aria-label="Minutes"
-                      className="t3d-input"
+                      className="t3d-input t3d-minutes"
+                      placeholder="10"
                       value={customTaskDuration}
                       onChange={e =>
                         setCustomTaskDuration(e.target.value)
@@ -6182,11 +6183,13 @@ function withPlanApproval(sessions, now = new Date()) {
     if (!lastExposure?.sets?.length) return null;
     const currentWeight = Number(lastExposure.sets[0]?.weight) || 0;
     const equipmentHistory = exposures.flatMap(item => item.sets || []).map(set => Number(set.weight)).filter(Number.isFinite);
-    const repRange = repTargets(exercise.reps)[0];
+    // Each set is judged against its own range (6-8, 6-8, 8-10, 6).
+    const repRanges = repTargets(exercise.reps, Math.max(Number(exercise.sets) || 0, lastExposure.sets.length));
     return evaluateProgression({
       prescriptionType: exercise.prescription_type || "straight_sets",
       sets: lastExposure.sets,
-      repRange,
+      repRange: repRanges[0],
+      repRanges,
       currentWeight,
       equipmentHistory,
       week: exercise.week || 2,
@@ -6197,16 +6200,6 @@ function withPlanApproval(sessions, now = new Date()) {
       consecutiveStalledExposures: Number(exercise.stalled_exposures || 0),
       pain: Boolean(exercise.active_pain),
     });
-  };
-
-  const getWeightGuidance = (exercise, setIdx) => {
-    const lastSets = getLastSessionData(exercise);
-    if (!lastSets?.[setIdx]) return null;
-    const recommendation = getProgressionRecommendation(exercise);
-    if (!recommendation || Array.isArray(recommendation)) return null;
-    const lastWeight = Number(lastSets[setIdx].weight);
-    const weight = Number.isFinite(recommendation.nextWeight) ? recommendation.nextWeight : lastWeight;
-    return { weight: Number.isFinite(weight) ? weight.toFixed(1) : null, message: recommendation.cue ? `${recommendation.cue} — ${recommendation.reason}` : recommendation.reason, recommendation };
   };
 
   // All logged occurrences of an exercise, oldest first, for the progression graph
@@ -6529,23 +6522,27 @@ function withPlanApproval(sessions, now = new Date()) {
     setEditingSet(null);
   };
 
-  // The reps and weight shown in the set logger: what the user typed, else
-  // the pre-filled target reps and last weight (setLoggerDefaults).
-  // prefilled says which are still the pre-filled numbers.
-  const setInputsFor = eIdx => {
+  // The set logger's suggestion for an exercise's current set: the weight,
+  // the reps to aim for and why (setLoggerSuggestion), from last time here.
+  const suggestionFor = (eIdx, chosenWeight = null) => {
     const exercise = activeSession?.exercises?.[eIdx];
-    if (!exercise) return { weight: "", reps: "", prefilled: { weight: false, reps: false } };
-    const setIdx = getCurrentSetIdx(eIdx);
-    const ranges = repTargets(exercise.reps, Number(exercise.sets) || 0);
-    const lastSets = getLastSessionData(exercise);
-    const defaults = setLoggerDefaults({
-      repRange: ranges[setIdx] || ranges.at(-1) || "8-12",
-      previousSet: (completedSets[eIdx] || []).at(-1) || null,
-      lastSet: lastSets?.[setIdx] || lastSets?.at(-1) || null,
-      suggestedWeight: getWeightGuidance(exercise, setIdx)?.weight,
-    });
+    if (!exercise) return { weight: "", reps: "", note: "" };
+    const setIndex = getCurrentSetIdx(eIdx);
+    const lastSets = getLastSessionData(exercise) || [];
+    const equipmentHistory = getExerciseHistory(exercise).flatMap(item => item.sets || []).map(set => Number(set.weight)).filter(Number.isFinite);
+    const { increment, largeRelativeJump } = inferIncrement({ currentWeight: Number((lastSets[setIndex] || lastSets.at(-1))?.weight) || 0, equipmentHistory });
+    return setLoggerSuggestion({ ranges: repTargets(exercise.reps, Number(exercise.sets) || 0), setIndex, lastSets, todaySets: completedSets[eIdx] || [], increment, bigStep: largeRelativeJump, chosenWeight });
+  };
+  // The reps and weight in the set logger: what the user typed, else the
+  // suggestion (shown faintly, and logged as it is). prefilled says which are
+  // still the suggestion; a box emptied again goes back to it.
+  const setInputsFor = eIdx => {
     const typed = currentInputs[eIdx] || {};
-    return { weight: typed.weight ?? defaults.weight, reps: typed.reps ?? defaults.reps, prefilled: { weight: typed.weight === undefined, reps: typed.reps === undefined } };
+    const typedWeight = typed.weight === "" ? undefined : typed.weight;
+    const typedReps = typed.reps === "" ? undefined : typed.reps;
+    // A typed weight changes the reps to aim for.
+    const suggestion = suggestionFor(eIdx, typedWeight ?? null);
+    return { weight: typedWeight ?? suggestion.weight, reps: typedReps ?? suggestion.reps, prefilled: { weight: typedWeight === undefined, reps: typedReps === undefined }, note: suggestion.note };
   };
   const stepSetInput = (field, delta) => {
     const current = setInputsFor(exerciseIdx);
@@ -6732,6 +6729,8 @@ function withPlanApproval(sessions, now = new Date()) {
     targetSets: Number(ex.sets) || 0,
     repRangeTarget: ex.reps,
     loggedSets: (completedSets[idx] || []).map((s, i) => ({ setNumber: i + 1, weight: s.weight, reps: s.reps })),
+    // The set logger's suggestion for the current exercise's next set.
+    ...(idx === exerciseIdx && (completedSets[idx] || []).length < (Number(ex.sets) || 0) ? { nextSet: (({ weight, reps, note }) => ({ setNumber: (completedSets[idx] || []).length + 1, weight, reps, why: note }))(suggestionFor(idx)) } : {}),
   })) : null;
 
   const applyStructuredCoachAction = async action => {
@@ -6871,14 +6870,12 @@ function withPlanApproval(sessions, now = new Date()) {
     const exerciseCompletedSets = getCompletedForExercise(exerciseIdx);
     const exerciseRepRanges = repTargets(currentExercise.reps, totalSets);
     const currentSetRepRange = exerciseRepRanges[sIdx] || "8-12";
-    const weightGuidance = getWeightGuidance(currentExercise, sIdx);
-    const suggestedWeight = weightGuidance?.weight;
     const lastSets = getLastSessionData(currentExercise);
-    const { weight, reps, prefilled } = setInputsFor(exerciseIdx);
-    // After a set is logged, the next set's pre-filled numbers are faint
-    // until changed, so it's clear the last set went in.
-    const faintReps = exerciseCompletedSets.length > 0 && prefilled.reps;
-    const faintWeight = exerciseCompletedSets.length > 0 && prefilled.weight;
+    // Suggested numbers show faintly in the boxes (placeholders), so typing
+    // replaces them; what you type or step to shows in full.
+    const { weight, reps, prefilled, note: setNote } = setInputsFor(exerciseIdx);
+    const progression = getProgressionRecommendation(currentExercise);
+    const progressionTip = progression && !Array.isArray(progression) && progression.decision === "review_down" ? progression.reason : "";
     const valuesLookSwapped = Number(reps) >= 30 && Number(weight) > 0 && Number(weight) <= 30;
     const exerciseIsComplete = exerciseCompletedSets.length >= totalSets;
     const plannedSetCount = activeSession.exercises.reduce((total, exercise) => total + (Number(exercise.sets) || 0), 0);
@@ -6892,16 +6889,16 @@ function withPlanApproval(sessions, now = new Date()) {
           ← BACK TO FITNESS · PROGRESS SAVED
         </button>
         <div className="t3d-card t3d-workout-card">
-          {/* Exercise navigation - name only, with a tiny replace-exercise icon */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === 0 ? 0.3 : 1 }}
+          {/* Exercise navigation - the full name (long names wrap), with a tiny replace-exercise link */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+            <button className="t3d-btn t3d-btn-sm" style={{ flex: "0 0 auto", opacity: exerciseIdx === 0 ? 0.3 : 1 }}
               aria-label="Previous exercise" title="Previous exercise" onClick={() => { if (exerciseIdx > 0) setExerciseIdx(e => e-1); }}>◀ PREV</button>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 13, letterSpacing: 2, color: "#E0EAF0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{currentExercise.name}</div>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, minWidth: 0 }}>
+              <div data-testid="exercise-name" style={{ minWidth: 0, fontFamily: "'Orbitron',monospace", fontSize: currentExercise.name.length > 24 ? 11 : 13, letterSpacing: 1, lineHeight: 1.35, color: "#E0EAF0", textAlign: "center", overflowWrap: "anywhere" }}>{currentExercise.name}</div>
               <button type="button" title="Replace exercise" aria-label="Replace exercise" onClick={() => setReplaceWarning(exerciseIdx)}
                 style={{ flex: "0 0 auto", background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 9, padding: 2, lineHeight: 1, textDecoration: "underline" }}>swap</button>
             </div>
-            <button className="t3d-btn t3d-btn-sm" style={{ opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
+            <button className="t3d-btn t3d-btn-sm" style={{ flex: "0 0 auto", opacity: exerciseIdx === totalExercises-1 ? 0.3 : 1 }}
               aria-label="Next exercise" title="Next exercise" onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>NEXT ▶</button>
           </div>
 
@@ -6961,10 +6958,10 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
-                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps} data-prefilled={faintReps ? "faint" : undefined}
+                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={prefilled.reps ? "" : reps} data-suggested={prefilled.reps && reps ? "true" : undefined}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
-                      placeholder="0"
-                      style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: faintReps ? FAINT_INPUT : "#080C10", outline: "none" }} />
+                      placeholder={(prefilled.reps && reps) || "reps"}
+                      style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
                   </label>
                   <div className="workout-steppers">
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-label="One rep fewer" onClick={() => stepSetInput("reps", -1)}>−1</button>
@@ -6977,10 +6974,10 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
-                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight} data-prefilled={faintWeight ? "faint" : undefined}
+                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={prefilled.weight ? "" : weight} data-suggested={prefilled.weight && weight ? "true" : undefined}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
-                      placeholder={suggestedWeight || "0"}
-                      style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: faintWeight ? FAINT_INPUT : "#080C10", outline: "none" }} />
+                      placeholder={(prefilled.weight && weight) || "kg"}
+                      style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
                   </label>
                   <div className="workout-steppers">
                     <button type="button" className="t3d-btn t3d-btn-sm" aria-label="2.5 kg less" onClick={() => stepSetInput("weight", -2.5)}>−2.5</button>
@@ -6994,7 +6991,7 @@ function withPlanApproval(sessions, now = new Date()) {
               {(currentSetRepRange || currentExercise.tempo) && (
                 <div style={{ marginTop: 14 }}>
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, fontSize: 12, color: "#E0EAF0", letterSpacing: 1, fontWeight: 700 }}>
-                    {currentSetRepRange && <div>TARGET: {currentSetRepRange} REPS</div>}
+                    {currentSetRepRange && <div>REP RANGE: {currentSetRepRange}</div>}
                     {currentExercise.tempo && <div>TEMPO {currentExercise.tempo}</div>}
                   </div>
                   {currentExercise.tempo && <div style={{ marginTop: 5, fontSize: 9, color: "#6F8792" }}>Tempo = seconds to lower · pause · lift · pause</div>}
@@ -7007,12 +7004,9 @@ function withPlanApproval(sessions, now = new Date()) {
                 </div>
               )}
 
-              {/* Suggested weight hint */}
-              {weightGuidance && (
-                <div style={{ marginTop: 10, fontSize: 10, color: NEON, lineHeight: 1.5 }}>
-                  {weightGuidance.message}
-                </div>
-              )}
+              {/* Why these numbers: last time, and the weight or reps to aim for */}
+              {setNote && <div data-testid="set-note" style={{ marginTop: 10, fontSize: 10, color: NEON, lineHeight: 1.5 }}>{setNote}</div>}
+              {progressionTip && <div style={{ marginTop: 6, fontSize: 10, color: "#FFB547", lineHeight: 1.5 }}>{progressionTip}</div>}
               {valuesLookSwapped && (
                 <div style={{ marginTop: 9, padding: 8, border: "1px solid rgba(255,181,71,.35)", borderRadius: 5, color: "#FFB547", fontSize: 9 }}>
                   These values may be the wrong way round.

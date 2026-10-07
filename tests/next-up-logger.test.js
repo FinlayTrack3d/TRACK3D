@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { nextUpItems } from "../lib/next-up.js";
-import { isFinishedWorkout, loggedSetsSignature, sessionForDay, setLoggerDefaults, stepSetValue } from "../lib/fitness-session.js";
+import { isFinishedWorkout, loggedSetsSignature, sessionForDay, setLoggerSuggestion, stepSetValue } from "../lib/fitness-session.js";
 
 const day = {
   morning: { hasRoutine: true, done: false, wakeTime: "06:00" },
@@ -37,18 +37,27 @@ test("a workout in progress comes first; logged meals are skipped", () => {
   assert.deepEqual(nextUpItems({ hour: 10 }), [], "nothing set up, nothing due");
 });
 
-test("set logger starts from today's target and last weight", () => {
-  // Last time 80 kg x 9 in an 8-10 range, no change suggested: same again.
-  assert.deepEqual(setLoggerDefaults({ repRange: "8-10", lastSet: { weight: "80", reps: "9" } }), { weight: "80", reps: "9" });
-  // Weight went up: start at the bottom of the range.
-  assert.deepEqual(setLoggerDefaults({ repRange: "8-10", lastSet: { weight: "80", reps: "10" }, suggestedWeight: "82.5" }), { weight: "82.5", reps: "8" });
-  // Last time's reps are kept inside today's range.
-  assert.deepEqual(setLoggerDefaults({ repRange: "8-10", lastSet: { weight: "80", reps: "12" } }), { weight: "80", reps: "10" });
-  // A set already logged today sets the weight for the next one.
-  assert.equal(setLoggerDefaults({ repRange: "6-8", previousSet: { weight: "100", reps: "7" }, lastSet: { weight: "95", reps: "8" } }).weight, "100");
-  // No history: reps from the range, weight left for the user.
-  assert.deepEqual(setLoggerDefaults({ repRange: "12" }), { weight: "", reps: "12" });
-  assert.deepEqual(setLoggerDefaults({ repRange: "AMRAP" }), { weight: "", reps: "" });
+test("set logger suggests the reps to aim for and the weight, and says why", () => {
+  const range = ["6-8", "6-8", "6-8"];
+  const last = (...sets) => sets.map(([reps, weight = "42.5"]) => ({ weight, reps: String(reps) }));
+  // 7 last time in a 6-8 range: same weight, aim for 8.
+  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 0, lastSets: last([7], [7], [6]) }), { weight: "42.5", reps: "8", note: "Last time 7 × 42.5 kg. Aim for 8." });
+  // 12 on a 6-8 range: the weight is too light, so 45 kg.
+  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 0, lastSets: last([12], [8], [7]) }), { weight: "45", reps: "8", note: "Last time 12 × 42.5 kg, over the 6-8 range, so 45 kg today. Aim for 8." });
+  // One rep over the top is not enough on its own: aim for the top.
+  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 0, lastSets: last([9], [7], [6]) }).weight, "42.5");
+  // Every set at the top of its own range, including a 6-rep back-off set.
+  const backOff = setLoggerSuggestion({ ranges: ["6-8", "6-8", "8-10", "6"], setIndex: 0, lastSets: last([8, "60"], [8, "60"], [10, "60"], [6, "60"]) });
+  assert.deepEqual(backOff, { weight: "62.5", reps: "6", note: "Every set reached the top of its range last time, so 62.5 kg today. Aim for 6." });
+  // Later sets keep today's weight; the aim comes from last time's set at that weight.
+  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 1, lastSets: last([12], [8], [7]), todaySets: [{ weight: "45", reps: "8" }] }), { weight: "45", reps: "6", note: "Last time 8 × 42.5 kg. At 45 kg, aim for 6." });
+  // A big jump for a light weight isn't made for you.
+  assert.equal(setLoggerSuggestion({ ranges: ["12-15"], setIndex: 0, lastSets: [{ weight: "10", reps: "15" }], bigStep: true }).weight, "10");
+  // No history: aim for the top of the range; the weight is yours to choose.
+  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 0 }), { weight: "", reps: "8", note: "No history yet: pick a weight you can lift for 6-8 reps with good form." });
+  // Bodyweight: 0 kg stays 0 kg, aim for one more rep.
+  assert.deepEqual(setLoggerSuggestion({ ranges: ["8-12"], setIndex: 0, lastSets: [{ weight: "0", reps: "9" }] }), { weight: "0", reps: "10", note: "Last time 9 reps. Aim for 10." });
+  assert.deepEqual(setLoggerSuggestion({ ranges: ["AMRAP"], setIndex: 0 }), { weight: "", reps: "", note: "" });
   assert.equal(stepSetValue("80", 2.5), "82.5");
   assert.equal(stepSetValue("1", -2.5), "0");
   assert.equal(stepSetValue("", 1), "1");

@@ -203,6 +203,18 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
   } else if (scenario === 'routinefail' || scenario === 'routineok') {
     await page.getByRole('button', { name: /MORNING$/ }).last().click();
     await page.getByRole('button', { name: 'EDIT ROUTINE' }).click();
+    if (scenario === 'routineok') {
+      // The new task's minutes box shows 10 faintly; typing replaces it rather than adding to it.
+      const minutes = page.getByPlaceholder('Task name...').locator('..').getByLabel('Minutes');
+      assert.deepEqual([await minutes.inputValue(), await minutes.getAttribute('placeholder')], ['', '10']);
+      await minutes.click();
+      await page.keyboard.type('5');
+      assert.equal(await minutes.inputValue(), '5');
+      await page.getByPlaceholder('Task name...').fill('Stretch');
+      await page.getByRole('button', { name: '+ ADD TO ROUTINE' }).click();
+      await page.getByRole('button', { name: 'Remove Stretch' }).waitFor();
+      assert.equal(await minutes.inputValue(), '', 'empty again for the next task');
+    }
     await page.getByRole('button', { name: 'SAVE CHANGES' }).click();
     if (scenario === 'routinefail') {
       await page.getByText(/Your routine could not be saved: .*database unavailable/).first().waitFor();
@@ -210,6 +222,9 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
       assert.equal(await page.getByRole('button', { name: 'SAVE CHANGES' }).count(), 1, 'stayed in the editor');
     } else {
       await page.getByText('✓ Routine saved').waitFor();
+      const saved = writes.filter(w => w.table === 'morning_routines' && w.body).map(w => JSON.parse(w.body)).flatMap(body => (Array.isArray(body) ? body : [body]));
+      const stretch = saved.flatMap(row => row.tasks || []).find(task => task.name === 'Stretch');
+      assert.equal(stretch?.duration, 5, 'saved with the typed 5 minutes: ' + JSON.stringify(saved.at(-1)));
     }
   } else if (scenario === 'photodelete') {
     await page.getByRole('button', { name: /MORNING$/ }).last().click();

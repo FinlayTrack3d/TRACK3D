@@ -11,7 +11,7 @@
 //  nutritionorder, dashlog, libraryedit, restdaybuild, restdayai, weeklybadge, fitnessrest, headerprofile,
 //  profiletodo, profiletodofail, profileprefill, profilepartial,
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
-//  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror
+//  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror, longname
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -159,7 +159,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       ] : scenario === 'nextupworkout' ? [{ id: 41, user_id: user.id, date: yesterday, session_name: 'Lower A', in_progress: true, total_volume: 500, duration_mins: 20, created_at: `${yesterday}T18:00:00Z`, exercises: [{ name: 'Squat', sets: [{ weight: '100', reps: '5' }] }] }]
       : scenario === 'setprefill' ? [{ id: 'old', user_id: user.id, date: shiftKey(today, -7), session_name: 'Push A', in_progress: false, total_volume: 2000, duration_mins: 40, created_at: `${shiftKey(today, -7)}T18:00:00Z`, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '9' }, { weight: '80', reps: '8' }, { weight: '80', reps: '8' }] }] }]
       : scenario === 'weeklybadge' ? [{ id: 'wl', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [] }] : scenario === 'dashexcludes' ? [{ id: 'w1', user_id: user.id, date: today, session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '6', personalBest: { type: 'weight_pb', label: 'Weight PB' } }, { weight: '80', reps: '5' }] }] }] : [],
-    workout_splits: ['loadwrites', 'setprefill', 'nextupworkout', 'nextupmorning', 'nextupslow', 'nextupmorningslow'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: ['loadwrites', 'nextupslow'].includes(scenario) ? 'Upper A' : 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }]
+    workout_splits: ['loadwrites', 'setprefill', 'nextupworkout', 'nextupmorning', 'nextupslow', 'nextupmorningslow', 'longname'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: ['loadwrites', 'nextupslow'].includes(scenario) ? 'Upper A' : 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: scenario === 'longname' ? 'Single-Arm Dumbbell Bent-Over Row (Bench Supported)' : 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }]
       : scenario === 'fitnessrest' ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach', 'planchangebutton'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
   // New scenarios' data.
@@ -403,43 +403,68 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();
     await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
     await page.getByText('SET 1 OF 3').waitFor();
-    // Pre-filled from last time (80 kg × 9 on set 1): one tap logs it.
-    assert.equal(await page.getByLabel('Reps').inputValue(), '9');
-    assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '80');
+    const reps = page.getByLabel('Reps');
+    const weight = page.getByLabel('Weight in kilograms');
+    // The suggestion shows faintly in the boxes (placeholders): last time
+    // 80 kg × 9 in an 8-10 range, so 80 kg and aim for 10.
+    const shown = async () => [await reps.inputValue(), await reps.getAttribute('placeholder'), await weight.inputValue(), await weight.getAttribute('placeholder')];
+    assert.deepEqual(await shown(), ['', '10', '', '80']);
+    await page.getByText('REP RANGE: 8-10').waitFor();
+    assert.equal(await page.getByTestId('set-note').textContent(), 'Last time 9 × 80 kg. Aim for 10.');
     const colour = locator => locator.evaluate(element => getComputedStyle(element).color);
+    const placeholderColour = locator => locator.evaluate(element => getComputedStyle(element, '::placeholder').color);
     await page.waitForTimeout(400); // buttons fade between colours over 0.18 s
     assert.equal(await colour(page.getByRole('button', { name: 'One rep more' })), 'rgb(0, 200, 255)', '± buttons are blue, not green');
     assert.equal(await colour(page.getByRole('button', { name: '2.5 kg less' })), 'rgb(0, 200, 255)');
     assert.equal(await colour(page.getByRole('button', { name: 'END WORKOUT' })), 'rgb(255, 45, 120)', 'END WORKOUT is red');
-    // Set 1's numbers are at full strength; after a logged set, the next
-    // set's pre-filled numbers are faint until changed.
-    const faint = async () => [await page.getByLabel('Reps').getAttribute('data-prefilled'), await page.getByLabel('Weight in kilograms').getAttribute('data-prefilled')];
-    assert.deepEqual(await faint(), [null, null]);
-    assert.equal(await colour(page.getByLabel('Reps')), 'rgb(8, 12, 16)');
+    assert.equal(await placeholderColour(reps), 'rgb(125, 140, 149)', 'suggestions are faint');
+    if (process.env.SHOT) await page.screenshot({ path: 'logger-target.png' });
+    // Typing replaces the faint number instead of adding to it.
+    await reps.click();
+    await page.keyboard.type('9');
+    assert.equal(await reps.inputValue(), '9');
+    assert.equal(await colour(reps), 'rgb(8, 12, 16)', 'typed numbers are in full');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 2 OF 3').waitFor();
-    assert.equal(await page.getByLabel('Reps').inputValue(), '8', 'last time on set 2');
-    assert.deepEqual(await faint(), ['faint', 'faint'], 'set 2 starts faint');
-    assert.equal(await colour(page.getByLabel('Reps')), 'rgb(125, 140, 149)');
-    assert.equal(await colour(page.getByLabel('Weight in kilograms')), 'rgb(125, 140, 149)');
+    // Set 2: faint again, aiming one above last time's 8.
+    assert.deepEqual(await shown(), ['', '9', '', '80']);
     if (process.env.SHOT) await page.screenshot({ path: 'logger-faint.png' });
     await page.getByRole('button', { name: 'One rep more' }).click();
-    assert.deepEqual(await faint(), [null, 'faint'], 'a changed number is at full strength');
+    assert.equal(await reps.inputValue(), '10', 'a stepped number is in full');
+    assert.equal(await weight.inputValue(), '', 'the weight is still the suggestion');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 3 OF 3').waitFor();
-    assert.deepEqual(await faint(), ['faint', 'faint']);
+    assert.deepEqual(await shown(), ['', '9', '', '80']);
+    // A heavier weight changes the reps to aim for.
     await page.getByRole('button', { name: '2.5 kg more' }).click();
-    assert.equal(await page.getByLabel('Weight in kilograms').inputValue(), '82.5');
-    assert.deepEqual(await faint(), ['faint', null]);
-    await page.getByLabel('Reps').fill('7');
-    assert.deepEqual(await faint(), [null, null], 'typed numbers are at full strength');
-    await page.getByLabel('Reps').fill('8');
+    assert.equal(await weight.inputValue(), '82.5');
+    assert.equal(await reps.getAttribute('placeholder'), '8');
+    assert.equal(await page.getByTestId('set-note').textContent(), 'Last time 8 × 80 kg. At 82.5 kg, aim for 8.');
+    // An emptied box goes back to the suggestion.
+    await reps.fill('7');
+    await reps.fill('');
+    assert.deepEqual([await reps.inputValue(), await reps.getAttribute('placeholder')], ['', '8']);
     if (process.env.SHOT) await page.screenshot({ path: 'logger.png' });
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.waitForTimeout(800);
     const withSets = writes.filter(w => w.table === 'workout_logs' && w.body && (JSON.parse(w.body).exercises || [])[0]?.sets?.length === 3);
     assert.ok(withSets.length, 'all three sets saved');
-    assert.deepEqual(JSON.parse(withSets.at(-1).body).exercises[0].sets.map(set => `${set.weight}x${set.reps}`), ['80x9', '80x9', '82.5x8']);
+    assert.deepEqual(JSON.parse(withSets.at(-1).body).exercises[0].sets.map(set => `${set.weight}x${set.reps}`), ['80x9', '80x10', '82.5x8']);
+  } else if (scenario === 'longname') {
+    // A long exercise name shows in full at the top of the workout.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    const name = page.getByTestId('exercise-name');
+    await name.waitFor();
+    assert.equal(await name.textContent(), 'Single-Arm Dumbbell Bent-Over Row (Bench Supported)');
+    const layout = await name.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      const prev = document.querySelector('[aria-label="Previous exercise"]').getBoundingClientRect();
+      const next = document.querySelector('[aria-label="Next exercise"]').getBoundingClientRect();
+      return { clipped: element.scrollWidth > element.clientWidth + 1, lines: Math.round(box.height / parseFloat(getComputedStyle(element).lineHeight)), between: box.left >= prev.right && box.right <= next.left, buttonsOnScreen: prev.left >= 0 && next.right <= innerWidth };
+    });
+    assert.deepEqual({ ...layout, lines: layout.lines >= 2 }, { clipped: false, lines: true, between: true, buttonsOnScreen: true }, JSON.stringify(layout));
+    if (process.env.SHOT) await page.screenshot({ path: 'longname.png' });
   } else if (scenario === 'nextupmorning') {
     const card = page.getByTestId('next-up');
     await card.getByTestId('next-up-title').filter({ hasText: 'Morning check-in' }).waitFor();
@@ -908,17 +933,18 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();
     await page.getByRole('button', { name: '▶ START WORKOUT' }).click();
     await page.getByText('SET 1 OF 4').waitFor();
-    await page.getByText('TARGET: 6-8 REPS').waitFor();
+    await page.getByText('REP RANGE: 6-8').waitFor();
     assert.equal(await page.getByText(/6-8,6-8/).count(), 0, 'the whole list never shows as one target');
-    assert.equal(await page.getByLabel('Reps').inputValue(), '6');
+    // No history: aim for the top of the range, shown faintly.
+    assert.equal(await page.getByLabel('Reps').getAttribute('placeholder'), '8');
     await page.getByLabel('Weight in kilograms').fill('60');
     for (const target of ['6-8', '8', '10']) {
       await page.getByRole('button', { name: 'Log set' }).click();
-      await page.getByText(`TARGET: ${target} REPS`).waitFor();
+      await page.getByText(`REP RANGE: ${target}`).waitFor();
     }
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 1 OF 3').waitFor();
-    await page.getByText('TARGET: 8-10 REPS').waitFor();
+    await page.getByText('REP RANGE: 8-10').waitFor();
     // The workout saves in the background: wait for the save with all four sets.
     const withFour = () => writes.filter(w => w.table === 'workout_logs' && w.body && (JSON.parse(w.body).exercises || [])[0]?.sets?.length === 4);
     for (let i = 0; i < 50 && !withFour().length; i++) await page.waitForTimeout(100);
