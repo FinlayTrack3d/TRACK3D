@@ -27,6 +27,21 @@ test("saved workouts show a settled length; activities keep theirs", () => {
   assert.equal(settledWorkoutDuration({ created_at: at(0), duration_mins: 50, exercises: [] }), 50);
 });
 
+test("a workout with sets logged never shows as 0 minutes", () => {
+  // Three sets logged within a minute were entered after the workout: about 3 minutes a set.
+  assert.equal(workoutDurationMins({ startedAt: start, now: start + 40000, exercises: rowSets([0, 0, 0]) }), 9);
+  // A minute or more a set is real timing, and is kept.
+  assert.equal(workoutDurationMins({ startedAt: start, now: start + 4 * 60000, exercises: rowSets([1, 2, 3]) }), 4);
+  // No start time: estimated from the sets.
+  assert.equal(workoutDurationMins({ startedAt: null, exercises: rowSets([0, 0]) }), 6);
+  // Saved as 0 or 1 minutes with lifting logged: shown, and counted in the weekly report, at about 3 minutes a set.
+  assert.equal(settledWorkoutDuration({ created_at: at(0), duration_mins: 0, exercises: rowSets([0, 0, 0, 0]) }), 12);
+  assert.equal(settledWorkoutDuration({ created_at: at(0), duration_mins: 1, exercises: rowSets([null, null]) }), 6);
+  // No sets: nothing to estimate from.
+  assert.equal(workoutDurationMins({ startedAt: start, now: start + 20000, exercises: [] }), 0);
+  assert.equal(settledWorkoutDuration({ created_at: at(0), duration_mins: 0, exercises: [] }), 0);
+});
+
 test("exercise history carries across names that differ only by equipment or plural", () => {
   assert.equal(exerciseMatchesHistory({ name: "Goblet Squat" }, "Dumbbell Goblet Squat"), true);
   assert.equal(sameExerciseName("DB Goblet Squats", "Goblet Squat"), true);
