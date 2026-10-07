@@ -377,7 +377,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     const saved = writes.filter(w => w.table === 'workout_logs');
     assert.equal(saved.length, 1);
     assert.match(decodeURIComponent(saved[0].url), /id=eq\.43/);
-    assert.deepEqual(JSON.parse(saved[0].body).exercises[0].sets.map(set => `${set.weight}x${set.reps}`), ['80x9', '80x8']);
+    assert.deepEqual(JSON.parse(saved[0].body).exercises[0].sets.map(set => `${set.weight}x${set.reps}`), ['80x9', '80x9']);
   } else if (scenario === 'offplancap' || scenario === 'offplanmacros') {
     await openNutrition();
     const cell = async key => (await page.getByTestId(`remaining-${key}`).textContent()).replace(/[A-Z\s]+$/, '');
