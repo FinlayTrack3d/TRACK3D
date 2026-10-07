@@ -7,6 +7,12 @@ import { droppedChangesNote } from "../../../lib/coaching/plan-change-reply.js";
 import { activePainReports, SAFE_ACTIONS_DURING_PAIN, safetyDirective } from "../../../lib/coaching/safety.js";
 import { openAnthropicStream, partialJsonStringField, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
 import { readCoachAnswer } from "../../../lib/coaching/coach-answer.js";
+import { aiRequestAllowed, jsonSize, limitedResponse, readJsonBody } from "../../../lib/ai-guard.js";
+
+// Request limits: the whole body, the message, and the app context sent with it.
+const MAX_BODY_BYTES = 150_000;
+const MAX_MESSAGE_CHARS = 4000;
+const MAX_CONTEXT_CHARS = 60_000;
 
 
 function supabaseForRequest(request) {
@@ -30,11 +36,23 @@ export async function POST(request) {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return Response.json({ error: "Unauthorised" }, { status: 401 });
 
-    const body = await request.json();
+    const read = await readJsonBody(request, MAX_BODY_BYTES);
+    if (!read.ok) return Response.json({ error: read.error }, { status: read.status });
+    const body = read.value;
     const message = String(body?.message || "").trim();
     if (!message) return Response.json({ error: "Message is required" }, { status: 400 });
+    if (message.length > MAX_MESSAGE_CHARS) return Response.json({ error: `That message is too long (limit ${MAX_MESSAGE_CHARS.toLocaleString("en-GB")} characters).` }, { status: 413 });
+    if (jsonSize(body?.clientContext) > MAX_CONTEXT_CHARS) return Response.json({ error: "This request is too large." }, { status: 413 });
 
-    let conversationId = body?.conversationId;
+    const allowed = await aiRequestAllowed(supabase, user.id);
+    if (!allowed.ok) return limitedResponse(allowed);
+
+    // A conversation id from the request is only used if it is this user's.
+    let conversationId = typeof body?.conversationId === "string" ? body.conversationId : null;
+    if (conversationId) {
+      const { data: owned } = await supabase.from("coach_conversations").select("id").eq("id", conversationId).eq("user_id", user.id).maybeSingle();
+      if (!owned) conversationId = null;
+    }
     if (!conversationId) {
       const { data, error } = await supabase.from("coach_conversations").insert({ user_id: user.id, title: message.slice(0, 80) }).select("id").single();
       if (error) return Response.json({ error: "Could not start Coach conversation" }, { status: 500 });
@@ -120,16 +138,16 @@ export async function POST(request) {
         let text = "";
         if (onPartial && attempt === 0) {
           const opened = await openAnthropicStream(providerRequest(maxTokens));
-          if (!opened.ok) return { error: opened.error };
+          if (!opened.ok) return { error: opened.publicError };
           const streamed = await readAnthropicStream(opened.response, (_delta, soFar) => {
             const partial = partialJsonStringField(soFar, "message");
             if (partial) onPartial(partial);
           });
-          if (!streamed.ok) return { error: streamed.error };
+          if (!streamed.ok) return { error: streamed.publicError };
           text = streamed.text;
         } else {
           const providerResponse = await postAnthropicMessages(providerRequest(maxTokens));
-          if (!providerResponse.ok) return { error: providerResponse.error };
+          if (!providerResponse.ok) return { error: providerResponse.publicError };
           text = providerResponse.payload.content?.map((block) => block.text || "").join("") || "";
         }
         const parsed = readCoachAnswer(text);

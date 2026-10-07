@@ -2,6 +2,11 @@ import { createClient } from "@supabase/supabase-js";
 import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
 import { buildCoachSystem } from "../../../lib/coaching/system.js";
 import { readPlanChangeReply } from "../../../lib/coaching/plan-change-reply.js";
+import { aiRequestAllowed, jsonSize, limitedResponse, readJsonBody } from "../../../lib/ai-guard.js";
+
+// Request limits: the whole body, and the plan and workouts sent with it.
+const MAX_BODY_BYTES = 200_000;
+const MAX_CONTEXT_CHARS = 60_000;
 
 function clientFor(request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
@@ -26,7 +31,12 @@ export async function POST(request) {
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return Response.json({ error: "Unauthorised" }, { status: 401 });
 
-    const body = await request.json();
+    const read = await readJsonBody(request, MAX_BODY_BYTES);
+    if (!read.ok) return Response.json({ error: read.error }, { status: read.status });
+    const body = read.value;
+    if (jsonSize(body?.currentPlan) > MAX_CONTEXT_CHARS || jsonSize(body?.recentWorkouts) > MAX_CONTEXT_CHARS) return Response.json({ error: "This request is too large." }, { status: 413 });
+    const allowed = await aiRequestAllowed(supabase, user.id);
+    if (!allowed.ok) return limitedResponse(allowed);
     const messages = Array.isArray(body?.messages)
       ? body.messages.slice(-12).map((message) => ({ role: message.role === "assistant" ? "assistant" : "user", content: String(message.content || "").slice(0, 2000) }))
       : [];
@@ -68,7 +78,7 @@ Return only JSON:
         system,
         messages: [{ role: "user", content: `CURRENT PLAN\n${JSON.stringify(currentPlan)}\n\nRECENT LEGACY WORKOUTS\n${JSON.stringify(recentWorkouts)}\n\nSTRUCTURED EXERCISE HISTORY\n${JSON.stringify(structuredHistory || [])}${pendingChanges.length ? `\n\nCHANGE WAITING FOR APPROVAL (not saved yet)\n${pendingChanges.map((line) => `- ${line}`).join("\n")}` : ""}` }, ...messages],
       });
-    if (!provider.ok) return Response.json({ error: provider.error }, { status: 502 });
+    if (!provider.ok) return Response.json({ error: provider.publicError }, { status: provider.status === 429 ? 429 : 502 });
     const payload = provider.payload;
     const text = payload.content?.map((block) => block.text || "").join("") || "";
     let result;

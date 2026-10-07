@@ -11,17 +11,16 @@
     "coach-eval": "node tests/coach-eval/run-eval.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.89.0",
     "@fontsource/inter": "^5.3.0",
     "@fontsource/orbitron": "^5.3.0",
     "@supabase/supabase-js": "^2.103.0",
-    "next": "16.2.3",
+    "next": "16.4.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "eslint": "^9",
-    "eslint-config-next": "16.2.3"
+    "eslint-config-next": "16.4.0"
   }
 }

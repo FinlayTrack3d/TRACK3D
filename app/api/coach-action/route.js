@@ -22,11 +22,13 @@ export async function POST(request) {
 
     if (decision === "reject") {
       const { error } = await supabase.from("coach_actions").update({ status: "rejected" }).eq("id", actionId).eq("user_id", user.id);
-      return error ? Response.json({ error: error.message }, { status: 400 }) : Response.json({ status: "rejected" });
+      if (error) console.error("Coach action reject failed:", error.message);
+      return error ? Response.json({ error: "That change couldn't be updated. Please try again." }, { status: 400 }) : Response.json({ status: "rejected" });
     }
 
     const { data, error } = await supabase.rpc("apply_coach_action", { action_uuid: actionId, approve_permanent: decision === "approve" });
-    return error ? Response.json({ error: error.message }, { status: 400 }) : Response.json({ action: data });
+    if (error) console.error("Coach action apply failed:", error.message);
+    return error ? Response.json({ error: "That change couldn't be saved. Please try again." }, { status: 400 }) : Response.json({ action: data });
   } catch (error) {
     console.error("Coach action route error:", error.message);
     return Response.json({ error: "Could not update Coach action" }, { status: 500 });

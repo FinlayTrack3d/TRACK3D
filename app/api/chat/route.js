@@ -1,7 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import { openAnthropicStream, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
-import { CHAT_LIMITS, createMemoryRateLimiter, validateChatPayload } from "../../../lib/chat-limits.js";
-import { chatArea } from "../../../lib/coaching/chat-areas.js";
+import { CHAT_LIMITS, validateChatPayload } from "../../../lib/chat-limits.js";
+import { aiRequestAllowed, limitedResponse } from "../../../lib/ai-guard.js";
+import { areaMaxTokens, chatArea } from "../../../lib/coaching/chat-areas.js";
 import { buildCoachSystemBlocks } from "../../../lib/coaching/system.js";
 import { activePainReports, bodyAreaOf, classifySafetyText } from "../../../lib/coaching/safety.js";
 
@@ -13,21 +14,6 @@ function supabaseForToken(token) {
     global: { headers: { Authorization: `Bearer ${token}` } },
     auth: { persistSession: false },
   });
-}
-
-const memoryLimit = createMemoryRateLimiter();
-
-// The shared limit lives in the database (chat_rate_check). If that
-// function has not been installed yet, the per-instance limit still applies.
-async function databaseLimit(supabase) {
-  const { data, error } = await supabase.rpc("chat_rate_check", { per_minute: CHAT_LIMITS.perMinute, per_day: CHAT_LIMITS.perDay });
-  if (error) {
-    console.error("chat_rate_check unavailable:", error.message);
-    return { ok: true };
-  }
-  if (data === "minute") return { ok: false, retryAfter: 60, error: `Too many coach requests. Please wait a minute (limit ${CHAT_LIMITS.perMinute} per minute).` };
-  if (data === "day") return { ok: false, retryAfter: 3600, error: `Daily coach limit reached (${CHAT_LIMITS.perDay} requests per day).` };
-  return { ok: true };
 }
 
 // Coach settings and recent unresolved pain, read with the user's own token.
@@ -64,11 +50,10 @@ export async function POST(request) {
     const area = chatArea(checked.value.area);
     if (!area) return Response.json({ error: "Unknown coach area" }, { status: 400 });
 
-    const limited = memoryLimit(user.id);
-    const allowed = limited.ok ? await databaseLimit(supabase) : limited;
-    if (!allowed.ok) return Response.json({ error: allowed.error }, { status: 429, headers: { "Retry-After": String(allowed.retryAfter) } });
+    const allowed = await aiRequestAllowed(supabase, user.id);
+    if (!allowed.ok) return limitedResponse(allowed);
 
-    if (!process.env.ANTHROPIC_API_KEY) return Response.json({ error: "No API key found" }, { status: 500 });
+    if (!process.env.ANTHROPIC_API_KEY) return Response.json({ error: "Coach provider is not configured" }, { status: 503 });
     const latestUser = [...checked.value.messages].reverse().find((message) => message.role === "user");
     const latestUserText = typeof latestUser?.content === "string" ? latestUser.content : "";
     const state = await coachState(supabase, user.id, area.kind === "conversation" ? latestUserText : "");
@@ -82,19 +67,20 @@ export async function POST(request) {
     });
     const providerRequest = {
       model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
-      max_tokens: checked.value.maxTokens,
+      // The reply length is set by the area on the server; the request can only ask for less.
+      max_tokens: Math.min(checked.value.maxTokens, areaMaxTokens(area)),
       system,
       messages: checked.value.messages,
     };
     // Conversations stream as plain text so the first words show at once.
     if (checked.value.stream && area.kind === "conversation") {
       const opened = await openAnthropicStream(providerRequest);
-      if (!opened.ok) return Response.json({ error: opened.error }, { status: opened.status === 429 ? 429 : 502 });
+      if (!opened.ok) return Response.json({ error: opened.publicError }, { status: opened.status === 429 ? 429 : 502 });
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
           const streamed = await readAnthropicStream(opened.response, (delta) => controller.enqueue(encoder.encode(delta)));
-          const failure = !streamed.ok ? streamed.error : !streamed.text.trim() ? "the coach sent an empty reply" : null;
+          const failure = !streamed.ok ? streamed.publicError : !streamed.text.trim() ? "The coach sent an empty reply. Please try again." : null;
           // A failure part-way through is marked so the client shows an error, not a cut-off reply.
           if (failure) controller.enqueue(encoder.encode(`\u0000ERROR:${failure}`));
           controller.close();
@@ -103,10 +89,10 @@ export async function POST(request) {
       return new Response(stream, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Coach-Stream": "1" } });
     }
     const result = await postAnthropicMessages(providerRequest);
-    if (!result.ok) return Response.json({ error: result.error }, { status: result.status === 429 ? 429 : 502 });
+    if (!result.ok) return Response.json({ error: result.publicError }, { status: result.status === 429 ? 429 : 502 });
     return Response.json({ content: result.payload.content });
   } catch (error) {
     console.error("Route error:", error.message);
-    return Response.json({ error: error.message }, { status: 500 });
+    return Response.json({ error: "The coach couldn't answer that just now. Please try again." }, { status: 500 });
   }
 }
