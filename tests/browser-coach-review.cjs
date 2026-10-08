@@ -13,7 +13,7 @@
 //  planchangebutton, nutritionedit, nutritionnocolumn, nutritionlegacy, nutritionai,
 //  reviewskip, dashexcludes, changeplanhint, planmarkdown, streamchat, streamcoach, streamerror, longname,
 //  hyroxdetails, emptyback, switchworkout, sidebarkeys, fitnessa11y, dashloading, taptargets,
-//  mealtoggle, morninglog, morninglow, routinekeys, habitsedit
+//  mealtoggle, morninglog, morninglow, routinekeys, habitsedit, perfectweek, reviewchip
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 const assert = require('node:assert/strict');
 const scenario = process.argv[2] || 'roundup';
@@ -124,7 +124,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   if (scenario === 'newdash') await context.clock.setFixedTime(atLondonHour(10));
   // Scenarios about a given weekday run at midday London time on a fixed date
   // (2026-10-07 is a Wednesday, 2026-10-12 a Monday).
-  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12', weeklystale: '2026-10-07', weekcount: '2026-10-07' }[scenario];
+  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12', weeklystale: '2026-10-07', weekcount: '2026-10-07', perfectweek: '2026-10-07' }[scenario];
   if (fixedDay) await context.clock.setFixedTime(new Date(`${fixedDay}T11:00:00Z`));
   const today = fixedDay || londonKey();
   const yesterday = shiftKey(today, -1);
@@ -162,7 +162,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       : scenario === 'setprefill' ? [{ id: 'old', user_id: user.id, date: shiftKey(today, -7), session_name: 'Push A', in_progress: false, total_volume: 2000, duration_mins: 40, created_at: `${shiftKey(today, -7)}T18:00:00Z`, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '9' }, { weight: '80', reps: '8' }, { weight: '80', reps: '8' }] }] }]
       : scenario === 'weeklybadge' ? [{ id: 'wl', user_id: user.id, date: shiftKey(lastWeekMonday, 1), session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [] }] : scenario === 'dashexcludes' ? [{ id: 'w1', user_id: user.id, date: today, session_name: 'Push A', in_progress: false, total_volume: 3000, duration_mins: 50, exercises: [{ name: 'Bench Press', sets: [{ weight: '80', reps: '6', personalBest: { type: 'weight_pb', label: 'Weight PB' } }, { weight: '80', reps: '5' }] }] }] : [],
     workout_splits: ['loadwrites', 'setprefill', 'nextupworkout', 'nextupmorning', 'nextupslow', 'nextupmorningslow', 'longname', 'emptyback', 'fitnessa11y', 'dashloading'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: ['loadwrites', 'nextupslow'].includes(scenario) ? 'Upper A' : 'Push A', days: [dayCodes[todayDow]], exercises: [{ name: scenario === 'longname' ? 'Single-Arm Dumbbell Bent-Over Row (Bench Supported)' : 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }]
-      : scenario === 'fitnessrest' ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach', 'planchangebutton'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
+      : scenario === 'fitnessrest' ? [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Push A', days: [dayCodes[(todayDow + 6) % 7]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : ['painresolve', 'changeplanhint', 'planmarkdown', 'streamcoach', 'planchangebutton', 'reviewchip'].includes(scenario) ? [{ id: 's', user_id: user.id, programme_started_at: new Date().toISOString(), sessions: [{ name: 'Push A', days: [['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(`${today}T12:00:00Z`).getUTCDay()]], exercises: [{ name: 'Dumbbell Shoulder Press', sets: 4, reps: ['10','10','10','10'] }], approval: { approved: true } }] }] : [],
   };
   // New scenarios' data.
   if (scenario === 'restday') tables.nutrition_plans[0].rest_day_meals = [
@@ -228,6 +228,18 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   if (scenario === 'exercisealias') {
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Lower B', days: [dayCodes[todayDow]], exercises: [{ name: 'Goblet Squat', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } }] }];
     tables.workout_logs = [{ id: 'h1', user_id: user.id, date: shiftKey(today, -7), session_name: 'Lower A', in_progress: false, created_at: `${shiftKey(today, -7)}T12:00:00Z`, duration_mins: 40, total_volume: 432, exercises: [{ name: 'Dumbbell Goblet Squat', sets: [{ weight: '18', reps: '8' }, { weight: '18', reps: '8' }, { weight: '18', reps: '8' }] }] }];
+  }
+  // Last week (28 Sep - 4 Oct): both planned sessions done, every planned set logged.
+  if (scenario === 'perfectweek') {
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: '2026-09-01T08:00:00Z', sessions: [
+      { name: 'Upper A', days: ['MON'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
+      { name: 'Lower A', days: ['WED'], exercises: [{ name: 'Squat', sets: 3, reps: ['5', '5', '5'] }], approval: { approved: true } },
+    ] }];
+    const logged = (name, weight, reps) => ({ name, prescribed_sets: 3, sets: [1, 2, 3].map(setNum => ({ weight: String(weight), reps: String(reps), setNum })) });
+    tables.workout_logs = [
+      { id: 'p1', user_id: user.id, date: '2026-09-28', session_name: 'Upper A', in_progress: false, created_at: '2026-09-28T12:00:00Z', duration_mins: 50, total_volume: 1920, exercises: [logged('Bench Press', 80, 8)] },
+      { id: 'p2', user_id: user.id, date: '2026-09-30', session_name: 'Lower A', in_progress: false, created_at: '2026-09-30T12:00:00Z', duration_mins: 45, total_volume: 1500, exercises: [logged('Squat', 100, 5)] },
+    ];
   }
   if (scenario === 'weekcount') {
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
@@ -322,6 +334,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         if (/permanently/i.test(body.message)) return route.fulfill({ json: { message: "I can't change your saved plan from here — use CHANGE PLAN on the Fitness page. For today, tap swap.", insights: [], actions: [], activePain: false, planChangeHint: true, conversationId: 'c1' } });
         return route.fulfill({ json: /pain/i.test(body.message) ? { message: 'Stop that exercise for today — get it checked by a physio or doctor if it continues.', insights: [], actions: [], activePain: true, safetyStop: true, conversationId: 'c1' } : { message: 'Next set: 10 reps.', insights: [], actions: [], activePain: false, conversationId: 'c1' } });
       }
+      if (url.pathname === '/api/plan-change') chats.push({ planChange: true, ...JSON.parse(req.postData() || '{}') });
       if (url.pathname === '/api/plan-change') return route.fulfill({ json: { message: '**Sets per week:** chest gets 7 direct sets.\n**Effort:** stop 1–3 reps short of failure.', recommendation: 'clarify', changes: [] } });
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: { content: [{ text: 'OK.' }] } });
       return route.continue();
@@ -715,16 +728,15 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByRole('button', { name: '← BACK TO NUTRITION' }).click();
     await page.getByRole('button', { name: /DAY REVIEW/ }).waitFor();
   } else if (scenario === 'morninglog') {
-    // Logging a morning afterwards needs the wake-up time, the routine time and every task's answer.
+    // Logging a morning afterwards needs the wake-up time and every task's answer; the routine time is optional.
     await page.getByRole('button', { name: /MORNING$/ }).last().click();
     await page.getByRole('button', { name: /ALREADY DONE IT/ }).click();
     await page.getByText('LOG THIS MORNING').waitFor();
     const save = page.getByRole('button', { name: 'SAVE MORNING' });
     assert.equal(await save.isDisabled(), true);
-    assert.equal(await page.getByTestId('log-morning-missing').textContent(), 'To save, add your wake-up time, how long the routine took and done or not done for 2 tasks.');
+    assert.equal(await page.getByTestId('log-morning-missing').textContent(), 'To save, add your wake-up time and done or not done for 2 tasks.');
     for (const name of ['Walk the dog', 'Stretch']) assert.equal(await page.getByRole('group', { name }).getByRole('button', { pressed: true }).count(), 0, `${name} starts unanswered`);
     await page.getByLabel(/Actual wake-up time/).fill('06:10');
-    await page.getByLabel(/Routine time \(minutes\)/).fill('35');
     await page.getByRole('group', { name: 'Walk the dog' }).getByRole('button', { name: '✓ DONE' }).click();
     assert.equal(await page.getByTestId('log-morning-missing').textContent(), 'To save, add done or not done for Stretch.');
     assert.equal(await save.isDisabled(), true);
@@ -736,7 +748,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.equal(row.data['custom-1'], true);
     assert.equal(row.data['custom-2'], false);
     assert.equal(row.data.wakeTiming.actual, '06:10');
-    assert.equal(row.data.routineTiming.actualMinutes, 35);
+    assert.equal(row.data.routineTiming?.actualMinutes ?? null, null, 'saved without a routine time');
   } else if (scenario === 'morninglow') {
     // 2/10 is logged, not "complete", and doesn't add to the streak.
     await page.getByRole('button', { name: /MORNING$/ }).last().click();
@@ -782,6 +794,23 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     for (let i = 0; i < 30 && !writes.some(w => w.table === 'habits' && /Read 20 pages/.test(w.body || '')); i++) await page.waitForTimeout(100);
     const renamed = JSON.parse(writes.filter(w => w.table === 'habits' && /Read 20 pages/.test(w.body || '')).at(-1).body);
     assert.equal(renamed.id, 'h1', 'the same habit, renamed');
+  } else if (scenario === 'perfectweek') {
+    // Every session done and not a set missed: a reward on the dashboard and in the report.
+    await page.getByTestId('perfect-week-badge').getByText('Perfect training week: every session smashed, not a set missed.').waitFor();
+    await page.getByTestId('weekly-report-card').getByRole('button', { name: 'OPEN WEEKLY REPORT →' }).click();
+    const banner = page.getByTestId('perfect-week');
+    await banner.getByText('PERFECT TRAINING WEEK').waitFor();
+    assert.match(await banner.textContent(), /Well done: every session smashed, not a set missed\. 2 of 2 workouts, every planned set logged\./);
+    const summary = chats.find(chat => chat.area === 'weekly_summary');
+    assert.match(summary.messages.at(-1).content, /Perfect training week: every planned session was done and not a single planned set was missed/, 'the coach is told, so it can say well done');
+  } else if (scenario === 'reviewchip') {
+    // Change Plan offers to review the plan and recommend changes, not only ask what to change.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: 'CHANGE PLAN' }).click();
+    await page.getByText(/tap "Review my plan and recommend changes" and I'll suggest what I'd change/).waitFor();
+    await page.getByRole('button', { name: 'Review my plan and recommend changes' }).click();
+    await page.getByText(/chest gets 7 direct sets/).waitFor();
+    assert.equal(chats.filter(chat => chat.planChange).at(-1).messages.at(-1).content, 'Review my plan and recommend changes');
   } else if (scenario === 'nextupslow') {
     // Tapped while Fitness is still loading: once it has loaded, the
     // unfinished workout is continued, not replaced by a new one.

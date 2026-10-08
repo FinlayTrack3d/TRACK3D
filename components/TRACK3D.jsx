@@ -2846,12 +2846,11 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     const formSteps = allSteps.filter(step => step.id !== "checkin");
     const plannedRoutineMinutes = routinePlannedMinutes;
     const toggleStyle = selected => ({ flex: 1, minHeight: 44, borderColor: selected ? NEON : BORDER, color: selected ? NEON : "#8AABB8", background: selected ? "rgba(0,255,178,.1)" : "transparent" });
-    // Logging a morning afterwards needs the wake-up time, the routine time
-    // and an answer for every task: nothing is assumed done or not done.
+    // Logging a morning afterwards needs the wake-up time and an answer for
+    // every task: nothing is assumed done or not done. The routine time is optional.
     const unansweredTicks = formSteps.filter(step => step.type === "tick" && typeof editSubmissionData[step.id || step.name] !== "boolean");
     const logMissing = isLogCheckin ? [
       ...(editSubmissionData.wakeTiming?.actual ? [] : ["your wake-up time"]),
-      ...(Number(editSubmissionData.routineTiming?.actualMinutes) > 0 ? [] : ["how long the routine took"]),
       ...(unansweredTicks.length ? [`done or not done for ${unansweredTicks.length === 1 ? unansweredTicks[0].name : `${unansweredTicks.length} tasks`}`] : []),
     ] : [];
     return (
@@ -2926,8 +2925,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               } }))} />
           </label>
           <label style={{ display: "block", fontSize: 12, margin: "16px 0" }}>
-            Routine time (minutes){isLogCheckin ? " (required)" : ""}
-            <input className="t3d-input" type="number" inputMode="numeric" min="1" max="600" required={isLogCheckin} style={{ marginTop: 8 }}
+            Routine time (minutes){isLogCheckin ? " (optional)" : ""}
+            <input className="t3d-input" type="number" inputMode="numeric" min="1" max="600" style={{ marginTop: 8 }}
               placeholder={plannedRoutineMinutes ? `Planned: ${plannedRoutineMinutes} min` : "Minutes"}
               value={editSubmissionData.routineTiming?.actualMinutes ?? ""}
               onChange={event => setEditSubmissionData(data => ({ ...data, routineTiming: {
@@ -4884,6 +4883,11 @@ function WeeklyReport({ week, metrics, loadError, isNew = false, onOpen }) {
           ))}
         </div>
       )}
+      {metrics?.hasData && workouts?.perfectWeek && (
+        <div data-testid="perfect-week-badge" style={{ marginTop: 10, padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(255,210,63,.5)", background: "rgba(255,210,63,.08)", color: "#FFD23F", fontSize: 11, textAlign: "center" }}>
+          🏆 Perfect training week: every session smashed, not a set missed.
+        </div>
+      )}
       <button className="t3d-btn" style={{ width: "100%", marginTop: 14, ...(isNew ? { borderColor: "#FFB547", color: "#FFB547" } : {}) }} onClick={onOpen}>OPEN WEEKLY REPORT →</button>
     </div>
   );
@@ -4997,6 +5001,19 @@ function WeeklyRecap({ user, onBack }) {
 
       {metrics?.hasData && (
         <>
+          {/* The reward for a week with every session done and no set missed. */}
+          {workouts?.perfectWeek && (
+            <div className="t3d-card t3d-reveal" data-testid="perfect-week" role="status" style={{ ...reveal(1), marginBottom: 14, textAlign: "center", padding: "20px 16px", borderColor: "#FFD23F", background: "linear-gradient(160deg, rgba(255,210,63,.14), rgba(255,140,0,.05) 70%)" }}>
+              <div aria-hidden="true" style={{ fontSize: 34, lineHeight: 1, marginBottom: 8 }}>🏆</div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 15, color: "#FFD23F", letterSpacing: 3 }}>PERFECT TRAINING WEEK</div>
+              <div style={{ fontSize: 12, color: "#E0EAF0", marginTop: 8, lineHeight: 1.6 }}>Well done: every session smashed, not a set missed. {workouts.completed} of {workouts.planned} workouts, every planned set logged.</div>
+            </div>
+          )}
+          {!workouts?.perfectWeek && workouts?.allSessionsDone && workouts.setsMissed > 0 && (
+            <div className="t3d-card t3d-reveal" data-testid="sessions-done" style={{ ...reveal(1), marginBottom: 14, textAlign: "center", fontSize: 11, color: "#C5D6DC", lineHeight: 1.6 }}>
+              <span style={{ color: NEON }}>✓ Every planned session done.</span> {workouts.setsMissed} planned set{workouts.setsMissed === 1 ? "" : "s"} skipped: log every set next week for a perfect week 🏆
+            </div>
+          )}
           <div className="t3d-grid2" style={{ marginBottom: 14 }}>
             {workouts && (
               <div className="t3d-reveal" style={reveal(1)}>
@@ -7900,7 +7917,7 @@ function withPlanApproval(sessions, now = new Date()) {
 
   const planChangeIntro = [{
     role: "assistant",
-    content: "Before replacing your whole programme, tell me what is not working. I’ll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
+    content: "Tell me what isn't working, or tap \"Review my plan and recommend changes\" and I'll suggest what I'd change from your workouts. I'll check whether you need a full rebuild, a few exercise swaps, or only set and rep changes. Your completed workout history will stay intact.",
   }];
   // The coach's proposal still waiting for approval, if any. Proposals live
   // on the coach message that made them, so the card shows under it.
@@ -8070,7 +8087,7 @@ function withPlanApproval(sessions, now = new Date()) {
 
         {planChangeMessages.length === 1 && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-            {["A few exercises don't suit me", "I want to change sets or reps", "My available days changed", "My main goal changed", "I think I need a full rebuild"].map(prompt => (
+            {["Review my plan and recommend changes", "A few exercises don't suit me", "I want to change sets or reps", "My available days changed", "My main goal changed", "I think I need a full rebuild"].map(prompt => (
               <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanChangeCoach(prompt)}>{prompt}</button>
             ))}
           </div>
