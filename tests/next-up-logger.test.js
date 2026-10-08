@@ -50,7 +50,8 @@ test("set logger suggests the reps to aim for and the weight, and says why", () 
   const backOff = setLoggerSuggestion({ ranges: ["6-8", "6-8", "8-10", "6"], setIndex: 0, lastSets: last([8, "60"], [8, "60"], [10, "60"], [6, "60"]) });
   assert.deepEqual(backOff, { weight: "62.5", reps: "6", note: "Every set reached the top of its range last time, so 62.5 kg today. Aim for 6." });
   // Later sets keep today's weight; the aim comes from last time's set at that weight.
-  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 1, lastSets: last([12], [8], [7]), todaySets: [{ weight: "45", reps: "8" }] }), { weight: "45", reps: "6", note: "Last time 8 × 42.5 kg. At 45 kg, aim for 6." });
+  // Set 2 follows set 2 last time, not the weight set 1 moved to today.
+  assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 1, lastSets: last([12], [8], [7]), todaySets: [{ weight: "45", reps: "8" }] }), { weight: "42.5", reps: "8", note: "Last time 8 × 42.5 kg. Aim for 8." });
   // A big jump for a light weight isn't made for you.
   assert.equal(setLoggerSuggestion({ ranges: ["12-15"], setIndex: 0, lastSets: [{ weight: "10", reps: "15" }], bigStep: true }).weight, "10");
   // No history: aim for the top of the range; the weight is yours to choose.
@@ -72,4 +73,28 @@ test("restored sets match the server, so nothing is written on load", () => {
   assert.equal(isFinishedWorkout({ in_progress: true, date: "2026-10-05" }, "2026-10-05"), false);
   assert.equal(sessionForDay([{ name: "Upper A", days: ["MONDAY"] }], "MON").name, "Upper A");
   assert.equal(sessionForDay([{ name: "Upper A", days: ["TUE"] }], "MON"), null);
+});
+
+test("each set follows the same set last time, so planned drops in weight are kept", () => {
+  // Last time 35 kg, then 30 kg: set 2 today is 30 kg even though set 1 was 35.
+  const lastSets = [{ weight: "35", reps: "9" }, { weight: "30", reps: "9" }];
+  const setTwo = setLoggerSuggestion({ ranges: ["8-10", "8-10"], setIndex: 1, lastSets, todaySets: [{ weight: "35", reps: "9" }] });
+  assert.deepEqual(setTwo, { weight: "30", reps: "10", note: "Last time 9 × 30 kg. Aim for 10." });
+  // A set with nothing to match last time follows the set just logged.
+  assert.equal(setLoggerSuggestion({ ranges: ["8-10", "8-10", "8-10"], setIndex: 2, lastSets, todaySets: [{ weight: "35", reps: "9" }, { weight: "32.5", reps: "9" }] }).weight, "32.5");
+});
+
+test("well under the range last time: drop the weight to reach the top of it", () => {
+  // 6 × 5 kg on a 10-12 range: lighter, aiming for 12, not 5 kg aiming for 10.
+  assert.deepEqual(setLoggerSuggestion({ ranges: ["10-12"], setIndex: 0, lastSets: [{ weight: "5", reps: "6" }] }),
+    { weight: "2.5", reps: "12", note: "Last time 6 × 5 kg, under the 10-12 range, so 2.5 kg today to reach 12. Aim for 12." });
+  // Weights that go up in 5 kg: down to 0 kg.
+  assert.equal(setLoggerSuggestion({ ranges: ["10-12"], setIndex: 0, lastSets: [{ weight: "5", reps: "6" }], increment: 5 }).weight, "0");
+  // Choosing the old weight anyway says what would reach the range.
+  assert.deepEqual(setLoggerSuggestion({ ranges: ["10-12"], setIndex: 0, lastSets: [{ weight: "5", reps: "6" }], chosenWeight: "5" }),
+    { weight: "5", reps: "10", note: "Last time 6 × 5 kg, under the 10-12 range: 2.5 kg should let you reach 12. At 5 kg, aim for 10." });
+  // One rep short is close enough: same weight, one more rep.
+  assert.deepEqual(setLoggerSuggestion({ ranges: ["10-12"], setIndex: 0, lastSets: [{ weight: "20", reps: "9" }] }), { weight: "20", reps: "10", note: "Last time 9 × 20 kg. Aim for 10." });
+  // Heavier: 60 kg × 5 on 8-10 → 52.5 kg (Epley estimate for 10, in 2.5 kg steps).
+  assert.equal(setLoggerSuggestion({ ranges: ["8-10"], setIndex: 0, lastSets: [{ weight: "60", reps: "5" }] }).weight, "52.5");
 });

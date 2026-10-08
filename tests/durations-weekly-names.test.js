@@ -95,3 +95,19 @@ test("a coach summary written from other numbers is recognised as out of date", 
   // Written before summaries kept their facts: no key, so it is rewritten.
   assert.equal(parseCoachSummary(formatCoachSummary(summary)).factsKey, undefined);
 });
+
+test("a perfect training week: every planned session done, not a set missed", () => {
+  const sessions = [{ name: "Push A", days: ["MON"], exercises: [] }, { name: "Pull A", days: ["WED"], exercises: [] }];
+  const workout = (id, date, sets = [3, 3]) => ({ id, date, total_volume: 2000, duration_mins: 45, exercises: sets.map((logged, index) => ({ name: `Lift ${index}`, prescribed_sets: 3, sets: Array.from({ length: logged }, () => ({ weight: 50, reps: 8 })) })) });
+  const perfect = buildWeeklyMetrics({ week, todayKey: "2026-10-07", workoutLogs: [workout(1, "2026-09-28"), workout(2, "2026-09-30")], sessions });
+  assert.equal(perfect.workouts.perfectWeek, true);
+  assert.equal(perfect.workouts.setsMissed, 0);
+  assert.match(weeklyFactsForCoach(perfect).join("\n"), /Perfect training week/);
+  // Both sessions done, but one set skipped: not perfect, and the coach is told how many.
+  const oneShort = buildWeeklyMetrics({ week, todayKey: "2026-10-07", workoutLogs: [workout(1, "2026-09-28"), workout(2, "2026-09-30", [3, 2])], sessions });
+  assert.equal(oneShort.workouts.perfectWeek, false);
+  assert.equal(oneShort.workouts.allSessionsDone, true);
+  assert.match(weeklyFactsForCoach(oneShort).join("\n"), /1 planned set was not logged/);
+  // A session missed: not perfect either.
+  assert.equal(buildWeeklyMetrics({ week, todayKey: "2026-10-07", workoutLogs: [workout(1, "2026-09-28")], sessions }).workouts.perfectWeek, false);
+});
