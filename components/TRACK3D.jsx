@@ -6545,10 +6545,33 @@ function withPlanApproval(sessions, now = new Date()) {
     setHistory(current => current.map(log => log.id === logId ? { ...log, ai_feedback: feedback } : log));
   };
 
+  // What the coach reviews after a workout: this session, the last time it
+  // was done, how the week is going and what's next, so it can talk about
+  // the session and the next one rather than read the sets back.
   const completionFeedbackReview = () => {
     const review = buildWorkoutReview(activeSession, completedSets);
-    const sameSession = history.filter(log => log.id !== workoutLogIdRef.current && String(log.session_name || "").toLowerCase() === String(activeSession?.name || "").toLowerCase());
-    return `WORKOUT REVIEW\n${JSON.stringify({ ...review, durationMinutes: Math.round((Date.now() - workoutStart) / 60000) })}\n\nPREVIOUS SAME SESSION\n${recentWorkoutsForCoach(sameSession, { perSession: 3, maxSessions: 1 })}`;
+    const finishedId = workoutLogIdRef.current;
+    const sameName = name => log => log.id !== finishedId && String(log.session_name || "").toLowerCase() === String(name || "").toLowerCase();
+    const sameSession = history.filter(sameName(activeSession?.name));
+    let next = null;
+    for (let ahead = 1; ahead <= 7 && !next; ahead += 1) {
+      const date = new Date(`${today}T12:00:00Z`);
+      date.setUTCDate(date.getUTCDate() + ahead);
+      const session = sessionForDay(sessions, ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][date.getUTCDay()]);
+      if (session) next = { session, when: ahead === 1 ? "tomorrow" : date.toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "long" }) };
+    }
+    const week = weeklyWorkoutProgress(history.filter(log => log.id !== finishedId), today, sessions, finishedId, { countCurrent: review.completedSets > 0 });
+    const nextText = next
+      ? `${next.session.name}${isActivitySession(next.session) ? " (an activity, not a gym session)" : ""}, ${next.when}${next.session.exercises?.length ? `: ${next.session.exercises.map(exercise => exercise.name).join(", ")}` : ""}`
+      : "none scheduled in the next 7 days";
+    const nextLastTime = next && !isActivitySession(next.session) ? recentWorkoutsForCoach(history.filter(sameName(next.session.name)), { perSession: 3, maxSessions: 1 }) : "";
+    return [
+      `WORKOUT REVIEW\n${JSON.stringify({ ...review, durationMinutes: Math.round((Date.now() - workoutStart) / 60000) })}`,
+      `PREVIOUS SAME SESSION\n${recentWorkoutsForCoach(sameSession, { perSession: 3, maxSessions: 1 })}`,
+      `WEEK SO FAR\n${week.planned ? `${week.completed} of ${week.planned} planned sessions done, including this one` : `${week.completed} sessions done`}`,
+      `NEXT SESSION\n${nextText}`,
+      ...(nextLastTime ? [`NEXT SESSION LAST TIME\n${nextLastTime}`] : []),
+    ].join("\n\n");
   };
 
   const askCompletionFollowUp = async () => {
@@ -7288,7 +7311,12 @@ function withPlanApproval(sessions, now = new Date()) {
             ))}
           </div>
           {workoutSaveError && <div role="alert" style={{ textAlign: "left", color: "#FF8AAD", background: "rgba(255,45,120,.07)", border: "1px solid rgba(255,45,120,.3)", borderRadius: 6, padding: 10, fontSize: 10, lineHeight: 1.5, marginBottom: 10 }}>{workoutSaveError}</div>}
-          {completionFeedback && <div style={{ textAlign: "left", whiteSpace: "pre-wrap", color: "#C5D6DC", background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 12, fontSize: 10, lineHeight: 1.55, marginBottom: 10 }}>{cleanAiText(completionFeedback)}</div>}
+          {completionFeedback && (
+            <div data-testid="coach-session-note" style={{ textAlign: "left", background: "rgba(0,200,255,.06)", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, padding: 12, marginBottom: 10 }}>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 8, color: NEON2, letterSpacing: 2, marginBottom: 6 }}>FROM YOUR COACH</div>
+              <div style={{ whiteSpace: "pre-wrap", color: "#E0EAF0", fontSize: 12, lineHeight: 1.6 }}>{cleanAiText(completionFeedback)}</div>
+            </div>
+          )}
           {completionFeedback && (
             <div style={{ textAlign: "left", marginBottom: 10 }}>
               {completionFollowUps.map((message, index) => (
