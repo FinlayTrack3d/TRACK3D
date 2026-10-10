@@ -16,7 +16,11 @@ const shift = (key, days) => { const d = new Date(`${key}T12:00:00Z`); d.setUTCD
   await context.addInitScript(({ user, token }) => {
     localStorage.setItem('track3d-auth', JSON.stringify({ access_token: token, refresh_token: 't', expires_at: Math.floor(Date.now() / 1000) + 3600, token_type: 'bearer', user }));
   }, { user, token });
-  const today = londonKey(0);
+  // The weekly report depends on the weekday (on a Sunday it covers the week
+  // in progress), so these run on a fixed Wednesday.
+  const fixedDay = ['weekly', 'weeklynew'].includes(scenario) ? '2026-10-07' : null;
+  if (fixedDay) await context.clock.setFixedTime(new Date(`${fixedDay}T11:00:00Z`));
+  const today = fixedDay || londonKey(0);
   const dow = new Date(`${today}T12:00:00Z`).getUTCDay();
   const thisMonday = shift(today, -((dow + 6) % 7));
   const weekStart = dow === 0 ? thisMonday : shift(thisMonday, -7);
