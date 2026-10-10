@@ -52,9 +52,11 @@ const londonKey = (offset = 0) => {
   ];
   if (scenario === 'done') pastLogs.unshift({ id: 'todaylog', session_name: 'Push B', date: today, in_progress: false, total_volume: 2000, duration_mins: 45, created_at: new Date().toISOString(), exercises: [] });
   const writes = [];
+  const chats = [];
   await context.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.hostname === 'localhost') {
+      if (url.pathname === '/api/chat') chats.push(JSON.parse(req.postData() || '{}'));
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: { content: [{ text: 'Good session.' }], reply: 'Good session.' } });
       return route.continue();
     }
@@ -150,6 +152,15 @@ const londonKey = (offset = 0) => {
     const saved = writes.filter(w => w.table === 'workout_logs').pop();
     const finalWrite = writes.filter(w => w.table === 'workout_logs' && w.body?.includes('"in_progress":false')).pop(); console.log('final write:', finalWrite?.method, (finalWrite?.body || '').slice(0, 300)); assert(finalWrite?.body.includes('"type":"weight_pb"'), 'PB saved with workout');
     await page.getByText('SETS COMPLETED').waitFor();
+    // The coach talks about the session and the next one: it is told how the
+    // week is going and what's next, and its note is shown as from the coach.
+    const note = page.getByTestId('coach-session-note');
+    await note.getByText('Good session.').waitFor();
+    assert.match(await note.textContent(), /^FROM YOUR COACH/);
+    const review = chats.find(chat => chat.area === 'workout_review').messages[0].content;
+    assert.match(review, new RegExp(`WEEK SO FAR\\n1 of ${planned} planned sessions done, including this one`));
+    assert.match(review, /NEXT SESSION\n(Push B|Pull A), (tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday): (Bench Press, Shoulder Press|Row)/);
+    assert.match(review, /PREVIOUS SAME SESSION\n/);
     await page.waitForTimeout(1500);
     await page.screenshot({ path: require('node:os').tmpdir() + '/complete.png', fullPage: true });
   } else if (scenario === 'done') {

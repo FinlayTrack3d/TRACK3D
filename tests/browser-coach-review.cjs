@@ -124,7 +124,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
   if (scenario === 'newdash') await context.clock.setFixedTime(atLondonHour(10));
   // Scenarios about a given weekday run at midday London time on a fixed date
   // (2026-10-07 is a Wednesday, 2026-10-12 a Monday).
-  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12', weeklystale: '2026-10-07', weekcount: '2026-10-07', perfectweek: '2026-10-07' }[scenario];
+  const fixedDay = { fitnessrest: '2026-10-07', fitnessmissed: '2026-10-07', fitnesslastweek: '2026-10-12', weeklystale: '2026-10-07', weekcount: '2026-10-07', perfectweek: '2026-10-07', weeklysavefail: '2026-10-07' }[scenario];
   if (fixedDay) await context.clock.setFixedTime(new Date(`${fixedDay}T11:00:00Z`));
   const today = fixedDay || londonKey();
   const yesterday = shiftKey(today, -1);
