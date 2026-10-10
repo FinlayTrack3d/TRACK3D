@@ -241,6 +241,17 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       { id: 'p2', user_id: user.id, date: '2026-09-30', session_name: 'Lower A', in_progress: false, created_at: '2026-09-30T12:00:00Z', duration_mins: 45, total_volume: 1500, exercises: [logged('Squat', 100, 5)] },
     ];
   }
+  // Ten finished workouts two months ago, the bench at 100kg: badges to show.
+  if (scenario === 'badgesprofile' || scenario === 'badgesintro') {
+    tables.workout_logs = Array.from({ length: 10 }, (_, index) => {
+      const date = shiftKey(today, -70 + index);
+      return { id: `b${index}`, user_id: user.id, date, session_name: 'Push A', in_progress: false, created_at: `${date}T12:00:00Z`, duration_mins: 45, total_volume: 1500, exercises: [{ name: 'Bench Press', sets: [1, 2, 3].map(() => ({ weight: '100', reps: '5' })) }] };
+    });
+    // badgesprofile: this device has shown badges before (none of these yet).
+    if (scenario === 'badgesprofile') await context.addInitScript(userId => {
+      if (localStorage.getItem(`track3d-badges-seen-${userId}`) === null) localStorage.setItem(`track3d-badges-seen-${userId}`, '[]');
+    }, user.id);
+  }
   if (scenario === 'weekcount') {
     tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [
       { name: 'Upper A', days: ['MON'], exercises: [{ name: 'Bench Press', sets: 3, reps: ['8-10', '8-10', '8-10'] }], approval: { approved: true } },
@@ -376,7 +387,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     if (earlierDay) rows = rows.filter(r => !r.in_progress || String(r.date) < earlierDay[1]);
     // Everyone here has already agreed to health data storage (on their profile).
     if (table === 'user_profiles' && req.method() === 'GET') rows = (rows.length ? rows : [{ user_id: '11111111-1111-4111-8111-111111111111' }]).map(row => ({ health_consent_at: '2026-10-06T08:00:00.000Z', health_consent_version: '2026-10-06', ...row }));
-    reads.push({ table, single, count: rows.length });
+    reads.push({ table, single, count: rows.length, select: url.searchParams.get('select'), dated: url.searchParams.has('date') });
     // Like PostgREST: single() with no row (or several) is a 406.
     if (single && rows.length !== 1) return route.fulfill({ status: 406, json: { code: 'PGRST116', message: 'JSON object requested, multiple (or no) rows returned' } });
     return route.fulfill({ json: single ? (rows[0] || null) : rows });
@@ -401,7 +412,11 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     // Opening the app writes nothing, reads each row once, and has no 406s.
     await page.waitForTimeout(4000);
     assert.deepEqual(writes.map(w => `${w.method} ${w.table}`), [], 'no writes on load');
-    const count = table => reads.filter(r => r.table === table).length;
+    // The badge check reads the whole habit history once; that is a different
+    // query from today's ticks, so it isn't counted as a repeat.
+    const badgeHistory = r => r.table === 'habit_completions' && r.select === 'habit_id,date' && !r.dated;
+    assert.equal(reads.filter(badgeHistory).length, 1, 'habit history read once for badges');
+    const count = table => reads.filter(r => r.table === table && !badgeHistory(r)).length;
     for (const table of ['workout_splits', 'morning_routines', 'nutrition_plans', 'coach_profiles', 'user_profiles', 'habits', 'habit_completions']) {
       assert.ok(count(table) <= 1, `${table} read ${count(table)} times`);
     }
@@ -803,6 +818,41 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     assert.match(await banner.textContent(), /Well done: every session smashed, not a set missed\. 2 of 2 workouts, every planned set logged\./);
     const summary = chats.find(chat => chat.area === 'weekly_summary');
     assert.match(summary.messages.at(-1).content, /Perfect training week: every planned session was done and not a single planned set was missed/, 'the coach is told, so it can say well done');
+  } else if (scenario === 'badgesprofile') {
+    // New badges are announced on the dashboard; SEE ALL opens them in Profile.
+    const notice = page.getByTestId('new-badges');
+    await notice.getByText(/NEW BADGES UNLOCKED/).waitFor();
+    const text = await notice.textContent();
+    for (const title of ['First Session', 'Getting Going', 'Triple-Digit Bench']) assert.match(text, new RegExp(title), `${title} announced`);
+    assert.doesNotMatch(text, /Regular/, 'a badge not earned yet is not announced');
+    await notice.getByRole('button', { name: 'SEE ALL BADGES' }).click();
+    const section = page.getByTestId('profile-dialog').getByTestId('achievements');
+    await section.getByRole('heading', { name: 'ACHIEVEMENTS' }).waitFor();
+    await section.getByTestId('badge-workouts-10').waitFor();
+    assert.equal(await section.getByTestId('badge-workouts-10').getAttribute('data-earned'), 'true');
+    assert.match(await section.getByTestId('badge-workouts-10').textContent(), /Earned \d+ \w+ \d{4}/);
+    assert.equal(await section.getByTestId('badge-bench-100').getAttribute('data-earned'), 'true');
+    assert.equal(await section.getByTestId('badge-workouts-25').getAttribute('data-earned'), 'false');
+    assert.match(await section.getByTestId('badge-workouts-25').textContent(), /10 \/ 25/);
+    assert.match(await section.textContent(), /\d+ of \d+ earned/);
+    if (process.env.SHOT) await page.screenshot({ path: 'achievements.png', fullPage: true });
+    // Announced once: after a reload the dashboard doesn't announce them again.
+    await page.reload();
+    await page.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    await page.waitForTimeout(1500);
+    assert.equal(await page.getByTestId('new-badges').count(), 0);
+  } else if (scenario === 'badgesintro') {
+    // The first time, badges already earned are summed up in one line.
+    const intro = page.getByTestId('badges-intro');
+    await intro.getByText(/You've already earned \d+ badges/).waitFor();
+    assert.equal(await page.getByTestId('new-badges').count(), 0, 'not announced one by one');
+    await intro.getByRole('button', { name: 'DISMISS' }).click();
+    await intro.waitFor({ state: 'detached' });
+    await page.reload();
+    await page.getByText('DAILY SCORE').waitFor({ timeout: 20000 });
+    await page.waitForTimeout(1500);
+    assert.equal(await page.getByTestId('badges-intro').count(), 0);
+    assert.equal(await page.getByTestId('new-badges').count(), 0);
   } else if (scenario === 'reviewchip') {
     // Change Plan offers to review the plan and recommend changes, not only ask what to change.
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();

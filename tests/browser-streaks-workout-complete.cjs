@@ -50,6 +50,13 @@ const londonKey = (offset = 0) => {
     { id: 'old1', session_name: 'Push B', date: londonKey(-8), in_progress: false, total_volume: 1500, duration_mins: 40, created_at: `${londonKey(-8)}T08:00:00Z`,
       exercises: [{ name: 'Bench Press', sets: [{ weight: '75', reps: '8' }, { weight: '75', reps: '7' }] }, { name: 'Shoulder Press', sets: [{ weight: '30', reps: '8' }] }] },
   ];
+  // completebadge: nine earlier workouts two months ago, so today's is the tenth.
+  if (scenario === 'completebadge') {
+    for (let day = 60; day < 68; day++) pastLogs.push({ id: `pull${day}`, session_name: 'Pull A', date: londonKey(-day), in_progress: false, total_volume: 500, duration_mins: 30, created_at: `${londonKey(-day)}T08:00:00Z`, exercises: [{ name: 'Row', sets: [{ weight: '50', reps: '10' }] }] });
+    await context.addInitScript(userId => {
+      if (localStorage.getItem(`track3d-badges-seen-${userId}`) === null) localStorage.setItem(`track3d-badges-seen-${userId}`, JSON.stringify(['first-workout']));
+    }, user.id);
+  }
   if (scenario === 'done') pastLogs.unshift({ id: 'todaylog', session_name: 'Push B', date: today, in_progress: false, total_volume: 2000, duration_mins: 45, created_at: new Date().toISOString(), exercises: [] });
   const writes = [];
   const chats = [];
@@ -67,6 +74,12 @@ const londonKey = (offset = 0) => {
     const single = req.headers().accept?.includes('vnd.pgrst.object');
     if (req.method() !== 'GET') {
       writes.push({ table, method: req.method(), body: req.postData() });
+      // completebadge: the finished workout is in the history read afterwards.
+      if (scenario === 'completebadge' && table === 'workout_logs' && req.postData()?.includes('"in_progress":false')) {
+        let saved = pastLogs.find(log => log.id === 'newlog');
+        if (!saved) pastLogs.push(saved = { id: 'newlog', date: today });
+        Object.assign(saved, JSON.parse(req.postData()), { id: 'newlog' });
+      }
       if (table === 'workout_logs' && req.method() === 'POST') return route.fulfill({ status: 201, json: single ? { id: 'newlog' } : [{ id: 'newlog' }] });
       return route.fulfill({ status: 201, json: single ? {} : [] });
     }
@@ -163,6 +176,24 @@ const londonKey = (offset = 0) => {
     assert.match(review, /PREVIOUS SAME SESSION\n/);
     await page.waitForTimeout(1500);
     await page.screenshot({ path: require('node:os').tmpdir() + '/complete.png', fullPage: true });
+  } else if (scenario === 'completebadge') {
+    // The tenth workout unlocks a badge, shown on the complete screen once.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    for (const [weight, reps] of [[80, 6], [80, 5], [30, 10]]) {
+      await page.getByLabel('Weight in kilograms').fill(String(weight));
+      await page.getByLabel('Reps', { exact: true }).fill(String(reps));
+      await page.getByRole('button', { name: 'Log set' }).click();
+      await page.waitForTimeout(150);
+    }
+    await page.getByText('WORKOUT COMPLETE').waitFor({ timeout: 10000 });
+    const notice = page.getByTestId('new-badges');
+    await notice.getByText('NEW BADGE UNLOCKED').waitFor();
+    assert.match(await notice.textContent(), /Getting Going · Finish 10 workouts\./);
+    assert.doesNotMatch(await notice.textContent(), /First Session/, 'a badge earned before today is not announced here');
+    const seen = await page.evaluate(userId => JSON.parse(localStorage.getItem(`track3d-badges-seen-${userId}`)), user.id);
+    assert(seen.includes('workouts-10'), 'not announced again on the dashboard');
+    await page.screenshot({ path: require('node:os').tmpdir() + '/completebadge.png', fullPage: true });
   } else if (scenario === 'done') {
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();
     await page.getByText('DONE FOR TODAY ✓').waitFor();
