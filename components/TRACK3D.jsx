@@ -15,6 +15,7 @@ import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, repTargets, requestedBudget, splitRepTargets } from "../lib/workout";
 import { countsForMorningStreak, habitStreak, morningStreak, shiftDateKey, STREAK_MIN_MORNING_SCORE, streakBeforeToday } from "../lib/streaks";
+import { ACHIEVEMENT_CATEGORIES, computeAchievements, unseenAchievements } from "../lib/achievements";
 import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normaliseImportedFitnessPlan } from "../lib/plan-import";
 import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach, weeklyFactsKey } from "../lib/weekly-report";
 import { nextUpItems } from "../lib/next-up";
@@ -5229,7 +5230,30 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   );
 }
 
-function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSaved, workoutBannerShown = false }) {
+function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSaved, workoutBannerShown = false, onOpenProfile = null }) {
+  // Badges earned since this device last showed them. The first time, earlier
+  // badges are summed up in one line instead of each being announced.
+  const [badgeNews, setBadgeNews] = useState(null); // { badges, firstTime, earnedIds }
+  useEffect(() => {
+    if (!user) return;
+    fetchAchievements(user).then(list => {
+      const seen = readSeenBadges(user.id);
+      const earned = list.filter(badge => badge.earned);
+      if (seen === null) {
+        if (earned.length) setBadgeNews({ badges: [], firstTime: true, earnedIds: earned.map(badge => badge.id) });
+        else markBadgesSeen(user.id, []);
+        return;
+      }
+      const fresh = unseenAchievements(list, seen);
+      if (fresh.length) setBadgeNews({ badges: fresh, firstTime: false, earnedIds: fresh.map(badge => badge.id) });
+    }).catch(() => { /* badges are a bonus: the dashboard works without them */ });
+  }, [user]);
+  const closeBadgeNews = (openProfile = false) => {
+    if (!badgeNews) return;
+    markBadgesSeen(user.id, badgeNews.earnedIds);
+    setBadgeNews(null);
+    if (openProfile) onOpenProfile?.();
+  };
   const done = habits.filter(h => h.done).length;
   const [eodDone, setEodDone] = useState(false);
   const [showEod, setShowEod] = useState(false);
@@ -5447,6 +5471,17 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   return (
     <div className="t3d-fade">
       {weeklyIsNew && weeklyCard}
+      {badgeNews && !badgeNews.firstTime && <NewBadgesNotice badges={badgeNews.badges} onSeeAll={() => closeBadgeNews(true)} onDismiss={() => closeBadgeNews(false)} />}
+      {badgeNews?.firstTime && (
+        <div data-testid="badges-intro" role="status" style={{ marginBottom: 14, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(255,210,63,.6)", background: "linear-gradient(160deg, rgba(255,210,63,.14), rgba(255,140,0,.04))" }}>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#FFD23F", letterSpacing: 2, marginBottom: 6 }}>🏅 ACHIEVEMENTS ARE HERE</div>
+          <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.5 }}>You&apos;ve already earned {badgeNews.earnedIds.length} {badgeNews.earnedIds.length === 1 ? "badge" : "badges"} for your training, mornings, habits and nutrition so far.</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: "#FFD23F", color: "#FFD23F" }} onClick={() => closeBadgeNews(true)}>SEE ALL BADGES</button>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: BORDER, color: "#8AABB8" }} onClick={() => closeBadgeNews(false)}>DISMISS</button>
+          </div>
+        </div>
+      )}
       {/* Next up: the next thing due today, one tap to start it. A new user
           with nothing due yet sees GET STARTED first instead. */}
       {!(showGetStarted && !nextUp.length) && <div className="t3d-card" data-testid="next-up" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)", background: "linear-gradient(160deg, rgba(0,255,178,.06), transparent 70%)" }}>
@@ -6620,6 +6655,24 @@ function withPlanApproval(sessions, now = new Date()) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
 
+  // Badges this workout unlocked, shown on the complete screen. The workout is
+  // saved before the view changes, so it is in the history read here.
+  const [completeBadges, setCompleteBadges] = useState([]);
+  useEffect(() => {
+    if (view !== "complete" || !user) { setCompleteBadges([]); return; }
+    let cancelled = false;
+    fetchAchievements(user).then(list => {
+      if (cancelled) return;
+      const seen = readSeenBadges(user.id);
+      const fresh = list.filter(badge => badge.earned && badge.earnedOn === today && !(seen || []).includes(badge.id));
+      setCompleteBadges(fresh);
+      // The first time badges are seen on this device, the earlier ones are
+      // marked too, so the dashboard doesn't announce them one by one.
+      markBadgesSeen(user.id, (seen === null ? list.filter(badge => badge.earned) : fresh).map(badge => badge.id));
+    }).catch(() => { /* badges are a bonus: the summary works without them */ });
+    return () => { cancelled = true; };
+  }, [view, user, today]);
+
   const finishWorkout = async (setsToSave = completedSets) => {
     if (workoutFinishing) return;
     setWorkoutFinishing(true);
@@ -7252,6 +7305,7 @@ function withPlanApproval(sessions, now = new Date()) {
           <div className="t3d-done-badge" aria-hidden="true">✓</div>
           <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 14, color: NEON, letterSpacing: 3, marginBottom: 4 }}>WORKOUT COMPLETE</div>
           <div style={{ fontSize: 11, color: "#8AABB8", marginBottom: 16 }}>{activeSession?.name}</div>
+          <NewBadgesNotice badges={completeBadges} />
           {newPbs.length > 0 && (
             <div className="t3d-reveal" data-testid="complete-pbs" style={{ textAlign: "left", marginBottom: 12, padding: "12px 14px", border: "1px solid rgba(255,181,71,.5)", background: "linear-gradient(135deg, rgba(255,181,71,.12), rgba(255,181,71,.03))", borderRadius: 8, animationDelay: ".15s" }}>
               <div style={highlightTitle("#FFB547")}>🏆 {newPbs.length} NEW PB{newPbs.length === 1 ? "" : "S"}</div>
@@ -11998,6 +12052,110 @@ function HabitsPage({ habits, setHabits }) {
   );
 }
 
+// ─── Achievements (badges) ───────────────────────────────────────────────────
+// Badges are worked out from the user's history (lib/achievements.js). Which
+// ones this device has already announced is kept locally, only so a badge is
+// announced once; the badges themselves always come from the data.
+async function fetchAchievements(user) {
+  const [workouts, checkins, completions, nutrition, plan, split] = await Promise.all([
+    supabase.from("workout_logs").select("date,created_at,in_progress,total_volume,duration_mins,exercises").eq("user_id", user.id).eq("in_progress", false).order("date", { ascending: true }).limit(2000),
+    supabase.from("morning_checkins").select("date,score,data").eq("user_id", user.id).order("date", { ascending: true }).limit(2000),
+    supabase.from("habit_completions").select("habit_id,date").eq("user_id", user.id).limit(10000),
+    supabase.from("nutrition_logs").select("date,total_calories,total_protein,is_training_day").eq("user_id", user.id).limit(2000),
+    readNutritionPlan(user.id),
+    readWorkoutSplit(user.id),
+  ]);
+  const failed = [workouts, checkins, completions, nutrition].find(result => result.error);
+  if (failed) throw new Error(failed.error.message);
+  return computeAchievements({
+    workouts: workouts.data || [], checkins: checkins.data || [], habitCompletions: completions.data || [], nutritionLogs: nutrition.data || [],
+    nutritionPlan: plan.data || null, sessions: split.data?.sessions || [], planStartKey: split.data?.programme_started_at ? String(split.data.programme_started_at).slice(0, 10) : null,
+  });
+}
+const badgesSeenKey = userId => `track3d-badges-seen-${userId}`;
+const readSeenBadges = userId => { try { const value = JSON.parse(localStorage.getItem(badgesSeenKey(userId)) || "null"); return Array.isArray(value) ? value : null; } catch { return null; } };
+const markBadgesSeen = (userId, ids) => {
+  try { localStorage.setItem(badgesSeenKey(userId), JSON.stringify([...new Set([...(readSeenBadges(userId) || []), ...ids])])); } catch { /* storage unavailable */ }
+};
+const badgeDate = dateKey => new Date(`${dateKey}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" });
+
+function BadgeTile({ badge }) {
+  const { current, target, unit } = badge.progress;
+  return (
+    <div data-testid={`badge-${badge.id}`} data-earned={badge.earned ? "true" : "false"} title={badge.description}
+      style={{ padding: "12px 8px", borderRadius: 8, textAlign: "center", border: `1px solid ${badge.earned ? "rgba(255,210,63,.55)" : BORDER}`, background: badge.earned ? "linear-gradient(160deg, rgba(255,210,63,.12), rgba(0,255,178,.04))" : SURFACE2 }}>
+      <div aria-hidden="true" style={{ fontSize: 26, lineHeight: 1, filter: badge.earned ? "none" : "grayscale(1)", opacity: badge.earned ? 1 : 0.35 }}>{badge.icon}</div>
+      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, letterSpacing: 1, color: badge.earned ? "#FFD23F" : "#8AABB8", marginTop: 8, lineHeight: 1.4 }}>{badge.title}</div>
+      <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 4, lineHeight: 1.4 }}>{badge.description}</div>
+      {badge.earned ? (
+        <div style={{ fontSize: 9, color: NEON, marginTop: 6 }}>Earned {badgeDate(badge.earnedOn)}</div>
+      ) : (
+        <div style={{ marginTop: 6 }}>
+          <div role="progressbar" aria-label={`${badge.title} progress`} aria-valuemin={0} aria-valuemax={target} aria-valuenow={current} style={{ height: 4, background: BORDER, borderRadius: 2, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${Math.min(100, (current / target) * 100)}%`, background: NEON2 }} />
+          </div>
+          <div style={{ fontSize: 8, color: "#6F8792", marginTop: 4 }}>{current.toLocaleString("en-GB")}{unit ? ` ${unit}` : ""} / {target.toLocaleString("en-GB")}{unit ? ` ${unit}` : ""}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Profile → Achievements: every badge, earned first within each group.
+function AchievementsSection({ user }) {
+  const [badges, setBadges] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!user) return;
+    fetchAchievements(user).then(list => { setBadges(list); markBadgesSeen(user.id, list.filter(badge => badge.earned).map(badge => badge.id)); })
+      .catch(() => setError("Your achievements couldn't be loaded right now."));
+  }, [user]);
+  const earned = badges?.filter(badge => badge.earned).length || 0;
+  return (
+    <section data-testid="achievements" aria-labelledby="achievements-title" style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
+        <h2 id="achievements-title" className="t3d-ctitle" style={{ margin: 0 }}>ACHIEVEMENTS</h2>
+        {badges && <span style={{ fontSize: 10, color: "#FFD23F" }}>{earned} of {badges.length} earned</span>}
+      </div>
+      {error ? <div role="alert" style={{ fontSize: 11, color: "#FFB547" }}>{error}</div>
+        : !badges ? <div style={{ fontSize: 11, color: "#8AABB8" }}>Loading your badges...</div>
+          : ACHIEVEMENT_CATEGORIES.map(category => {
+            const group = badges.filter(badge => badge.category === category.id).sort((a, b) => Number(b.earned) - Number(a.earned));
+            return (
+              <div key={category.id} style={{ marginBottom: 14 }}>
+                <h3 style={{ margin: "0 0 8px", fontSize: 9, fontWeight: 600, letterSpacing: 2, color: "#6F8792" }}>{category.label.toUpperCase()}</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 8 }}>
+                  {group.map(badge => <BadgeTile key={badge.id} badge={badge} />)}
+                </div>
+              </div>
+            );
+          })}
+    </section>
+  );
+}
+
+// The badges just earned, as a celebration line (workout complete, dashboard).
+function NewBadgesNotice({ badges, onSeeAll, onDismiss }) {
+  if (!badges.length) return null;
+  return (
+    <div data-testid="new-badges" role="status" style={{ marginBottom: 14, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(255,210,63,.6)", background: "linear-gradient(160deg, rgba(255,210,63,.14), rgba(255,140,0,.04))", textAlign: "left" }}>
+      <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#FFD23F", letterSpacing: 2, marginBottom: 8 }}>{badges.length === 1 ? "NEW BADGE UNLOCKED" : `${badges.length} NEW BADGES UNLOCKED`}</div>
+      {badges.map(badge => (
+        <div key={badge.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
+          <span aria-hidden="true" style={{ fontSize: 22 }}>{badge.icon}</span>
+          <span style={{ fontSize: 12, color: "#E0EAF0" }}><strong style={{ color: "#FFD23F", fontWeight: 600 }}>{badge.title}</strong> · {badge.description}</span>
+        </div>
+      ))}
+      {(onSeeAll || onDismiss) && (
+        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+          {onSeeAll && <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: "#FFD23F", color: "#FFD23F" }} onClick={onSeeAll}>SEE ALL BADGES</button>}
+          {onDismiss && <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: BORDER, color: "#8AABB8" }} onClick={onDismiss}>DISMISS</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Account (Profile → Account) ─────────────────────────────────────────────
 // Health data consent (with withdrawal), Download my data (a ZIP with one
 // JSON file per table and the progress photos, once a day) and Delete my
@@ -12611,7 +12769,7 @@ export default function App() {
               </span>
             </button>
           ))}
-          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} profile={profile} onProfileSaved={profileSaved} workoutBannerShown={activeBanners.some(banner => banner.tab === "fitness")} />}
+          {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} profile={profile} onProfileSaved={profileSaved} workoutBannerShown={activeBanners.some(banner => banner.tab === "fitness")} onOpenProfile={() => setProfileOpen(true)} />}
           <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
           <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} profile={profile} onProfileChange={setProfile} />}
@@ -12625,6 +12783,7 @@ export default function App() {
               {profile ? (
                 <ProfileForm user={user} profile={profile} today={todayKey} onCancel={() => setProfileOpen(false)} onSaved={saved => { profileSaved(saved); setProfileOpen(false); }} />
               ) : <div style={{ fontSize: 11, color: "#8AABB8", padding: "10px 0" }}>Loading your profile...</div>}
+              <AchievementsSection user={user} />
               <AccountSection user={user} consent={consent} timeZone={homeTimeZone} onWithdrawConsent={() => recordConsent(false)} onDeleted={accountDeleted} />
             </div>
           </div>
