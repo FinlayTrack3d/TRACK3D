@@ -52,8 +52,13 @@ test("set logger suggests the reps to aim for and the weight, and says why", () 
   // Later sets keep today's weight; the aim comes from last time's set at that weight.
   // Set 2 follows set 2 last time, not the weight set 1 moved to today.
   assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 1, lastSets: last([12], [8], [7]), todaySets: [{ weight: "45", reps: "8" }] }), { weight: "42.5", reps: "8", note: "Last time 8 × 42.5 kg. Aim for 8." });
-  // A big jump for a light weight isn't made for you.
-  assert.equal(setLoggerSuggestion({ ranges: ["12-15"], setIndex: 0, lastSets: [{ weight: "10", reps: "15" }], bigStep: true }).weight, "10");
+  // Light, high-rep work: the top of a 15-20 range on every set still moves
+  // the weight up, even though it is a big step; aim for the bottom of the range.
+  assert.deepEqual(setLoggerSuggestion({ ranges: ["15-20", "15-20"], setIndex: 0, lastSets: [{ weight: "10", reps: "20" }, { weight: "10", reps: "20" }], increment: 2.5, bigStep: true }),
+    { weight: "12.5", reps: "15", note: "Every set reached the top of its range last time, so 12.5 kg today. It's a big step at this weight: aim for 15, and if you can't get 15 with good form, go back to 10 kg." });
+  assert.equal(setLoggerSuggestion({ ranges: ["12-15"], setIndex: 0, lastSets: [{ weight: "10", reps: "15" }], bigStep: true }).weight, "12.5");
+  // Set 2 of a 12-15 exercise follows set 2 last time up too.
+  assert.equal(setLoggerSuggestion({ ranges: ["12-15", "12-15"], setIndex: 1, lastSets: [{ weight: "8", reps: "15" }, { weight: "8", reps: "15" }], increment: 2, bigStep: true, todaySets: [{ weight: "10", reps: "13" }] }).weight, "10");
   // No history: aim for the top of the range; the weight is yours to choose.
   assert.deepEqual(setLoggerSuggestion({ ranges: range, setIndex: 0 }), { weight: "", reps: "8", note: "No history yet: pick a weight you can lift for 6-8 reps with good form." });
   // Bodyweight: 0 kg stays 0 kg, aim for one more rep.
@@ -97,4 +102,28 @@ test("well under the range last time: drop the weight to reach the top of it", (
   assert.deepEqual(setLoggerSuggestion({ ranges: ["10-12"], setIndex: 0, lastSets: [{ weight: "20", reps: "9" }] }), { weight: "20", reps: "10", note: "Last time 9 × 20 kg. Aim for 10." });
   // Heavier: 60 kg × 5 on 8-10 → 52.5 kg (Epley estimate for 10, in 2.5 kg steps).
   assert.equal(setLoggerSuggestion({ ranges: ["8-10"], setIndex: 0, lastSets: [{ weight: "60", reps: "5" }] }).weight, "52.5");
+});
+
+test("the halfway check-in compares today's sets with the same sets last time", async () => {
+  const { midSessionCheckIn, nextUnfinishedExercise } = await import("../lib/fitness-session.js");
+  const exercises = [{ name: "Bench Press", sets: 2, reps: ["6-8", "6-8"] }, { name: "Row", sets: 2, reps: ["8-10"] }];
+  const lastSetsByExercise = [[{ weight: "80", reps: "8" }, { weight: "80", reps: "7" }], []];
+  // Not halfway yet with one set of four.
+  assert.equal(midSessionCheckIn({ exercises, completedSets: { 0: [{ weight: "80", reps: "8" }] }, lastSetsByExercise }).halfway, false);
+  const strong = midSessionCheckIn({ exercises, completedSets: { 0: [{ weight: "82.5", reps: "8" }, { weight: "80", reps: "7" }] }, lastSetsByExercise });
+  assert.deepEqual({ halfway: strong.halfway, better: strong.better, same: strong.same, under: strong.under, verdict: strong.verdict }, { halfway: true, better: 1, same: 1, under: 0, verdict: "strong" });
+  assert.deepEqual(strong.lines, ["Bench Press: 8×82.5kg, 7×80kg (last time 8×80kg, 7×80kg)"]);
+  assert.deepEqual(strong.remaining, ["Row"]);
+  const off = midSessionCheckIn({ exercises, completedSets: { 0: [{ weight: "80", reps: "5" }, { weight: "80", reps: "4" }] }, lastSetsByExercise });
+  assert.equal(off.verdict, "off");
+  assert.equal(off.under, 2);
+  // Every set logged: past halfway, nothing to check in about.
+  assert.equal(midSessionCheckIn({ exercises, completedSets: { 0: [{}, {}], 1: [{}, {}] }, lastSetsByExercise }).halfway, false);
+
+  // After finishing an exercise: the next unfinished one, going round to a missed one.
+  const three = [{ sets: 2 }, { sets: 2 }, { sets: 2 }];
+  assert.equal(nextUnfinishedExercise(three, { 0: [{}, {}] }, 0), 1);
+  assert.equal(nextUnfinishedExercise(three, { 0: [{}, {}], 2: [{}, {}] }, 2), 1, "back to the missed middle one");
+  assert.equal(nextUnfinishedExercise(three, { 0: [{}], 1: [{}, {}], 2: [{}, {}] }, 2), 0);
+  assert.equal(nextUnfinishedExercise(three, { 0: [{}, {}], 1: [{}, {}], 2: [{}, {}] }, 2), null);
 });

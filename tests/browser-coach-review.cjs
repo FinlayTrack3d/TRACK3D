@@ -241,6 +241,23 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
       { id: 'p2', user_id: user.id, date: '2026-09-30', session_name: 'Lower A', in_progress: false, created_at: '2026-09-30T12:00:00Z', duration_mins: 45, total_volume: 1500, exercises: [logged('Squat', 100, 5)] },
     ];
   }
+  // A two-exercise session today, done once before a week ago.
+  if (['missedexercise', 'checkin', 'checkinoff', 'workoutlayout', 'historyfill'].includes(scenario)) {
+    tables.workout_splits = [{ id: 's', user_id: user.id, programme_started_at: shiftKey(today, -30) + 'T08:00:00Z', sessions: [{ name: 'Push A', days: [dayCodes[todayDow]], exercises: [
+      { name: 'Bench Press', sets: 2, reps: ['6-8', '6-8'] },
+      { name: 'Row', sets: 2, reps: ['8-10', '8-10'] },
+    ], approval: { approved: true } }] }];
+    const lastWeek = shiftKey(today, -7);
+    tables.workout_logs = [{ id: 'lw', user_id: user.id, date: lastWeek, session_name: 'Push A', in_progress: false, created_at: `${lastWeek}T18:00:00Z`, duration_mins: 40, total_volume: 2400, exercises: [
+      { name: 'Bench Press', prescribed_sets: 2, prescribed_reps: ['6-8', '6-8'], sets: [{ weight: '80', reps: '8' }, { weight: '80', reps: '7' }] },
+      { name: 'Row', prescribed_sets: 2, prescribed_reps: ['8-10', '8-10'], sets: [{ weight: '60', reps: '10' }, { weight: '60', reps: '10' }] },
+    ] }];
+    // historyfill: two days ago, set 3 of the bench and the whole row weren't logged.
+    if (scenario === 'historyfill') tables.workout_logs.unshift({ id: 'h2', user_id: user.id, date: shiftKey(today, -2), session_name: 'Push A', in_progress: false, created_at: `${shiftKey(today, -2)}T18:00:00Z`, duration_mins: 30, total_volume: 1280, exercises: [
+      { name: 'Bench Press', prescribed_sets: 3, prescribed_reps: ['6-8', '6-8', '6-8'], sets: [{ weight: '80', reps: '8', setNum: 1 }, { weight: '80', reps: '8', setNum: 2 }] },
+      { name: 'Row', prescribed_sets: 2, prescribed_reps: ['8-10', '8-10'], sets: [] },
+    ] });
+  }
   // Ten finished workouts two months ago, the bench at 100kg: badges to show.
   if (scenario === 'badgesprofile' || scenario === 'badgesintro') {
     tables.workout_logs = Array.from({ length: 10 }, (_, index) => {
@@ -341,6 +358,10 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
         if (scenario === 'streamcoach') {
           const lines = [{ type: 'partial', message: 'Next set:' }, { type: 'partial', message: 'Next set: 10 reps at 20kg' }, { type: 'final', message: 'Next set: 10 reps at 20kg, then rest 90 seconds.', insights: [], actions: [], activePain: false, conversationId: 'c1' }];
           return route.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson; charset=utf-8' }, body: lines.map(l => JSON.stringify(l)).join('\n') + '\n' });
+        }
+        if (/HALFWAY CHECK-IN/.test(body.message)) {
+          if (scenario === 'checkinoff') return route.fulfill({ status: 502, json: { error: 'Coach provider failed' } });
+          return route.fulfill({ json: { message: "Halfway and you're smashing it: the bench is up on last week. Keep it up.", insights: [], actions: [], activePain: false, conversationId: 'c1' } });
         }
         if (/permanently/i.test(body.message)) return route.fulfill({ json: { message: "I can't change your saved plan from here — use CHANGE PLAN on the Fitness page. For today, tap swap.", insights: [], actions: [], activePain: false, planChangeHint: true, conversationId: 'c1' } });
         return route.fulfill({ json: /pain/i.test(body.message) ? { message: 'Stop that exercise for today — get it checked by a physio or doctor if it continues.', insights: [], actions: [], activePain: true, safetyStop: true, conversationId: 'c1' } : { message: 'Next set: 10 reps.', insights: [], actions: [], activePain: false, conversationId: 'c1' } });
@@ -603,7 +624,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByLabel('Weight in kilograms').fill('60');
     await page.getByRole('button', { name: 'Log set' }).click();
     await page.getByText('SET 2 OF 3').waitFor();
-    await page.getByRole('button', { name: '← BACK TO FITNESS · PROGRESS SAVED' }).click();
+    await page.getByRole('button', { name: /← BACK TO FITNESS.*PROGRESS SAVED/ }).click();
     await page.getByRole('button', { name: 'Switch workout' }).click();
     const other = page.locator('.t3d-card').filter({ has: page.getByRole('heading', { name: 'OTHER WORKOUTS' }) }).getByRole('button', { name: /^Pull A/ });
     await other.click();
@@ -697,7 +718,7 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.getByText('SET 2 OF 3').waitFor();
     await page.getByRole('button', { name: 'SKIP' }).waitFor();
     found.workout = await small();
-    await page.getByRole('button', { name: '← BACK TO FITNESS · PROGRESS SAVED' }).click();
+    await page.getByRole('button', { name: /← BACK TO FITNESS.*PROGRESS SAVED/ }).click();
     await page.getByRole('heading', { level: 2, name: 'YOUR WEEKLY PLAN' }).waitFor();
     found.fitness = await small();
     for (const tab of ['MORNING', 'NUTRITION', 'HABITS']) {
@@ -853,6 +874,93 @@ const londonKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Lon
     await page.waitForTimeout(1500);
     assert.equal(await page.getByTestId('badges-intro').count(), 0);
     assert.equal(await page.getByTestId('new-badges').count(), 0);
+  } else if (['missedexercise', 'checkin', 'checkinoff', 'workoutlayout'].includes(scenario)) {
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: /START WORKOUT/ }).first().click();
+    await page.getByText('SET 1 OF 2').waitFor({ timeout: 10000 });
+    const exerciseName = () => page.getByTestId('exercise-name').textContent();
+    const logSet = async (reps = null) => {
+      if (reps !== null) await page.getByLabel('Reps', { exact: true }).fill(String(reps));
+      await page.getByRole('button', { name: 'Log set' }).click();
+      await page.waitForTimeout(300);
+    };
+    const halfway = () => chats.filter(chat => chat.coach && /HALFWAY CHECK-IN/.test(chat.message || ''));
+    if (scenario === 'missedexercise') {
+      // Bench passed over: finishing the row goes back to it, not to WORKOUT COMPLETE.
+      await page.getByRole('button', { name: 'Next exercise' }).click();
+      await page.getByTestId('exercise-name').filter({ hasText: 'Row' }).waitFor();
+      await logSet();
+      await logSet();
+      await page.getByTestId('missed-exercise').waitFor();
+      assert.equal(await exerciseName(), 'Bench Press');
+      assert.match(await page.getByTestId('missed-exercise').textContent(), /You haven't logged Bench Press yet/);
+      assert.equal(await page.getByText('WORKOUT COMPLETE').count(), 0);
+      await logSet();
+      assert.equal(await page.getByTestId('missed-exercise').count(), 0, 'the note goes once a set is logged');
+      await logSet();
+      await page.getByText('WORKOUT COMPLETE').waitFor({ timeout: 10000 });
+    } else if (scenario === 'checkin') {
+      // Two of four sets: the coach checks in once, in the minimised chat.
+      await logSet();
+      assert.equal(halfway().length, 0, 'not before halfway');
+      await logSet();
+      await page.getByTestId('compact-coach').getByText("Halfway and you're smashing it").waitFor();
+      const prompt = halfway()[0].message;
+      assert.match(prompt, /So far: 2 of 4 sets\. Against the same sets last time: 1 better, 1 about the same, 0 under\./);
+      assert.match(prompt, /Bench Press: 8×80kg, 8×80kg \(last time 8×80kg, 7×80kg\)/);
+      assert.match(prompt, /Still to do: Row\./);
+      assert.match(prompt, /tell me I'm smashing it and to keep it up/);
+      assert.equal(await page.locator('.t3d-coach-expanded').count(), 0, 'the chat stays minimised');
+      assert.equal(await page.getByText('HALFWAY CHECK-IN').count(), 0, "the app's prompt isn't shown");
+      await logSet();
+      await page.waitForTimeout(1000);
+      assert.equal(halfway().length, 1, 'once per workout');
+      // Kept on the device too, so reopening the workout doesn't send it again.
+      assert.match(await page.evaluate(userId => localStorage.getItem(`track3d-checkin-${userId}`), user.id), new RegExp(`^${user.id}:\\d+$`));
+    } else if (scenario === 'checkinoff') {
+      // Under last time on both sets: a bit off today, with ways to finish
+      // strong. The coach is unavailable here, so the app's own words show.
+      await logSet(5);
+      await logSet(4);
+      await page.getByTestId('compact-coach').getByText(/Halfway there\. You're a bit off it today \(2 sets under last time\)/).waitFor();
+      assert.match(halfway()[0].message, /a bit off it today, tell me to finish strong, and give me 2 practical alternatives/);
+      assert.equal(await page.getByTestId('compact-coach').getByText(/Coach provider failed|Connection error/).count(), 0, 'no error shown');
+    } else {
+      // Back and End share a row; the coach is on screen; delete is below the coach.
+      const back = await page.getByRole('button', { name: /BACK TO FITNESS/ }).boundingBox();
+      const end = await page.getByRole('button', { name: 'END WORKOUT' }).boundingBox();
+      assert(Math.abs(back.y - end.y) < 2, `same row: ${back.y} / ${end.y}`);
+      const coach = await page.getByTestId('compact-coach').boundingBox();
+      assert(coach.y + coach.height <= 844, `coach on screen: ${coach.y + coach.height}`);
+      const remove = await page.getByRole('button', { name: 'delete this workout' }).boundingBox();
+      assert(remove.y > coach.y + coach.height - 1, 'delete is under the coach');
+      assert.equal(await page.getByTestId('last-session').textContent(), 'LAST SESSIONS1 8×80kgS2 7×80kg');
+      if (process.env.SHOT) await page.screenshot({ path: 'workout-layout.png' });
+      await logSet();
+      await page.getByRole('button', { name: /BACK TO FITNESS/ }).getByText('PROGRESS SAVED').waitFor();
+    }
+  } else if (scenario === 'historyfill') {
+    // Sets that weren't logged can be filled in afterwards.
+    await page.getByRole('button', { name: /FITNESS$/ }).last().click();
+    await page.getByRole('button', { name: 'WORKOUT HISTORY' }).click();
+    await page.getByText('1,280 kg lifted').click();
+    await page.getByRole('button', { name: 'EDIT WORKOUT' }).click();
+    assert.equal(await page.getByTestId('history-added-set').count(), 3, 'bench set 3 and both row sets');
+    await page.getByLabel('Bench Press set 3 weight in kilograms').fill('80');
+    await page.getByLabel('Bench Press set 3 reps').fill('6');
+    await page.getByLabel('Row set 1 weight in kilograms').fill('60');
+    await page.getByLabel('Row set 1 reps').fill('10');
+    await page.getByRole('button', { name: '+ ADD A SET' }).first().click();
+    assert.equal(await page.getByLabel('Bench Press set 4 weight in kilograms').inputValue(), '80', 'an extra set starts from the last weight');
+    await page.getByRole('button', { name: 'SAVE CHANGES' }).click();
+    await page.getByRole('button', { name: 'EDIT WORKOUT' }).waitFor();
+    const saved = JSON.parse(writes.filter(w => w.table === 'workout_logs' && w.method === 'PATCH').at(-1).body);
+    assert.deepEqual(saved.exercises[0].sets.map(set => `${set.setNum}:${set.weight}x${set.reps}`), ['1:80x8', '2:80x8', '3:80x6'], 'empty sets are dropped');
+    assert.deepEqual(saved.exercises[1].sets.map(set => `${set.setNum}:${set.weight}x${set.reps}`), ['1:60x10']);
+    assert.equal(saved.exercises[0].sets[2].added, undefined);
+    assert.equal(saved.total_volume, 80 * 8 * 2 + 80 * 6 + 60 * 10);
+    await page.getByText('3/3 SETS COMPLETED').waitFor();
+    await page.getByText('1/2 SETS COMPLETED').waitFor();
   } else if (scenario === 'reviewchip') {
     // Change Plan offers to review the plan and recommend changes, not only ask what to change.
     await page.getByRole('button', { name: /FITNESS$/ }).last().click();

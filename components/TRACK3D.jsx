@@ -9,7 +9,7 @@ import { detectPersonalBest, evaluateProgression, inferIncrement } from "../lib/
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout, coachProposal, proposalsOverlap } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, applyPlanChangeToWorkout, describePlanChange, exerciseMatchesHistory, isApprovalReply, isPlanChangeRequest, planChangeSummary, planOutline } from "../lib/coaching/plan-change";
-import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerSuggestion, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
+import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, midSessionCheckIn, nextUnfinishedExercise, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerSuggestion, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
@@ -509,7 +509,7 @@ const STALE_COACH_ERRORS = /^(Coach returned an invalid response\.?|Coach is una
 
 // planSessions: the whole saved plan, to describe a proposed change before →
 // after (coachContext may hold only today's session).
-function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false, planSessions = null }) {
+function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, title, introduction, activationLabel, openingMessage, compact = false, onAction, onMemoryUpdate, storageKey, pendingPrompt, onConsumedPrompt, coachingV12 = false, coachContext, onStructuredAction, openWithoutPrompt = false, planSessions = null, checkIn = null, onCheckInSent = null }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -562,7 +562,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
 
   const scroll = () => messageListRef.current?.scrollTo({ top: messageListRef.current.scrollHeight, behavior: "smooth" });
 
-  const send = async (msg, { hidden = false } = {}) => {
+  // fallback: what to show instead of an error (the halfway check-in).
+  const send = async (msg, { hidden = false, fallback = "" } = {}) => {
     if (!msg.trim() || loading) return;
     // Close the phone keyboard so the screen returns to its normal size.
     document.activeElement?.blur?.();
@@ -610,7 +611,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
         if (compact && incoming.some(action => action.scope === "permanent" && action.changed !== false)) setExpanded(true);
         setPainActive(Boolean(data.activePain));
         setPainNote("");
-        setMessages([...updated, { role: "assistant", content: data.message || "I don't have enough data to answer that yet.", planChangeHint: Boolean(data.planChangeHint) }]);
+        setMessages([...updated, { role: "assistant", content: data.message || fallback || "I don't have enough data to answer that yet.", planChangeHint: Boolean(data.planChangeHint) }]);
         setLoading(false);
         setTimeout(scroll, 50);
         return;
@@ -628,7 +629,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
       if (memoryMatch && onMemoryUpdate) onMemoryUpdate(memoryMatch[1].trim());
     } catch (error) {
       const isConnectionFailure = !navigator.onLine || error instanceof TypeError;
-      setMessages([...updated, { role: "assistant", error: true, content: isConnectionFailure ? "Connection error. Check your internet connection and try again." : (error.message || "Coach is unavailable right now. Your workout is still saved.") }]);
+      if (fallback) setMessages([...updated, { role: "assistant", content: fallback }]);
+      else setMessages([...updated, { role: "assistant", error: true, content: isConnectionFailure ? "Connection error. Check your internet connection and try again." : (error.message || "Coach is unavailable right now. Your workout is still saved.") }]);
     }
     setLoading(false);
     setTimeout(scroll, 50);
@@ -705,6 +707,18 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPrompt, restored]);
 
+  // The halfway check-in: sent once, without opening the chat, so the
+  // coach's message shows in the minimised chat between sets.
+  const checkInSent = useRef(null);
+  useEffect(() => {
+    if (!checkIn || !restored || loading || checkInSent.current === checkIn.id) return;
+    checkInSent.current = checkIn.id;
+    setStarted(true);
+    send(checkIn.prompt, { hidden: true, fallback: checkIn.fallback });
+    onCheckInSent?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkIn, restored, loading]);
+
   // Messages on screen with their place in the conversation (for the
   // changes proposed under them). The minimised chat shows the last two.
   const visibleEntries = messages.map((m, index) => ({ m, index })).filter(({ m }) => !m.hidden);
@@ -712,9 +726,9 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   const shownIndexes = new Set(shownEntries.map(entry => entry.index));
 
   return (
-    <div className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20 }}>
+    <div data-testid={compact ? "compact-coach" : undefined} className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20, ...(compact ? { borderColor: "rgba(0,255,178,.4)", background: "linear-gradient(160deg, rgba(0,255,178,.06), #0D1318 60%)" } : {}) }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? "#8AABB8" : undefined }}>{title || "AI COACH"}</div>
+        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? NEON : undefined }}>{compact && <span aria-hidden="true">🤖 </span>}{title || "AI COACH"}</div>
         {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
       {!started ? (
@@ -5981,6 +5995,8 @@ function Fitness({ user, isActive = true }) {
   const [activeSession, setActiveSession] = useState(null);
   const [workoutInProgress, setWorkoutInProgress] = useState(false);
   const [exerciseIdx, setExerciseIdx] = useState(0);
+  // The name of an exercise passed over earlier, when the workout went back to it.
+  const [missedExerciseNotice, setMissedExerciseNotice] = useState(null);
   const [setProgress, setSetProgress] = useState({}); // { exerciseIdx: currentSetIdx }
   const [completedSets, setCompletedSets] = useState({}); // { exerciseIdx: [{weight, reps, setNum}] }
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
@@ -6403,6 +6419,7 @@ function withPlanApproval(sessions, now = new Date()) {
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
     setExerciseIdx(0);
+    setMissedExerciseNotice(null);
     setSetProgress({});
     setCompletedSets({});
     setCurrentInputs({});
@@ -6532,6 +6549,7 @@ function withPlanApproval(sessions, now = new Date()) {
     setWorkoutInProgress(false);
     setActiveSession(null);
     setExerciseIdx(0);
+    setMissedExerciseNotice(null);
     setSetProgress({});
     setCompletedSets({});
     setCurrentInputs({});
@@ -6673,6 +6691,36 @@ function withPlanApproval(sessions, now = new Date()) {
     return () => { cancelled = true; };
   }, [view, user, today]);
 
+  // Halfway through a workout the coach checks in once, in the chat below
+  // the logger: smashing it, or a bit off today with ways to finish strong.
+  const [coachCheckIn, setCoachCheckIn] = useState(null);
+  useEffect(() => {
+    if (view !== "workout" || !workoutInProgress || !activeSession || !workoutStart) return;
+    const id = `${user.id}:${workoutStart}`;
+    let sentFor = null;
+    try { sentFor = localStorage.getItem(`track3d-checkin-${user.id}`); } catch { /* storage unavailable */ }
+    if (sentFor === id) return;
+    const result = midSessionCheckIn({ exercises: activeSession.exercises || [], completedSets, lastSetsByExercise: (activeSession.exercises || []).map(exercise => getLastSessionData(exercise) || []) });
+    if (!result.halfway) return;
+    try { localStorage.setItem(`track3d-checkin-${user.id}`, id); } catch { /* storage unavailable */ }
+    const strong = result.verdict === "strong";
+    const prompt = [
+      "HALFWAY CHECK-IN (sent automatically by the app halfway through my workout, not typed by me).",
+      `So far: ${result.logged} of ${result.planned} sets. Against the same sets last time: ${result.better} better, ${result.same} about the same, ${result.under} under.`,
+      ...result.lines.slice(0, 10).map(line => line.slice(0, 300)),
+      result.remaining.length ? `Still to do: ${result.remaining.join(", ")}.` : "",
+      strong
+        ? "In 2-3 short sentences, like a coach beside me: tell me I'm smashing it and to keep it up, naming what's going well. No question, no plan change."
+        : "In 2-4 short sentences, like a coach beside me: say kindly that I'm a bit off it today, tell me to finish strong, and give me 2 practical alternatives for the rest of this session (for example a small weight drop to keep my reps in range, a little more rest between sets, or cutting a set from a remaining exercise). No question, no plan change.",
+    ].filter(Boolean).join("\n").slice(0, 3900); // the coach takes up to 4,000 characters
+    const fallback = strong
+      ? `Halfway there and you're smashing it: ${result.better + result.same} of ${result.better + result.same + result.under} sets at or above last time. Keep it up.`
+      : `Halfway there. You're a bit off it today (${result.under} sets under last time), and that happens. Let's finish strong: drop the weight about 5% to keep your reps in range, or take an extra 30 seconds' rest between sets.`;
+    setCoachCheckIn({ id, prompt, fallback });
+    // Checked each time a set is logged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completedSets, view]);
+
   const finishWorkout = async (setsToSave = completedSets) => {
     if (workoutFinishing) return;
     setWorkoutFinishing(true);
@@ -6735,6 +6783,7 @@ function withPlanApproval(sessions, now = new Date()) {
     const sIdx = getCurrentSetIdx(eIdx);
     const { weight, reps } = setInputsFor(eIdx);
     if (!weight || !reps) return;
+    setMissedExerciseNotice(null);
 
     const priorSets = getExerciseHistory(activeSession.exercises[eIdx]).flatMap(exposure => exposure.sets || []);
     const personalBest = detectPersonalBest({ weight, reps }, priorSets);
@@ -6753,13 +6802,15 @@ function withPlanApproval(sessions, now = new Date()) {
     if (sIdx + 1 < totalSets) {
       setSetProgress(prev => ({ ...prev, [eIdx]: sIdx + 1 }));
     } else {
-      // All sets done for this exercise — auto move to next
-      const nextIdx = eIdx + 1;
-      if (nextIdx < activeSession.exercises.length) {
-        setExerciseIdx(nextIdx);
-      } else {
-        // Workout complete
+      // All sets done for this exercise: on to the next one with sets still
+      // to log. An earlier exercise that was passed over comes back before
+      // the workout ends; END WORKOUT is there to finish without it.
+      const nextIdx = nextUnfinishedExercise(activeSession.exercises, newCompleted, eIdx);
+      if (nextIdx === null) {
         finishWorkout(newCompleted);
+      } else {
+        if (nextIdx < eIdx) setMissedExerciseNotice(activeSession.exercises[nextIdx].name);
+        setExerciseIdx(nextIdx);
       }
     }
   };
@@ -6956,6 +7007,8 @@ function withPlanApproval(sessions, now = new Date()) {
         activationLabel="CHAT WITH FITNESS COACH"
         openingMessage="Give me a brief, practical snapshot of today's training and the single most useful thing to focus on. Do not ask a generic opening question. Finish by inviting me to type if I need help with something specific."
         openWithoutPrompt={Boolean(workoutInProgress && activeSession)}
+        checkIn={workoutInProgress && activeSession ? coachCheckIn : null}
+        onCheckInSent={() => setCoachCheckIn(null)}
         storageKey={`fitness-${user.id}`}
         onAction={applyWorkoutCoachAction}
         onMemoryUpdate={saveCoachMemory}
@@ -7066,9 +7119,16 @@ function withPlanApproval(sessions, now = new Date()) {
 
     return (
       <div className="t3d-fade t3d-workout-screen">
-        <button className="t3d-btn t3d-btn-sm" style={{ alignSelf: "flex-start", flex: "0 0 auto", minHeight: 44 }} onClick={leaveWorkout}>
-          {inProgressSetCount > 0 ? "← BACK TO FITNESS · PROGRESS SAVED" : "← BACK TO FITNESS"}
-        </button>
+        {/* Back and End on one row, so the logger and the coach get the room */}
+        <div data-testid="workout-top-row" style={{ display: "flex", gap: 8, flex: "0 0 auto" }}>
+          <button className="t3d-btn t3d-btn-sm" style={{ flex: 1, minHeight: 44, display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", gap: 2 }} onClick={leaveWorkout}>
+            <span>← BACK TO FITNESS</span>
+            {inProgressSetCount > 0 && <span style={{ fontSize: 7, color: "#8AABB8", letterSpacing: 1 }}>PROGRESS SAVED</span>}
+          </button>
+          <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: "0 0 auto", minHeight: 44, borderColor: "rgba(255,45,120,.55)" }} onClick={() => remainingSetCount > 0 ? setEndWorkoutConfirm(remainingSetCount) : finishWorkout()} disabled={workoutFinishing}>
+            {workoutFinishing ? "SAVING..." : "END WORKOUT"}
+          </button>
+        </div>
         <div className="t3d-card t3d-workout-card">
           {/* Exercise navigation - the full name (long names wrap), with a tiny replace-exercise link */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
@@ -7083,23 +7143,17 @@ function withPlanApproval(sessions, now = new Date()) {
               aria-label="Next exercise" title="Next exercise" onClick={() => { if (exerciseIdx < totalExercises-1) setExerciseIdx(e => e+1); }}>NEXT ▶</button>
           </div>
 
-          {/* Mini progress box */}
-          <div style={{ textAlign: "center", padding: "8px 10px", marginBottom: 10, background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 6 }}>
-            <div style={{ fontSize: 9, color: "#8AABB8", letterSpacing: 1 }}>EXERCISE {exerciseIdx+1} OF {totalExercises}</div>
-            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, letterSpacing: 2, color: exerciseIsComplete ? NEON : "#E0EAF0", marginTop: 3 }}>
-              {exerciseIsComplete ? "COMPLETED ✓" : `SET ${sIdx+1} OF ${totalSets}`}
-            </div>
+          {/* Where you are, in one line */}
+          <div data-testid="workout-progress-line" style={{ display: "flex", justifyContent: "center", alignItems: "baseline", flexWrap: "wrap", gap: "2px 10px", marginBottom: 10, fontSize: 9, color: "#8AABB8", letterSpacing: 1 }}>
+            <span>EXERCISE {exerciseIdx+1} OF {totalExercises}</span>
+            <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, letterSpacing: 2, color: exerciseIsComplete ? NEON : "#E0EAF0" }}>{exerciseIsComplete ? "COMPLETED ✓" : `SET ${sIdx+1} OF ${totalSets}`}</span>
+            <span>{remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN</span>
           </div>
-
-          {/* Sets left / time left, with the primary end-of-workout action on the same line */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
-            <div style={{ color: "#8AABB8", fontSize: 9, letterSpacing: 1 }}>
-              {remainingSetCount} SET{remainingSetCount === 1 ? "" : "S"} LEFT · ~{estimatedMinutesLeft} MIN
+          {missedExerciseNotice && missedExerciseNotice === currentExercise.name && (
+            <div role="status" data-testid="missed-exercise" style={{ marginBottom: 10, padding: "8px 10px", borderRadius: 6, border: "1px solid rgba(255,181,71,.45)", background: "rgba(255,181,71,.08)", color: "#FFD08A", fontSize: 10, lineHeight: 1.5, textAlign: "center" }}>
+              You haven&apos;t logged {currentExercise.name} yet, so here it is before you finish. Use END WORKOUT if you&apos;re skipping it today.
             </div>
-            <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ fontSize: 9, minHeight: 44, borderColor: "rgba(255,45,120,.55)" }} onClick={() => remainingSetCount > 0 ? setEndWorkoutConfirm(remainingSetCount) : finishWorkout()} disabled={workoutFinishing}>
-              {workoutFinishing ? "SAVING..." : "END WORKOUT"}
-            </button>
-          </div>
+          )}
           {endWorkoutConfirm !== null && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.86)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 100 }}>
               <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="end-workout-title" style={{ width: "100%", maxWidth: 340, borderColor: "#FFB547", textAlign: "center" }}>
@@ -7114,12 +7168,6 @@ function withPlanApproval(sessions, now = new Date()) {
               </div>
             </div>
           )}
-          {/* Delete session - kept nearby but deliberately unobtrusive */}
-          <div style={{ textAlign: "right", marginBottom: 10 }}>
-            <button type="button" onClick={() => setDiscardWorkoutWarning(true)}
-              style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 9, padding: "3px 2px", minHeight: 44, textDecoration: "underline" }}>delete this workout</button>
-          </div>
-
           {activeSession.sessionAdjustment && <div role="status" style={{ margin: "-4px 0 10px", padding: "6px 8px", borderRadius: 5, background: "rgba(255,181,71,.07)", color: "#FFD08A", fontSize: 9, lineHeight: 1.45, textAlign: "center" }}>{activeSession.sessionAdjustment}</div>}
           {workoutSaveError && <div role="alert" style={{ marginBottom: 10, padding: 9, borderRadius: 5, background: "rgba(255,45,120,.07)", border: "1px solid rgba(255,45,120,.3)", color: "#FF8AAD", fontSize: 9, lineHeight: 1.5 }}>{workoutSaveError}</div>}
 
@@ -7134,7 +7182,7 @@ function withPlanApproval(sessions, now = new Date()) {
 
           {/* Current set - the reps/weight inputs and the confirm button are the one decision that matters here */}
           {!restActive && (
-            <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 20, marginBottom: 12, textAlign: "center" }}>
+            <div style={{ background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 8, padding: 14, marginBottom: 10, textAlign: "center" }}>
               <div className="workout-set-fields">
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
@@ -7170,18 +7218,19 @@ function withPlanApproval(sessions, now = new Date()) {
 
               {/* Rep range and tempo for this set, directly below the inputs */}
               {(currentSetRepRange || currentExercise.tempo) && (
-                <div style={{ marginTop: 14 }}>
+                <div style={{ marginTop: 10 }}>
                   <div style={{ display: "flex", justifyContent: "center", gap: 16, fontSize: 12, color: "#E0EAF0", letterSpacing: 1, fontWeight: 700 }}>
                     {currentSetRepRange && <div>REP RANGE: {currentSetRepRange}</div>}
                     {currentExercise.tempo && <div>TEMPO {currentExercise.tempo}</div>}
                   </div>
                   {currentExercise.tempo && <div style={{ marginTop: 5, fontSize: 9, color: "#6F8792" }}>Tempo = seconds to lower · pause · lift · pause</div>}
-                  <div style={{ marginTop: 11, paddingTop: 9, borderTop: `1px solid ${BORDER}` }}>
+                  {/* Each set's range, only when the sets differ */}
+                  {new Set(exerciseRepRanges).size > 1 && <div style={{ marginTop: 9, paddingTop: 8, borderTop: `1px solid ${BORDER}` }}>
                     <div style={{ color: "#8AABB8", fontSize: 8, letterSpacing: 1.2, marginBottom: 6 }}>REP RANGES</div>
                     <div style={{ display: "flex", justifyContent: "center", gap: 6, flexWrap: "wrap" }}>
                       {exerciseRepRanges.map((range, index) => <span key={index} style={{ padding: "5px 7px", borderRadius: 4, border: `1px solid ${index === sIdx ? "rgba(0,200,255,.55)" : BORDER}`, background: index === sIdx ? "rgba(0,200,255,.1)" : "rgba(255,255,255,.015)", color: index === sIdx ? NEON2 : "#A9BBC3", fontSize: 9 }}>SET {index + 1} · {range}</span>)}
                     </div>
-                  </div>
+                  </div>}
                 </div>
               )}
 
@@ -7197,16 +7246,11 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
           )}
 
-          {/* Last session scores */}
+          {/* Last session, in one line */}
           {lastSets && lastSets.length > 0 && (
-            <div style={{ background: "rgba(0,200,255,.04)", border: "1px solid rgba(0,200,255,.1)", borderRadius: 6, padding: 10, marginBottom: 12 }}>
-              <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 2, marginBottom: 6, fontFamily: "'Orbitron',monospace" }}>LAST SESSION</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                {lastSets.slice(0, 4).map((s, i) => (
-                  <div key={i} style={{ fontSize: 10, color: NEON2 }}>Set {i+1}: {Number(s.reps) > 0 ? `${s.reps} reps @ ${s.weight}kg` : "skipped"}</div>
-                ))}
-                {lastSets.length > 4 && <div style={{ fontSize: 10, color: "#4A6070" }}>+{lastSets.length - 4} more</div>}
-              </div>
+            <div data-testid="last-session" style={{ display: "flex", gap: "2px 8px", flexWrap: "wrap", alignItems: "baseline", fontSize: 9, color: NEON2, marginBottom: 10, padding: "6px 8px", background: "rgba(0,200,255,.04)", border: "1px solid rgba(0,200,255,.1)", borderRadius: 6 }}>
+              <span style={{ color: "#E0EAF0", letterSpacing: 1.5, fontFamily: "'Orbitron',monospace", fontSize: 8 }}>LAST SESSION</span>
+              {lastSets.map((s, i) => <span key={i}>S{i+1} {Number(s.reps) > 0 ? `${s.reps}×${s.weight}kg` : "skipped"}</span>)}
             </div>
           )}
 
@@ -7280,6 +7324,11 @@ function withPlanApproval(sessions, now = new Date()) {
           )}
         </div>
         {fitnessCoach}
+        {/* Deleting the workout: out of the way, under the coach */}
+        <div style={{ textAlign: "center", flex: "0 0 auto" }}>
+          <button type="button" onClick={() => setDiscardWorkoutWarning(true)}
+            style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 9, padding: "0 6px", minHeight: 44, textDecoration: "underline" }}>delete this workout</button>
+        </div>
       </div>
     );
   }
@@ -8191,10 +8240,31 @@ function withPlanApproval(sessions, now = new Date()) {
     </div>
   ) : null;
 
+  // Sets that weren't logged show as empty rows to fill in (marked added);
+  // ones left empty are dropped again when the edit is saved.
   const beginHistoryEdit = () => {
     setHistoryEditOriginal(structuredClone(viewingSession));
+    setViewingSession(current => ({
+      ...current,
+      exercises: (current.exercises || []).map(exercise => {
+        if (exercise?.activity) return exercise;
+        const sets = exercise.sets || [];
+        const missing = Math.max(0, (Number(exercise.prescribed_sets) || 0) - sets.length);
+        return { ...exercise, sets: [...sets, ...Array.from({ length: missing }, (_, index) => ({ weight: "", reps: "", setNum: sets.length + index + 1, added: true }))] };
+      }),
+    }));
     setEditingHistorySession(true);
     setViewingExercise(null);
+  };
+
+  const addHistorySet = exerciseIndex => {
+    setViewingSession(current => ({
+      ...current,
+      exercises: (current.exercises || []).map((exercise, index) => index !== exerciseIndex ? exercise : {
+        ...exercise,
+        sets: [...(exercise.sets || []), { weight: [...(exercise.sets || [])].reverse().find(set => set.weight !== "")?.weight ?? "", reps: "", setNum: (exercise.sets || []).length + 1, added: true }],
+      }),
+    }));
   };
 
   const cancelHistoryEdit = () => {
@@ -8227,7 +8297,13 @@ function withPlanApproval(sessions, now = new Date()) {
     if (!viewingSession?.id || historySaving) return;
     setHistorySaving(true);
     try {
-      const updated = { ...viewingSession, total_volume: workoutVolume(viewingSession.exercises || []) };
+      // Added sets count once they have reps; empty ones are dropped.
+      const exercises = (viewingSession.exercises || []).map(exercise => exercise?.activity ? exercise : {
+        ...exercise,
+        sets: (exercise.sets || []).filter(set => !set.added || Number(set.reps) > 0)
+          .map(({ added, ...set }, index) => ({ ...set, ...(added ? { weight: set.weight === "" ? "0" : set.weight, repRange: repTargets(exercise.prescribed_reps, index + 1)[index] } : {}), setNum: index + 1 })),
+      });
+      const updated = { ...viewingSession, exercises, total_volume: workoutVolume(exercises) };
       const { error } = await supabase.from("workout_logs").update({ exercises: updated.exercises, total_volume: updated.total_volume }).eq("id", updated.id).eq("user_id", user.id);
       if (error) throw error;
 
@@ -9052,13 +9128,15 @@ function withPlanApproval(sessions, now = new Date()) {
                           {!editingHistorySession && <div style={{ textAlign: "right" }}><div style={{ fontSize: 9, color: loggedSets.length < prescribedSetCount ? "#FFB547" : NEON }}>{loggedSets.length}/{prescribedSetCount || loggedSets.length} SETS COMPLETED</div><div style={{ fontSize: 8, color: NEON2, marginTop: 3 }}>VIEW PROGRESS →</div></div>}
                         </div>
                         {editingHistorySession ? <div style={{ display: "grid", gap: 6 }}>
-                          {(ex.sets || []).map((set, setIndex) => <div key={setIndex} style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr auto", alignItems: "end", gap: 6 }}>
-                            <span style={{ color: "#6F8792", fontSize: 8, paddingBottom: 8 }}>S{setIndex + 1}</span>
-                            <label style={{ color: "#8AABB8", fontSize: 7 }}>KG<input className="t3d-input" type="number" inputMode="decimal" aria-label={`${ex.name} set ${setIndex + 1} weight in kilograms`} value={set.weight ?? ""} onChange={event => updateHistorySet(i, setIndex, "weight", event.target.value)} /></label>
-                            <label style={{ color: "#8AABB8", fontSize: 7 }}>REPS<input className="t3d-input" type="number" inputMode="numeric" aria-label={`${ex.name} set ${setIndex + 1} reps`} value={set.reps ?? ""} onChange={event => updateHistorySet(i, setIndex, "reps", event.target.value)} /></label>
+                          {(ex.sets || []).map((set, setIndex) => <div key={setIndex} data-testid={set.added ? "history-added-set" : undefined} style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr auto", alignItems: "end", gap: 6 }}>
+                            <span style={{ color: set.added ? "#FFB547" : "#6F8792", fontSize: 8, paddingBottom: 8, lineHeight: 1.3 }}>S{setIndex + 1}{set.added && <><br />NOT LOGGED</>}</span>
+                            <label style={{ color: "#8AABB8", fontSize: 7 }}>KG<input className="t3d-input" type="number" inputMode="decimal" aria-label={`${ex.name} set ${setIndex + 1} weight in kilograms`} value={set.weight ?? ""} placeholder={set.added ? "kg" : undefined} onChange={event => updateHistorySet(i, setIndex, "weight", event.target.value)} /></label>
+                            <label style={{ color: "#8AABB8", fontSize: 7 }}>REPS<input className="t3d-input" type="number" inputMode="numeric" aria-label={`${ex.name} set ${setIndex + 1} reps`} value={set.reps ?? ""} placeholder={set.added ? "reps" : undefined} onChange={event => updateHistorySet(i, setIndex, "reps", event.target.value)} /></label>
                             <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" aria-label={`Delete ${ex.name} set ${setIndex + 1}`} style={{ minWidth: 44, minHeight: 44, padding: 0 }} onClick={() => deleteHistorySet(i, setIndex)}>×</button>
                           </div>)}
                           {(ex.sets || []).length === 0 && <div style={{ color: "#6F8792", fontSize: 9 }}>No sets remain for this exercise.</div>}
+                          <button type="button" className="t3d-btn t3d-btn-sm" style={{ justifySelf: "start", minHeight: 44 }} onClick={() => addHistorySet(i)}>+ ADD A SET</button>
+                          {(ex.sets || []).some(set => set.added) && <div style={{ color: "#6F8792", fontSize: 8, lineHeight: 1.4 }}>Fill in the reps for any set you did but didn&apos;t log. Sets left empty aren&apos;t saved.</div>}
                         </div> : <div style={{ display: "grid", gap: 5 }}>
                           {Array.from({ length: prescribedSetCount || loggedSets.length }, (_, setIndex) => {
                             const set = loggedSets[setIndex];

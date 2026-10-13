@@ -66,6 +66,6 @@ a {
  .workout-set-fields { grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
  .workout-set-fields > .workout-field { min-width: 0; }
  .workout-set-fields > .workout-field:last-child { grid-column: 2; grid-row: 1; }
- .workout-number { height: 108px !important; font-size: 34px !important; }
+ .workout-number { height: 88px !important; font-size: 32px !important; }
  .workout-log-set { grid-column: 1 / -1; grid-row: 2; width: 100% !important; min-height: 50px !important; margin: 0; }
 }
