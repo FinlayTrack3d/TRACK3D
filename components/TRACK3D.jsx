@@ -527,6 +527,41 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   const endRef = useRef(null);
   const messageListRef = useRef(null);
 
+  // Unread coach messages (playbook Rule 49a): the coach shows grey when
+  // there is nothing new, yellow with a count when there is. A reply to
+  // something the user just asked is not "new"; opening the coach reads all.
+  const readKey = storageKey ? `track3d-coach-read-${storageKey}` : null;
+  const [assistantRead, setAssistantRead] = useState(() => {
+    try { return readKey ? Number(localStorage.getItem(readKey)) || 0 : 0; } catch { return 0; }
+  });
+  // Coach messages the user didn't ask for (a check-in, a review), in order.
+  const unpromptedAssistant = [];
+  messages.forEach((message, index) => {
+    if (message.role !== "assistant" || message.hidden || message.error) return;
+    const before = messages.slice(0, index).reverse().find(item => item.role !== "note");
+    if (!(before?.role === "user" && !before.hidden)) unpromptedAssistant.push(index);
+  });
+  const assistantTotal = unpromptedAssistant.length;
+  const unreadCount = compact && !expanded ? Math.max(0, assistantTotal - Math.min(assistantRead, assistantTotal)) : 0;
+  // Opening or minimising the coach reads everything in it.
+  const markRead = () => {
+    setAssistantRead(assistantTotal);
+    try { if (readKey) localStorage.setItem(readKey, String(assistantTotal)); } catch { /* storage unavailable */ }
+  };
+  const toggleExpanded = () => { markRead(); setExpanded(value => !value); };
+
+  // A new workout starts a fresh page in the minimised chat: last
+  // workout's messages stay in the history, not between today's sets.
+  useEffect(() => {
+    if (!storageKey) return;
+    const divider = event => {
+      if (event.detail?.storageKey !== storageKey) return;
+      setMessages(current => (current.some(message => message.role === "assistant" || message.role === "user") ? [...current, { role: "note", content: event.detail?.note || "New workout", divider: true }] : current));
+    };
+    window.addEventListener("track3d-coach-divider", divider);
+    return () => window.removeEventListener("track3d-coach-divider", divider);
+  }, [storageKey]);
+
   useEffect(() => {
     if (!storageKey) return;
     try {
@@ -640,6 +675,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
 
   const activate = () => {
     setStarted(true);
+    markRead();
     if (compact) setExpanded(true);
     if (!openWithoutPrompt) send(openingMessage || "Give me a quick assessment of my day so far and what I should focus on.", { hidden: true });
   };
@@ -649,6 +685,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     let result;
     try { result = await onAction(action, permanent); } catch (error) { result = { ok: false, message: `Not saved: ${error?.message || "something went wrong"}.` }; }
     setMessages(previous => [...previous, { role: "assistant", content: result?.message || (result?.ok ? "Done." : "Nothing was changed.") }]);
+    // The result of a tap is not news.
+    setAssistantRead(previous => { const next = previous + 1; try { if (readKey) localStorage.setItem(readKey, String(next)); } catch { /* storage unavailable */ } return next; });
     setTimeout(scroll, 50);
   };
 
@@ -724,14 +762,18 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   // Messages on screen with their place in the conversation (for the
   // changes proposed under them). The minimised chat shows the last two.
   const visibleEntries = messages.map((m, index) => ({ m, index })).filter(({ m }) => !m.hidden);
-  const shownEntries = compact && !expanded ? visibleEntries.slice(-2) : visibleEntries;
+  const lastDivider = visibleEntries.map(entry => entry.m.divider ? entry.index : -1).reduce((a, b) => Math.max(a, b), -1);
+  const shownEntries = compact && !expanded ? visibleEntries.filter(entry => entry.index > lastDivider).slice(-2) : visibleEntries;
   const shownIndexes = new Set(shownEntries.map(entry => entry.index));
 
   return (
-    <div data-testid={compact ? "compact-coach" : undefined} className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20, ...(compact ? { borderColor: "rgba(0,255,178,.4)", background: "linear-gradient(160deg, rgba(0,255,178,.06), #0D1318 60%)" } : {}) }}>
+    <div data-testid={compact ? "compact-coach" : undefined} data-unread={compact ? unreadCount : undefined} className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20, ...(compact ? { borderColor: unreadCount ? "#FFB547" : "rgba(138,171,184,.35)", background: unreadCount ? "linear-gradient(160deg, rgba(255,181,71,.07), #0D1318 60%)" : "#0D1318", transition: "border-color .2s" } : {}) }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? NEON : undefined }}>{compact && <span aria-hidden="true">🤖 </span>}{title || "AI COACH"}</div>
-        {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
+        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? (unreadCount ? "#FFB547" : "#A9BBC3") : undefined, display: "flex", alignItems: "center", gap: 6 }}>
+          {compact && <span aria-hidden="true">🤖</span>}{title || "AI COACH"}
+          {unreadCount > 0 && <span data-testid="coach-unread-badge" aria-hidden="true" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: "#FFB547", color: "#080C10", fontFamily: "'Inter',sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: 0 }}>{unreadCount > 9 ? "9+" : unreadCount}</span>}
+        </div>
+        {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" aria-label={expanded ? "Minimise the coach" : `Open the coach${unreadCount ? `, ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : ""}`} style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5, ...(unreadCount ? { borderColor: "#FFB547", color: "#FFB547" } : {}) }} onClick={toggleExpanded}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
@@ -5273,6 +5315,95 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   );
 }
 
+// ─── Daily steps (playbook Rules 55-56) ──────────────────────────────────────
+// Today's steps against the goal, a quick way to log them, and yesterday's
+// until midday the next day. Stored in daily_steps (one row per day).
+const DEFAULT_STEP_GOAL = 8000;
+function StepsCard({ user, today, profile, onProfileSaved }) {
+  const yesterday = shiftDateKey(today, -1);
+  const [rows, setRows] = useState({});
+  const [loadError, setLoadError] = useState("");
+  const [entry, setEntry] = useState("");
+  const [yesterdayEntry, setYesterdayEntry] = useState("");
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goalEntry, setGoalEntry] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");
+  const goal = Number(profile?.stepGoal) > 0 ? Number(profile.stepGoal) : DEFAULT_STEP_GOAL;
+  const beforeMidday = new Date().getHours() < 12;
+
+  useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
+    supabase.from("daily_steps").select("date,steps").eq("user_id", user.id).in("date", [today, yesterday]).then(({ data, error }) => {
+      if (cancelled) return;
+      if (error) { setLoadError("Steps need the latest database update."); return; }
+      setLoadError("");
+      setRows(Object.fromEntries((data || []).map(row => [row.date, Number(row.steps) || 0])));
+    });
+    return () => { cancelled = true; };
+  }, [user?.id, today, yesterday]);
+
+  const saveSteps = async (date, value) => {
+    const steps = Math.round(Number(value));
+    if (!Number.isFinite(steps) || steps < 0 || steps > 100000) { setStatus("Enter a number of steps between 0 and 100,000."); return false; }
+    setSaving(true);
+    const { error } = await supabase.from("daily_steps").upsert({ user_id: user.id, date, steps, updated_at: new Date().toISOString() }, { onConflict: "user_id,date" });
+    setSaving(false);
+    if (error) { setStatus("Couldn't save your steps. Please try again."); return false; }
+    setRows(current => ({ ...current, [date]: steps }));
+    setStatus("");
+    return true;
+  };
+  const saveGoal = async () => {
+    const stepGoal = Math.round(Number(goalEntry));
+    if (!Number.isFinite(stepGoal) || stepGoal < 1000 || stepGoal > 30000) { setStatus("Set a goal between 1,000 and 30,000 steps."); return; }
+    const { error } = await supabase.from("user_profiles").upsert({ user_id: user.id, step_goal: stepGoal, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) { setStatus("Couldn't save your goal: the database needs the latest update (step_goal)."); return; }
+    onProfileSaved?.({ ...(profile || {}), stepGoal });
+    setGoalOpen(false);
+    setStatus("");
+  };
+
+  const todaySteps = rows[today];
+  const share = todaySteps ? Math.min(todaySteps / goal, 1) : 0;
+  const inputStyle = { width: 110, padding: "8px 10px", background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 6, color: "#E0EAF0", fontSize: 12 };
+  return (
+    <div className="t3d-card" data-testid="steps-card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+        <div className="t3d-ctitle" style={{ margin: 0 }}>STEPS TODAY</div>
+        <button type="button" onClick={() => { setGoalEntry(String(goal)); setGoalOpen(open => !open); }} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 9, minHeight: 32, textDecoration: "underline" }}>goal {goal.toLocaleString()}</button>
+      </div>
+      {loadError ? <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 8 }}>{loadError}</div> : (
+        <>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: todaySteps >= goal ? NEON : "#E0EAF0", margin: "8px 0 6px" }}>
+            {todaySteps !== undefined ? todaySteps.toLocaleString() : "—"} <span style={{ fontSize: 10, color: "#8AABB8", letterSpacing: 1 }}>/ {goal.toLocaleString()}</span>
+          </div>
+          <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${share * 100}%`, background: share >= 1 ? NEON : NEON2 }} /></div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+            <input type="number" inputMode="numeric" aria-label="Today's steps" placeholder={todaySteps !== undefined ? String(todaySteps) : "Today's steps"} value={entry} onChange={event => setEntry(event.target.value)} style={inputStyle} />
+            <button className="t3d-btn t3d-btn-sm" disabled={saving || entry === ""} onClick={async () => { if (await saveSteps(today, entry)) setEntry(""); }}>{todaySteps !== undefined ? "UPDATE" : "+ ADD STEPS"}</button>
+          </div>
+          {beforeMidday && rows[yesterday] === undefined && (
+            <div data-testid="steps-yesterday" style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap", fontSize: 10, color: "#8AABB8" }}>
+              <span>Missed yesterday?</span>
+              <input type="number" inputMode="numeric" aria-label="Yesterday's steps" placeholder="Yesterday's steps" value={yesterdayEntry} onChange={event => setYesterdayEntry(event.target.value)} style={inputStyle} />
+              <button className="t3d-btn t3d-btn-sm" disabled={saving || yesterdayEntry === ""} onClick={async () => { if (await saveSteps(yesterday, yesterdayEntry)) setYesterdayEntry(""); }}>SAVE</button>
+            </div>
+          )}
+        </>
+      )}
+      {goalOpen && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+          <input type="number" inputMode="numeric" aria-label="Daily step goal" value={goalEntry} onChange={event => setGoalEntry(event.target.value)} style={inputStyle} />
+          <button className="t3d-btn t3d-btn-sm" onClick={saveGoal}>SAVE GOAL</button>
+        </div>
+      )}
+      {status && <div role="alert" style={{ fontSize: 10, color: "#FFB547", marginTop: 8 }}>{status}</div>}
+    </div>
+  );
+}
+
 function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSaved, workoutBannerShown = false, onOpenProfile = null }) {
   // Badges earned since this device last showed them. The first time, earlier
   // badges are summed up in one line instead of each being announced.
@@ -5558,6 +5689,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           </div>
         )}
       </div>}
+      <StepsCard user={user} today={today} profile={profile} onProfileSaved={onProfileSaved} />
       {showGetStarted && (
         <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
           <div className="t3d-ctitle">GET STARTED</div>
@@ -6047,6 +6179,9 @@ function Fitness({ user, isActive = true, profile = null }) {
   // The form rating question after a set at the top of its range (Rule 29).
   const [formAsk, setFormAsk] = useState(null); // { exerciseIdx, setIdx, answered }
   const [formAsksThisWorkout, setFormAsksThisWorkout] = useState(0);
+  // After a workout: one achievement first, then the coach (Rule 51).
+  const [achievementShown, setAchievementShown] = useState(false);
+  const [shareNote, setShareNote] = useState("");
   const [workoutStart, setWorkoutStart] = useState(null);
   const [activeWorkoutLogId, setActiveWorkoutLogId] = useState(null); // row in workout_logs we're autosaving into
   const otherWorkoutsRef = useRef(null);
@@ -6465,6 +6600,8 @@ function withPlanApproval(sessions, now = new Date()) {
     // just to look at, leaves nothing behind.
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
+    // The coach's minimised chat starts fresh for this workout.
+    window.dispatchEvent(new CustomEvent("track3d-coach-divider", { detail: { storageKey: `fitness-${user.id}`, note: `New workout: ${sessionToStart.name}` } }));
     setExerciseIdx(0);
     setMissedExerciseNotice(null);
     setSetProgress({});
@@ -6754,8 +6891,13 @@ function withPlanApproval(sessions, now = new Date()) {
     let sentFor = null;
     try { sentFor = localStorage.getItem(`track3d-checkin-${user.id}`); } catch { /* storage unavailable */ }
     if (sentFor === id) return;
-    const result = midSessionCheckIn({ exercises: activeSession.exercises || [], completedSets, lastSetsByExercise: (activeSession.exercises || []).map(exercise => getLastSessionData(exercise) || []) });
+    const result = midSessionCheckIn({ exercises: activeSession.exercises || [], completedSets, lastSetsByExercise: (activeSession.exercises || []).map(exercise => workingSets(getLastSessionData(exercise) || [])) });
     if (!result.halfway) return;
+    // Only once an exercise is finished, never in the middle of one (Rule 49).
+    const lastLogged = Object.entries(completedSets)
+      .flatMap(([index, sets]) => (sets || []).map(set => ({ index: Number(index), at: set.at || "" })))
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+    if (!lastLogged || (completedSets[lastLogged.index] || []).length < (Number(activeSession.exercises?.[lastLogged.index]?.sets) || 0)) return;
     try { localStorage.setItem(`track3d-checkin-${user.id}`, id); } catch { /* storage unavailable */ }
     const strong = result.verdict === "strong";
     const prompt = [
@@ -6763,6 +6905,7 @@ function withPlanApproval(sessions, now = new Date()) {
       `So far: ${result.logged} of ${result.planned} sets. Against the same sets last time: ${result.better} better, ${result.same} about the same, ${result.under} under.`,
       ...result.lines.slice(0, 10).map(line => line.slice(0, 300)),
       result.remaining.length ? `Still to do: ${result.remaining.join(", ")}.` : "",
+      "Quote only the sets exactly as listed above (set numbers, reps and weights). Do not merge, renumber or round them: set 1 may be lighter than later sets.",
       strong
         ? "In 2-3 short sentences, like a coach beside me: tell me I'm smashing it and to keep it up, naming what's going well. No question, no plan change."
         : "In 2-4 short sentences, like a coach beside me: say kindly that I'm a bit off it today, tell me to finish strong, and give me 2 practical alternatives for the rest of this session (for example a small weight drop to keep my reps in range, a little more rest between sets, or cutting a set from a remaining exercise). No question, no plan change.",
@@ -6784,6 +6927,8 @@ function withPlanApproval(sessions, now = new Date()) {
       setWorkoutInProgress(false);
       setRestActive(false);
       setRestDeadline(null);
+      setAchievementShown(false);
+      setShareNote("");
       setView("complete");
     } catch {
       // persistWorkoutLog supplies the actionable message and leaves the
@@ -7533,6 +7678,42 @@ function withPlanApproval(sessions, now = new Date()) {
     const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId, { countCurrent: completionReview.completedSets > 0 });
     const highlightRow = { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "7px 0", borderTop: `1px solid ${BORDER}` };
     const highlightTitle = color => ({ fontFamily: "'Orbitron',monospace", fontSize: 10, color, letterSpacing: 2, marginBottom: 6 });
+    // The one achievement of the session: a weight PB, then a rep PB, then
+    // the biggest step up since last time, then a full week (Rule 51).
+    const bestPb = newPbs.find(pb => pb.type === "weight_pb") || newPbs[0] || null;
+    const bestImprovement = [...improvements].sort((a, b) => (b.kind === "weight") - (a.kind === "weight") || b.delta - a.delta)[0] || null;
+    const weekDone = weekProgress.planned > 0 && weekProgress.completed >= weekProgress.planned;
+    const achievement = bestPb
+      ? { icon: "🏆", title: bestPb.type === "weight_pb" ? "NEW WEIGHT PB" : "NEW REP PB", detail: `${bestPb.exercise}: ${bestPb.type === "weight_pb" ? `${bestPb.weight}kg × ${bestPb.reps}` : `${bestPb.reps} reps @ ${bestPb.weight}kg`}` }
+      : bestImprovement
+        ? { icon: "📈", title: "BETTER THAN LAST TIME", detail: `${bestImprovement.exercise}: ${bestImprovement.kind === "weight" ? `${bestImprovement.previousWeight} → ${bestImprovement.weight}kg` : `+${bestImprovement.delta} rep${bestImprovement.delta === 1 ? "" : "s"} @ ${bestImprovement.weight}kg`}` }
+        : weekDone ? { icon: "✅", title: "WEEK COMPLETE", detail: `Every planned session done this week (${weekProgress.completed}/${weekProgress.planned}).` } : null;
+    if (achievement && !achievementShown) {
+      const shareText = `${achievement.title} on TRACK3D — ${achievement.detail}`;
+      const share = async () => {
+        try {
+          if (navigator.share) { await navigator.share({ title: "TRACK3D", text: shareText }); return; }
+          await navigator.clipboard.writeText(shareText);
+          setShareNote("Copied — paste it anywhere to share.");
+        } catch { /* the share sheet was closed */ }
+      };
+      return (
+        <div className="t3d-fade">
+          <div className="t3d-card" data-testid="achievement-card" style={{ textAlign: "center", padding: 28, borderColor: "rgba(255,181,71,.6)", background: "linear-gradient(160deg, rgba(255,181,71,.12), #0D1318 70%)" }}>
+            <div aria-hidden="true" style={{ fontSize: 46, marginBottom: 10 }}>{achievement.icon}</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#8AABB8", letterSpacing: 2, marginBottom: 6 }}>ACHIEVEMENT OF THE SESSION</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 16, color: "#FFB547", letterSpacing: 2, marginBottom: 8 }}>{achievement.title}</div>
+            <div style={{ fontSize: 13, color: "#E0EAF0", marginBottom: 6 }}>{achievement.detail}</div>
+            <div style={{ fontSize: 10, color: "#8AABB8", marginBottom: 22 }}>{activeSession?.name}</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="t3d-btn" style={{ flex: 1, padding: 11, borderColor: "#FFB547", color: "#FFB547" }} onClick={share}>SHARE ACHIEVEMENT</button>
+              <button className="t3d-btn" style={{ flex: 1, padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={() => setAchievementShown(true)}>CONTINUE</button>
+            </div>
+            {shareNote && <div role="status" style={{ marginTop: 10, fontSize: 10, color: "#8AABB8" }}>{shareNote}</div>}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="t3d-fade">
         <div className="t3d-card" style={{ textAlign: "center", padding: 20 }}>
@@ -7592,7 +7773,11 @@ function withPlanApproval(sessions, now = new Date()) {
                   <div key={set.setNumber} style={{ display: "grid", gridTemplateColumns: "54px 1fr auto", gap: 8, alignItems: "center", fontSize: 10, padding: "5px 0", borderTop: `1px solid ${BORDER}` }}>
                     <span style={{ color: "#8AABB8" }}>SET {set.setNumber}</span>
                     <span style={{ color: set.status === "completed" ? NEON : "#6F8792" }}>{set.status === "completed" ? `${set.reps} reps @ ${set.weightKg}kg` : `Target ${set.targetReps || "—"} reps`}</span>
-                    <span style={{ color: set.status === "completed" ? NEON : "#FFB547", fontSize: 8 }}>{set.extra ? "EXTRA · COMPLETED" : set.status === "completed" ? "COMPLETED" : "SKIPPED / NOT LOGGED"}</span>
+                    {(() => {
+                      // A set below its rep range is not shown as a plain "completed" (V1.3).
+                      const below = set.status === "completed" && setStatus(set.reps, set.targetReps).tone === "under";
+                      return <span style={{ color: set.status === "completed" && !below ? NEON : "#FFB547", fontSize: 8 }}>{set.extra ? "EXTRA · COMPLETED" : below ? `BELOW ${set.targetReps}` : set.status === "completed" ? "COMPLETED" : "SKIPPED / NOT LOGGED"}</span>;
+                    })()}
                   </div>
                 ))}
               </div>
@@ -12711,7 +12896,8 @@ export default function App() {
     const timer = setTimeout(() => setNotice(""), 4000);
     return () => clearTimeout(timer);
   }, [notice]);
-  const profileSaved = saved => { setProfile(saved); setNotice("Profile saved ✓"); };
+  // Merged, so a part saved on its own (a step goal) keeps the rest.
+  const profileSaved = saved => { setProfile(previous => ({ ...(previous || {}), ...saved })); setNotice("Profile saved ✓"); };
   // What each active session is up to, for the banner ("Upper A · Set 2 of 4 · Bench Press").
   const [activeSummaries, setActiveSummaries] = useState({});
   const homeTimeZone = resolveHomeTimeZone(user);

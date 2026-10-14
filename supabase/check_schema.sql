@@ -25,7 +25,10 @@ with expected(table_name, column_name) as (values
   ('user_profiles', 'user_id'), ('user_profiles', 'height_cm'), ('user_profiles', 'date_of_birth'),
   ('user_profiles', 'sex'), ('user_profiles', 'updated_at'),
   ('user_profiles', 'health_consent_at'), ('user_profiles', 'health_consent_version'),
-  ('user_profiles', 'health_consent_withdrawn_at')
+  ('user_profiles', 'health_consent_withdrawn_at'),
+  ('user_profiles', 'gym_steps'), ('user_profiles', 'step_goal'),
+  ('workout_splits', 'set_structure'), ('workout_splits', 'set_structure_snooze_until'),
+  ('daily_steps', 'user_id'), ('daily_steps', 'date'), ('daily_steps', 'steps'), ('daily_steps', 'updated_at')
 )
 select 'missing column' as problem, e.table_name, e.column_name
 from expected e
@@ -53,7 +56,7 @@ union all
 select case when r.oid is null then 'missing table'
             when not r.relrowsecurity then 'row level security off'
             else 'missing policy' end, t.table_name, null
-from (values ('habits'), ('habit_completions'), ('daily_goals'), ('coach_memory'), ('weekly_reports'), ('user_profiles'), ('data_exports')) as t(table_name)
+from (values ('habits'), ('habit_completions'), ('daily_goals'), ('daily_steps'), ('coach_memory'), ('weekly_reports'), ('user_profiles'), ('data_exports')) as t(table_name)
 left join pg_class r on r.relname = t.table_name and r.relnamespace = 'public'::regnamespace and r.relkind = 'r'
 where r.oid is null or not r.relrowsecurity
    or not exists (select 1 from pg_policies p where p.schemaname = 'public' and p.tablename = t.table_name)
@@ -75,7 +78,7 @@ select case when not c.relrowsecurity then 'row level security off' else 'missin
 from pg_class c
 join pg_attribute a on a.attrelid = c.oid and a.attname = 'user_id' and not a.attisdropped
 where c.relnamespace = 'public'::regnamespace and c.relkind in ('r', 'p')
-  and c.relname not in ('habits', 'habit_completions', 'daily_goals', 'coach_memory', 'weekly_reports', 'user_profiles', 'data_exports', 'chat_requests', 'account_password_checks')
+  and c.relname not in ('habits', 'habit_completions', 'daily_goals', 'daily_steps', 'coach_memory', 'weekly_reports', 'user_profiles', 'data_exports', 'chat_requests', 'account_password_checks')
   and (not c.relrowsecurity or not exists (select 1 from pg_policies p where p.schemaname = 'public' and p.tablename = c.relname))
 union all
 -- Users must be able to delete their own progress photos.

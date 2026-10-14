@@ -12,8 +12,8 @@ test("age comes from date of birth and changes on the birthday", () => {
 });
 
 test("profile rows are read safely", () => {
-  assert.deepEqual(normaliseProfile({ height_cm: "178.0", date_of_birth: "1991-03-12", sex: "male" }, "advanced"), { heightCm: 178, dateOfBirth: "1991-03-12", sex: "male", experienceLevel: "advanced", gymSteps: {} });
-  assert.deepEqual(normaliseProfile(null), { heightCm: null, dateOfBirth: null, sex: null, experienceLevel: null, gymSteps: {} });
+  assert.deepEqual(normaliseProfile({ height_cm: "178.0", date_of_birth: "1991-03-12", sex: "male" }, "advanced"), { heightCm: 178, dateOfBirth: "1991-03-12", sex: "male", experienceLevel: "advanced", gymSteps: {}, stepGoal: null });
+  assert.deepEqual(normaliseProfile(null), { heightCm: null, dateOfBirth: null, sex: null, experienceLevel: null, gymSteps: {}, stepGoal: null });
   assert.deepEqual(normaliseProfile({ gym_steps: { dumbbell: 2, barbell: "2.5", machine: -1, cable: 99 } }).gymSteps, { dumbbell: 2, barbell: 2.5 }, "only sensible gym steps are kept");
   assert.equal(isProfileComplete(normaliseProfile({ height_cm: 178, sex: "male" })), false);
   assert.equal(isProfileComplete(normaliseProfile({ height_cm: 178, date_of_birth: "1991-03-12", sex: "prefer_not_to_say" })), false, "training experience is part of the profile");
