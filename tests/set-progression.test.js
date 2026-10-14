@@ -164,3 +164,9 @@ test("switching to staggered sets: set 1 keeps its progression, back-off sets go
   assert.ok(plan[1].weight < plan[0].weight && plan[2].weight < plan[1].weight);
   assert.deepEqual(plan.map(item => item.weight), [62.5, 57.5, 55]);
 });
+
+test("a set beaten today at the planned weight raises the next set's aim", () => {
+  const next = suggestSet({ ranges: ["8-12", "8-12"], setIndex: 1, plan: [{ weight: 25, reps: 8 }, { weight: 25, reps: 8 }], todaySets: [set(25, 10)], step: 2.5 });
+  assert.equal(next.weight, "25");
+  assert.equal(next.reps, "10");
+});
