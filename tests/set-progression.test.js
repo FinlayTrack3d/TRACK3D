@@ -153,3 +153,14 @@ test("every set gets a range: defaults by type and level, and a range typed must
   assert.equal(rangeProblem("8-12"), "");
   assert.equal(rangeProblem("abc"), "Enter a range like 8-12.");
 });
+
+test("switching to staggered sets: set 1 keeps its progression, back-off sets go lighter", () => {
+  const plan = planExercise({
+    ranges: ["6-8", "8-10", "10-12"],
+    exposures: [{ sets: [set(60, 10), set(60, 10), set(60, 9)] }, { sets: [set(60, 9), set(60, 9), set(60, 8)] }],
+    step: 2.5,
+  });
+  assert.equal(plan[0].weight, 62.5, "10 reps on a 6-8 set: one step up");
+  assert.ok(plan[1].weight < plan[0].weight && plan[2].weight < plan[1].weight);
+  assert.deepEqual(plan.map(item => item.weight), [62.5, 57.5, 55]);
+});

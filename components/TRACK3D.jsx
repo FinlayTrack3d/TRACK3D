@@ -27,7 +27,8 @@ import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, 
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
-import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, inSessionCue, parseRange, planExercise, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
+import { swapAlternatives } from "../lib/exercise-swaps";
+import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, defaultRanges, exerciseKind, withRanges, inSessionCue, parseRange, planExercise, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
 // On start the dashboard, the hidden Morning and Fitness tabs and the weekly
@@ -5886,13 +5887,16 @@ function workoutProgressLine({ activeSession, exerciseIdx = 0, completedSets = {
 
 const exerciseCountText = session => { const count = session?.exercises?.length || 0; return `${count} exercise${count === 1 ? "" : "s"}`; };
 
-function normalizeFitnessSessions(sessions = []) {
+// straight: the user trains on straight sets (beginners, Rule 70a), so a
+// single rep target becomes the same range on every set.
+function normalizeFitnessSessions(sessions = [], { straight = false } = {}) {
   return sessions.map(session => ({
     ...session,
     exercises: (session.exercises || []).map(exercise => {
       const sets = Math.max(1, parseInt(exercise.sets, 10) || 3);
       // One target per set, also when the plan kept them in one string ("6-8,6-8,8,10").
-      return { ...exercise, sets, reps: repTargets(exercise.reps, sets) };
+      // Every set has a rep range (playbook V1.3): a single target like "10" becomes one.
+      return withRanges({ ...exercise, sets, reps: repTargets(exercise.reps, sets) }, { straight });
     }),
   }));
 }
@@ -5963,6 +5967,12 @@ function Fitness({ user, isActive = true, profile = null }) {
     if (log) log.scrollTop = log.scrollHeight;
   }, [planChangeMessages.length, planChangeLoading, planChangeOpen]);
   const [replaceWarning, setReplaceWarning] = useState(null);
+  // The swap picker (playbook Rules 39-40): today only unless the user
+  // chooses to update the plan.
+  const [swapQuery, setSwapQuery] = useState("");
+  const [swapScope, setSwapScope] = useState("today");
+  const [swapError, setSwapError] = useState("");
+  const [swapSaving, setSwapSaving] = useState(false);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [endWorkoutConfirm, setEndWorkoutConfirm] = useState(null);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
@@ -6191,7 +6201,7 @@ function withPlanApproval(sessions, now = new Date()) {
       const { data: splitData } = await readWorkoutSplit(user.id);
       let normalizedSessions = [];
       if (splitData) {
-        normalizedSessions = normalizeFitnessSessions(splitData.sessions || []);
+        normalizedSessions = normalizeFitnessSessions(splitData.sessions || [], { straight: (profile?.experienceLevel || "beginner") === "beginner" && splitData.set_structure !== "staggered" });
         setSplit({ ...splitData, sessions: normalizedSessions });
         setSessions(normalizedSessions);
       }
@@ -6239,7 +6249,7 @@ function withPlanApproval(sessions, now = new Date()) {
   const saveSplit = async (sessionsData, extra = {}) => {
     if (!user) return { ok: false, error: "not signed in" };
     try {
-      const normalizedSessions = normalizeFitnessSessions(sessionsData);
+      const normalizedSessions = normalizeFitnessSessions(sessionsData, { straight: straightSets });
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).maybeSingle();
 
       // Upsert so a stale lookup can never turn a save into a duplicate insert.
@@ -6814,6 +6824,9 @@ function withPlanApproval(sessions, now = new Date()) {
     return Number.isFinite(approvedAt) && Date.now() - approvedAt < 7 * 86400000 ? 1 : 2;
   })();
   const stepForExercise = exercise => stepFor(exercise?.name, profile?.gymSteps);
+  // Beginners train on straight sets (same range and weight every set) until
+  // they switch to staggered sets (playbook Rule 70a).
+  const straightSets = (profile?.experienceLevel || "beginner") === "beginner" && split?.set_structure !== "staggered";
   // The plan for every set of an exercise today, from earlier sessions
   // (playbook V1.3: per-set rep ranges, the Rep-Range Result Table).
   const exercisePlan = exercise => planExercise({ ranges: repTargets(exercise.reps, Number(exercise.sets) || 0), exposures: getExposures(exercise), step: stepForExercise(exercise), todayKey: today });
@@ -7416,27 +7429,58 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
           )}
 
-          {replaceWarning !== null && (
-            <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-              <div style={{ background: SURFACE, border: `1px solid ${NEON3}`, borderRadius: 8, padding: 28, maxWidth: 320, textAlign: "center" }}>
-                <div style={{ fontSize: 24, marginBottom: 12 }}>⚠️</div>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>REPLACE EXERCISE</div>
-                <div style={{ fontSize: 12, color: "#8AABB8", marginBottom: 20, lineHeight: 1.6 }}>Changing an exercise takes this workout off the saved plan. Do you want to continue?</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setReplaceWarning(null)}>STAY ON PLAN</button>
-                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => {
-                    const newName = prompt("Enter replacement exercise name:");
-                    if (newName) {
-                      const updated = JSON.parse(JSON.stringify(activeSession));
-                      updated.exercises[replaceWarning].name = newName;
-                      setActiveSession(updated);
-                    }
-                    setReplaceWarning(null);
-                  }}>CONFIRM REPLACEMENT</button>
+          {replaceWarning !== null && activeSession.exercises[replaceWarning] && (() => {
+            const original = activeSession.exercises[replaceWarning];
+            const alternatives = swapAlternatives(original.name);
+            const typed = swapQuery.trim();
+            const close = () => { setReplaceWarning(null); setSwapQuery(""); setSwapScope("today"); setSwapError(""); };
+            // A swapped exercise starts its own history (Rule 37).
+            const swap = async name => {
+              const chosen = String(name || "").trim();
+              if (!chosen || swapSaving) return;
+              setSwapError("");
+              if (swapScope === "plan") {
+                setSwapSaving(true);
+                const updatedSessions = sessions.map(session => session.name === activeSession.name
+                  ? { ...session, exercises: (session.exercises || []).map(exercise => exercise.name === original.name ? { ...exercise, name: chosen, historyAliases: [] } : exercise) }
+                  : session);
+                const saved = await saveSplit(updatedSessions);
+                setSwapSaving(false);
+                if (!saved.ok) { setSwapError(`Not saved: ${saved.error}. Your plan has not changed.`); return; }
+              }
+              const updated = { ...activeSession, exercises: activeSession.exercises.map((exercise, index) => index === replaceWarning ? { ...exercise, name: chosen, historyAliases: [], swappedFrom: original.name } : exercise) };
+              setActiveSession(updated);
+              setCurrentInputs(previous => ({ ...previous, [replaceWarning]: {} }));
+              if (Object.values(completedSets).some(sets => sets?.length)) persistWorkoutLog(completedSets, { session: updated }).catch(() => {});
+              close();
+            };
+            return (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 100 }}>
+                <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="swap-title" data-testid="swap-picker" style={{ width: "100%", maxWidth: 360, borderColor: NEON2 }}>
+                  <div id="swap-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON2, letterSpacing: 2, marginBottom: 6 }}>SWAP {original.name.toUpperCase()}</div>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                    {[["today", "JUST TODAY"], ["plan", "UPDATE MY PLAN"]].map(([value, label]) => (
+                      <button key={value} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={swapScope === value} onClick={() => setSwapScope(value)}
+                        style={{ flex: 1, fontSize: 9, background: swapScope === value ? "rgba(0,200,255,.12)" : "transparent", borderColor: swapScope === value ? NEON2 : BORDER, color: swapScope === value ? NEON2 : "#8AABB8" }}>{label}</button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>
+                    {swapScope === "today" ? "Swap for today only? Your plan stays the same." : `This changes ${activeSession.name} in your plan from now on. Your ${original.name} history is kept.`}
+                  </div>
+                  {alternatives.length > 0 && <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                    {alternatives.map(option => (
+                      <button key={option} type="button" className="t3d-btn t3d-btn-sm" disabled={swapSaving} onClick={() => swap(option)} style={{ textAlign: "left", padding: "9px 10px", fontSize: 10, whiteSpace: "normal" }}>{option}</button>
+                    ))}
+                  </div>}
+                  <input className="t3d-input" aria-label="Search or type an exercise" placeholder="Search or type an exercise" value={swapQuery} onChange={event => setSwapQuery(event.target.value)}
+                    onKeyDown={event => { if (event.key === "Enter" && typed) swap(typed); }} style={{ marginBottom: 8 }} />
+                  {typed && <button type="button" className="t3d-btn t3d-btn-sm" disabled={swapSaving} style={{ width: "100%", marginBottom: 8 }} onClick={() => swap(typed)}>USE “{typed}”</button>}
+                  {swapError && <div role="alert" style={{ color: "#FF8AAD", fontSize: 10, marginBottom: 8 }}>{swapError}</div>}
+                  <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ width: "100%" }} onClick={close}>{swapSaving ? "SAVING..." : "KEEP " + original.name.toUpperCase()}</button>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
           {discardWorkoutDialog}
 
           {editingSet && (
@@ -7635,7 +7679,7 @@ function withPlanApproval(sessions, now = new Date()) {
               try {
                 // Saving is the approval: no second "review & approve" step.
                 const now = new Date();
-                const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions), now);
+                const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions, { straight: straightSets }), now);
                 // saveSplit reads the row back and only updates the screen once it matches.
                 const saved = await saveSplit(approvedSessions, { split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null });
                 if (!saved.ok) throw new Error(saved.error);
@@ -7865,7 +7909,7 @@ function withPlanApproval(sessions, now = new Date()) {
     setImportSaving(true);
     setImportError("");
     const now = new Date();
-    const approved = withPlanApproval(normalizeFitnessSessions(importedSessions(importResult)), now);
+    const approved = withPlanApproval(normalizeFitnessSessions(importedSessions(importResult), { straight: straightSets }), now);
     const saved = await saveSplit(approved, { split_name: importResult.planName || "Imported plan", programme_started_at: now.toISOString(), week_reviewed_at: null });
     setImportSaving(false);
     if (!saved.ok) { setImportError(`Your plan could not be saved: ${saved.error}. Your previous plan is unchanged.`); return; }
@@ -8693,6 +8737,31 @@ function withPlanApproval(sessions, now = new Date()) {
     if (!saved.ok) setPlanSaveError(`The week review could not be recorded: ${saved.error}. You may be asked again.`);
   };
 
+  // Beginners move from straight sets to staggered sets once they have a base:
+  // 4 weeks into the programme and 8 workouts done (playbook Rule 70a).
+  const workoutsSinceStart = history.filter(log => !activityOfLog(log) && programmeStartedAt && new Date(log.created_at) >= programmeStartedAt).length;
+  const staggerSwitchDue = straightSets && Boolean(programmeStartedAt)
+    && Date.now() - programmeStartedAt.getTime() >= 28 * 24 * 60 * 60 * 1000 && workoutsSinceStart >= 8
+    && !(split?.set_structure_snooze_until && String(split.set_structure_snooze_until) > today);
+  const switchToStaggered = async () => {
+    const staggered = sessions.map(session => isActivitySession(session) ? session : {
+      ...session,
+      exercises: (session.exercises || []).map(exercise => {
+        const ranges = repTargets(exercise.reps, Number(exercise.sets) || 1);
+        const same = ranges.every(range => range === ranges[0]) && !/[a-z]/i.test(ranges[0]);
+        return same ? { ...exercise, reps: defaultRanges(Number(exercise.sets) || 3, { kind: exerciseKind(exercise.name) }) } : exercise;
+      }),
+    });
+    const saved = await saveSplit(staggered, { set_structure: "staggered" });
+    if (!saved.ok) { setPlanSaveError(`Not switched: ${saved.error}. Your plan has not changed.`); return; }
+    setPlanNotice("Staggered sets on: your first set is your heaviest");
+  };
+  const snoozeStaggerSwitch = async () => {
+    const until = shiftDateKey(today, 28);
+    const saved = await saveSplit(sessions, { set_structure_snooze_until: until });
+    if (!saved.ok) setPlanSaveError(`Couldn't save that: ${saved.error}. You may be asked again.`);
+  };
+
   return (
     <div className="t3d-fade">
       {!split ? (
@@ -8729,6 +8798,16 @@ function withPlanApproval(sessions, now = new Date()) {
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                 <button className="t3d-btn" onClick={startWeekReview}>REVIEW MY WEEK</button>
                 <button type="button" onClick={() => setWeekReviewDismissed(true)} style={{ background: "none", border: 0, color: "#4A6070", cursor: "pointer", fontSize: 9, minHeight: 44, padding: "0 6px", textDecoration: "underline" }}>remind me later</button>
+              </div>
+            </div>
+          )}
+          {staggerSwitchDue && !weekReviewDue && (
+            <div className="t3d-card" data-testid="stagger-switch" style={{ marginBottom: 16, borderColor: NEON2, background: "rgba(0,200,255,.05)" }}>
+              <h2 style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, fontWeight: 400, color: NEON2, letterSpacing: 2, margin: "0 0 8px" }}>READY FOR THE NEXT STEP</h2>
+              <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12, lineHeight: 1.6 }}>You&apos;ve built a base. Your first set will now be your heaviest, with lighter follow-up sets for more reps.</div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <button className="t3d-btn" onClick={switchToStaggered}>SWITCH MY SETS</button>
+                <button type="button" onClick={snoozeStaggerSwitch} style={{ background: "none", border: 0, color: "#4A6070", cursor: "pointer", fontSize: 9, minHeight: 44, padding: "0 6px", textDecoration: "underline" }}>keep it simple for now</button>
               </div>
             </div>
           )}
@@ -9173,12 +9252,9 @@ function withPlanApproval(sessions, now = new Date()) {
                     ))}
                     <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginTop: 6, fontSize: 8 }}
                       onClick={() => {
-                        const name = prompt("Exercise name:");
-                        if (!name) return;
-                        const sets = prompt("Sets?") || "3";
-                        const reps = prompt("Reps? (e.g. 8-10)") || "8-10";
+                        // A new row to name; default ranges by level (Rule 11a).
                         setSessions(prev => prev.map((s, i) => i === sIdx ? {
-                          ...s, exercises: [...(s.exercises||[]), { name, sets: parseInt(sets)||3, reps: Array.from({ length: parseInt(sets) || 3 }, () => reps), tempo: "" }]
+                          ...s, exercises: [...(s.exercises||[]), { name: "", sets: 3, reps: defaultRanges(3, { kind: "compound", straight: straightSets }), tempo: "" }]
                         } : s));
                       }}>+ ADD EXERCISE</button>
                   </div>
@@ -9186,10 +9262,20 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={cancelSessionEdits}>CANCEL</button>
                   <button className="t3d-btn" style={{ flex: 1 }} onClick={async () => {
+                    // Every exercise needs a name, and every set a valid range.
+                    const problem = sessions.flatMap(session => (session.exercises || []).flatMap(exercise => {
+                      if (!String(exercise.name || "").trim()) return [`${session.name}: give every exercise a name.`];
+                      return repTargets(exercise.reps, Number(exercise.sets) || 1).map((range, index) => {
+                        const issue = rangeProblem(range);
+                        return issue ? `${exercise.name} set ${index + 1}: ${issue}` : "";
+                      }).filter(Boolean);
+                    }))[0];
+                    if (problem) { setPlanSaveError(problem); return; }
                     const saved = await saveSplit(sessions);
                     if (!saved.ok) { setPlanSaveError(`Your changes were not saved: ${saved.error}. Please try again.`); return; }
                     setPlanSaveError("");
                     setEditDaysModal(false);
+                    setPlanNotice("Sessions saved");
                   }}>SAVE ✓</button>
                 </div>
                 {planSaveError && <p role="alert" style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "10px 0 0" }}>{planSaveError}</p>}
