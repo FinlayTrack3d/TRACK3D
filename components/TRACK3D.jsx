@@ -28,6 +28,7 @@ import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorP
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
 import { swapAlternatives } from "../lib/exercise-swaps";
+import { starterPlan } from "../lib/starter-plans";
 import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, defaultRanges, exerciseKind, withRanges, inSessionCue, parseRange, planExercise, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
@@ -92,11 +93,17 @@ async function streamCoachText(payload, onText = () => {}) {
 // empty, so a screen never shows canned text as if the coach had written it.
 async function readCoachReply(res) {
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `the coach is unavailable (${res.status})`);
+  // offline: the coach is down (billing, key), so trying again won't help yet.
+  if (!res.ok) throw Object.assign(new Error(data.error || `the coach is unavailable (${res.status})`), { offline: Boolean(data.offline), publicMessage: data.error || "" });
   const text = (data.content || []).map(block => block.text || "").join("").trim();
   if (!text) throw new Error("the coach sent an empty reply");
   return text;
 }
+
+// What to show when a coach call fails: "offline" when the coach is down
+// (trying again can't help), otherwise the caller's own message.
+const COACH_OFFLINE_TEXT = "The coach is offline for a few minutes. Your data is safe.";
+const coachErrorText = (error, fallback) => (error?.offline ? error.publicMessage || COACH_OFFLINE_TEXT : fallback);
 
 const NEON = "#00FFB2";
 const EXPERIENCE_OPTIONS = [["beginner", "BEGINNER"], ["intermediate", "INTERMEDIATE"], ["advanced", "ADVANCED"]];
@@ -6275,6 +6282,22 @@ function withPlanApproval(sessions, now = new Date()) {
     return String(value || "");
   };
   const aiAskedQuestions = aiQuestionIds ? AI_QUESTIONS.filter(question => aiQuestionIds.includes(question.id)) : AI_QUESTIONS;
+  // When the AI can't build a programme: try again with the same answers,
+  // or a built-in starter plan from them (S0a), so setup never dead-ends.
+  const useStarterPlan = () => {
+    const level = normaliseExperience(aiAnswers.experience) || profile?.experienceLevel || null;
+    setAiPlan(starterPlan({ ...aiAnswers, preferred_days: aiAnswers.preferred_days }, level));
+    setAiPlanError("");
+  };
+  const aiPlanFailure = (
+    <div role="alert" data-testid="ai-plan-failure" style={{ margin: "4px 0 12px", padding: 12, borderRadius: 6, border: "1px solid rgba(255,45,120,.35)", background: "rgba(255,45,120,.06)" }}>
+      <p style={{ color: "#FF8AAD", fontSize: 12, lineHeight: 1.5, margin: "0 0 10px" }}>{aiPlanError}</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button className="t3d-btn t3d-btn-sm" disabled={aiBuilding} onClick={() => buildAIPlan(aiAnswers, aiChatContext)}>TRY AGAIN</button>
+        <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={useStarterPlan}>USE A STARTER PLAN INSTEAD</button>
+      </div>
+    </div>
+  );
   const AI_BUILD_STAGES = ["Reading your answers", "Choosing your training days", "Selecting exercises for your equipment", "Setting sets, reps and tempo", "Checking each session fits your time"];
 
   useEffect(() => {
@@ -6833,8 +6856,8 @@ function withPlanApproval(sessions, now = new Date()) {
         messages: [{ role: "user", content: completionFeedbackReview() }, { role: "assistant", content: completionFeedback }, ...updated],
       }, text => setCompletionFollowUps([...updated, { role: "assistant", content: text }]));
       setCompletionFollowUps([...updated, { role: "assistant", content: reply }]);
-    } catch {
-      setCompletionFollowUps([...updated, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
+    } catch (error) {
+      setCompletionFollowUps([...updated, { role: "assistant", content: coachErrorText(error, "I couldn't connect just now. Please try again.") }]);
     }
     setCompletionReplyLoading(false);
   };
@@ -7098,8 +7121,9 @@ function withPlanApproval(sessions, now = new Date()) {
           method: "POST", headers: await chatHeaders(),
           body: JSON.stringify({ responseTokens: 6000, area: "programme_builder", context: builderContext, messages }),
         });
-        if (!res.ok) throw new Error("Could not build programme");
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        // The coach offline (billing, key): trying again won't help, so say so.
+        if (!res.ok) throw Object.assign(new Error("Could not build programme"), { offline: Boolean(data?.offline), publicMessage: data?.error });
         const text = data.content?.map(b => b.text || "").join("") || "";
         let parsed = null;
         try { parsed = JSON.parse(text.replace(/```json|```/g, "").trim()); } catch { parsed = null; }
@@ -7117,7 +7141,11 @@ function withPlanApproval(sessions, now = new Date()) {
       if (!plan) throw new Error("Incomplete programme");
       // Whatever the model returned, never show a session longer than the stated limit.
       setAiPlan({ ...plan, sessions: plan.sessions.map(session => fitSessionToBudget(session, budgetFor(session))) });
-    } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
+    } catch (error) {
+      setAiPlanError(error?.offline
+        ? `${error.publicMessage || "The coach is offline for a few minutes. Your data is safe."} Your answers are saved: try again shortly, or use a starter plan now.`
+        : "The coach could not finish your programme. Your answers are saved here: try again, or use a starter plan instead.");
+    }
     setAiBuilding(false);
   };
 
@@ -7834,10 +7862,10 @@ function withPlanApproval(sessions, now = new Date()) {
     if (aiPlan) return (
       <div className="t3d-fade">
         <div className="t3d-card">
-          <h2 className="t3d-ctitle">YOUR AI COACH PROGRAMME — {aiPlan.split_name}</h2>
+          <h2 className="t3d-ctitle">{aiPlan.starter ? "YOUR STARTER PROGRAMME" : "YOUR AI COACH PROGRAMME"} — {aiPlan.split_name}</h2>
           <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds. X means an explosive movement.</p>
           {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
-          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+          {aiPlanError && aiPlanFailure}
           {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>{aiPlan.notes}</div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
@@ -7884,7 +7912,7 @@ function withPlanApproval(sessions, now = new Date()) {
       <div className="t3d-fade"><div className="t3d-card">
         <h2 className="t3d-ctitle">YOUR ANSWERS ARE READY</h2>
         <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>Everything the coach needs came from your chat.</p>
-        {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+        {aiPlanError && aiPlanFailure}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className="t3d-btn" onClick={() => buildAIPlan()}>BUILD MY PROGRAMME</button>
           <button className="t3d-btn t3d-btn-sm" onClick={() => { setAiQuestionIds(null); setAiStep(0); }}>REVIEW ALL ANSWERS</button>
@@ -7996,7 +8024,7 @@ function withPlanApproval(sessions, now = new Date()) {
           <button className="t3d-btn" style={{ width: "100%", padding: 12, marginBottom: 12 }} disabled={!answered} onClick={() => goNext()}>
             {isLastQuestion ? "BUILD MY PROGRAMME" : "NEXT →"}
           </button>
-          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+          {aiPlanError && aiPlanFailure}
           <div style={{ display: "flex", gap: 10 }}>
             {aiStep > 0 && <button className="t3d-btn t3d-btn-sm" onClick={() => setAiStep(step => step - 1)}>← BACK</button>}
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setView("home")}>CANCEL</button>
@@ -8479,7 +8507,7 @@ function withPlanApproval(sessions, now = new Date()) {
         }),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Coach request failed");
+      if (!response.ok) throw Object.assign(new Error(result.error || "Coach request failed"), { offline: Boolean(result.offline) });
       const proposal = result.changes?.length ? makePlanProposal(result.changes) : null;
       // A newer proposal replaces one still waiting.
       setPlanChangeMessages(current => [
@@ -8488,7 +8516,8 @@ function withPlanApproval(sessions, now = new Date()) {
       ]);
       setPlanChangeRecommendation(result);
     } catch (error) {
-      setPlanChangeMessages(current => [...current, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again." }]);
+      // Offline: offer the questions and a starter plan, so a rebuild isn't stuck.
+      setPlanChangeMessages(current => [...current, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again.", offline: Boolean(error.offline) }]);
     } finally {
       setPlanChangeLoading(false);
     }
@@ -8601,6 +8630,11 @@ function withPlanApproval(sessions, now = new Date()) {
           </div>
         )}
 
+        {planChangeMessages.at(-1)?.offline && (
+          <button type="button" data-testid="plan-change-offline-rebuild" className="t3d-btn t3d-btn-sm" style={{ width: "100%", margin: "4px 0 8px", borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => { setPlanChangeOpen(false); openAiBuilder(); }}>
+            REBUILD FROM QUESTIONS (STARTER PLAN IF THE COACH IS STILL OFFLINE)
+          </button>
+        )}
         <button type="button" onClick={openImport} style={{ display: "block", background: "none", border: 0, color: "#8AABB8", fontSize: 10, textDecoration: "underline", cursor: "pointer", padding: "4px 0 10px" }}>Have a new plan from your own coach? Import it instead</button>
         <div style={{ display: "flex", gap: 7 }}>
           <input className="t3d-ai-input" placeholder="Tell the coach what you want to change..." value={planChangeInput} onChange={event => setPlanChangeInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanChangeCoach(); } }} />
@@ -8797,8 +8831,8 @@ function withPlanApproval(sessions, now = new Date()) {
         messages: recentChatMessages(updatedMessages),
       }, text => setCoachMessages([...updatedMessages, { role: "assistant", content: text }]));
       setCoachMessages([...updatedMessages, { role: "assistant", content: reply }]);
-    } catch {
-      setCoachMessages([...updatedMessages, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
+    } catch (error) {
+      setCoachMessages([...updatedMessages, { role: "assistant", content: coachErrorText(error, "I couldn't connect just now. Please try again.") }]);
     } finally {
       setCoachLoading(false);
     }
@@ -10172,6 +10206,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
   const [aiFeedbackError, setAiFeedbackError] = useState("");
   const [mealPlanWarning, setMealPlanWarning] = useState(""); // AI meal plan off its own targets
+  const [mealBuildFailure, setMealBuildFailure] = useState(""); // the AI couldn't build a plan at all
   const [reviewSkipAnswered, setReviewSkipAnswered] = useState(false); // DAY REVIEW skips meals already logged
   const [foodEstimate, setFoodEstimate] = useState(null);
   const [foodEstimateStatus, setFoodEstimateStatus] = useState("");
@@ -10634,7 +10669,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     } catch (e) {
       console.log("Nutrition feedback error:", e?.message);
       setAiFeedback("");
-      setAiFeedbackError("Couldn't get feedback on your day.");
+      setAiFeedbackError(coachErrorText(e, "Couldn't get feedback on your day."));
     }
     setAiFeedbackLoading(false);
   };
@@ -10671,12 +10706,19 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     const minCalories = calorieFloor(sex);
     const slots = mealTimeSlots(wakeTime, mealsPerDay);
     setMealPlanWarning("");
+    setMealBuildFailure("");
     try {
       const targets = { calories: Math.max(macros.calories, minCalories), protein: macros.protein };
       const result = await requestMealPlan("meal_plan_build", `Build a ${mealsPerDay} meal daily plan. Goal: ${goal}. Targets: ${targets.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats.${slots.length ? ` The user wakes at ${wakeTime}; use these meal times in order: ${slots.join(", ")}.` : ""}\nUser preferences:\n${preferencesText(answers) || "none given"}`, targets, { allergies: parseAllergies(answers.allergies), wakeTime, minCalories });
       setPlanMeals(result.meals);
       if (mealPlanNeedsWarning(result.check)) setMealPlanWarning(mealPlanWarningText(result.check, targets));
-    } catch (e) { console.error("AI meals error:", e); setMealPlanWarning(e?.belowMinimum ? belowMinimumText(minCalories) : "Couldn't build your meal plan just now. Please try again."); }
+    } catch (e) {
+      console.error("AI meals error:", e);
+      if (e?.belowMinimum) setMealPlanWarning(belowMinimumText(minCalories));
+      else setMealBuildFailure(e?.offline
+        ? `${e.publicMessage || "The coach is offline for a few minutes. Your data is safe."} Your answers are saved: try again shortly, or pick from common meals now.`
+        : "Couldn't build your meal plan just now. Your answers are saved: try again, or pick from common meals instead.");
+    }
     setAiMealLoading(false);
   };
 
@@ -10936,7 +10978,8 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     // Rest days only get their own meals when that was chosen and some exist.
     const preparedRestDayMeals = hasRestDayPlan && restDayMeals.length ? prepareNutritionMeals(restDayMeals, nutritionStyle, mealsPerDay, getFinalMacros()) : [];
     const buildMode = editingRestDay ? restBuildMode : mealBuildMode;
-    const setBuildMode = editingRestDay ? setRestBuildMode : setMealBuildMode;
+    // Switching how to build meals clears a failed AI attempt's message.
+    const setBuildMode = mode => { setMealBuildFailure(""); if (mode !== "ai") setMealPlanWarning(""); (editingRestDay ? setRestBuildMode : setMealBuildMode)(mode); };
     const allergyList = parseAllergies(aiNutritionAnswers.allergies);
     const currentConflicts = mealAllergyConflicts(currentMeals, allergyList);
     const reviewConflicts = mealAllergyConflicts([...preparedPlanMeals, ...preparedRestDayMeals], allergyList);
@@ -11351,6 +11394,15 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                   {editingRestDay && restAiLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#E0EAF0" }}>🤖 Building your rest day meals...</div>}
                   {editingRestDay && restPlanNote && <div role="alert" data-testid="rest-plan-note" style={{ fontSize: 11, color: "#FFB547", margin: "10px 0", lineHeight: 1.5 }}>{restPlanNote}</div>}
                   {!editingRestDay && mealPlanWarning && <div role="alert" data-testid="meal-plan-warning" style={{ fontSize: 11, color: "#FFB547", margin: "10px 0", lineHeight: 1.5 }}>{mealPlanWarning}</div>}
+                  {!editingRestDay && mealBuildFailure && !aiMealLoading && (
+                    <div role="alert" data-testid="meal-build-failure" style={{ margin: "10px 0", padding: 12, borderRadius: 6, border: "1px solid rgba(255,45,120,.35)", background: "rgba(255,45,120,.06)" }}>
+                      <p style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "0 0 10px" }}>{mealBuildFailure}</p>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" onClick={() => buildAIMeals(aiNutritionAnswers)}>TRY AGAIN</button>
+                        <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => setBuildMode("common")}>PICK FROM COMMON MEALS INSTEAD</button>
+                      </div>
+                    </div>
+                  )}
                   {!editingRestDay && buildMode === "ai" && currentMeals.length > 0 && !aiMealLoading && (
                     <AiTweaksBox
                       meals={currentMeals}
@@ -12070,7 +12122,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     } catch (e) {
       console.log("Debrief feedback error:", e?.message);
       setAiFeedback("");
-      setAiFeedbackError("Couldn't get feedback on your day.");
+      setAiFeedbackError(coachErrorText(e, "Couldn't get feedback on your day."));
     }
     setAiFeedbackLoading(false);
   };

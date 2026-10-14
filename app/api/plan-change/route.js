@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { postAnthropicMessages } from "../../../lib/coaching/anthropic.js";
+import { postAnthropicMessages, providerErrorResponse } from "../../../lib/coaching/anthropic.js";
 import { buildCoachSystem } from "../../../lib/coaching/system.js";
 import { readPlanChangeReply } from "../../../lib/coaching/plan-change-reply.js";
 import { aiRequestAllowed, jsonSize, limitedResponse, readJsonBody } from "../../../lib/ai-guard.js";
@@ -80,7 +80,7 @@ Return only JSON:
         system,
         messages: [{ role: "user", content: `CURRENT PLAN\n${JSON.stringify(currentPlan)}\n\nRECENT LEGACY WORKOUTS\n${JSON.stringify(recentWorkouts)}\n\nSTRUCTURED EXERCISE HISTORY\n${JSON.stringify(structuredHistory || [])}${pendingChanges.length ? `\n\nCHANGE WAITING FOR APPROVAL (not saved yet)\n${pendingChanges.map((line) => `- ${line}`).join("\n")}` : ""}` }, ...messages],
       });
-    if (!provider.ok) return Response.json({ error: provider.publicError }, { status: provider.status === 429 ? 429 : 502 });
+    if (!provider.ok) return providerErrorResponse(provider);
     const payload = provider.payload;
     const text = payload.content?.map((block) => block.text || "").join("") || "";
     let result;
