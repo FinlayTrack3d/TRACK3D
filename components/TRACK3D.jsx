@@ -7451,7 +7451,7 @@ function withPlanApproval(sessions, now = new Date()) {
                   </div>
                   {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8", textAlign: "center" }}>LAST TIME: {Number(lastSets[sIdx].reps) > 0 ? lastSets[sIdx].reps : "—"}</div>}
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <div className="workout-log-wrap">
                   <button className="workout-log-set" aria-label={loggingWarmup ? "Log warm-up set" : "Log set"} onClick={confirmSet} disabled={!canLog}
                     style={{ background: canLog ? (loggingWarmup ? "#8AABB8" : NEON) : BORDER, border: "none", borderRadius: 10, cursor: canLog ? "pointer" : "not-allowed", color: "#080C10", fontWeight: 800, boxShadow: canLog && !loggingWarmup ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>{loggingWarmup ? "LOG WARM-UP" : "LOG SET"}</button>
                   {/* Warm-up toggle: small, and gone once the first working set is logged (Rule 16) */}
