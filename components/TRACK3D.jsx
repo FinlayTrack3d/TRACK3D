@@ -12,7 +12,7 @@ import { applyPlanChangeProposal, applyPlanChangeToWorkout, describePlanChange, 
 import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, midSessionCheckIn, nextUnfinishedExercise, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerSuggestion, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
-import { extractJsonObject, questionnaireAnswersFromExtraction } from "../lib/coaching/questionnaire";
+import { extractJsonObject, questionnaireAnswersFromExtraction, trainingDaysAnswer } from "../lib/coaching/questionnaire";
 import { estimateSession, fitSessionToBudget, repTargets, requestedBudget, splitRepTargets } from "../lib/workout";
 import { countsForMorningStreak, habitStreak, morningStreak, shiftDateKey, STREAK_MIN_MORNING_SCORE, streakBeforeToday } from "../lib/streaks";
 import { ACHIEVEMENT_CATEGORIES, computeAchievements, unseenAchievements } from "../lib/achievements";
@@ -27,8 +27,8 @@ import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, 
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
-import { swapAlternatives } from "../lib/exercise-swaps";
-import { starterPlan } from "../lib/starter-plans";
+import { EXERCISE_LIBRARY, canonicalExerciseName, swapAlternatives } from "../lib/exercise-swaps";
+import { sessionNameSuggestions, starterPlan } from "../lib/starter-plans";
 import { EXPERIENCE_ANSWERS, nextSetupStep, setupComplete, setupSavedBanner, setupSteps, tomorrowPlan } from "../lib/setup-steps";
 import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, defaultRanges, exerciseKind, withRanges, inSessionCue, parseRange, planExercise, planRangeReview, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
 
@@ -6340,6 +6340,9 @@ const DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 
 // A plan the user saves (AI-built after review, or built by hand) is approved
 // on save, with the same 8-week commitment as approving it later.
+// Any real workout (not one abandoned straight away) on or after this day.
+const realHistoryForDayOne = (history = [], fromKey = "") => history.some(log => log.date >= fromKey && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2));
+
 function withPlanApproval(sessions, now = new Date()) {
   const reviewDate = new Date(now);
   reviewDate.setDate(reviewDate.getDate() + 56);
@@ -6352,14 +6355,14 @@ function withPlanApproval(sessions, now = new Date()) {
   const AI_QUESTIONS = [
     { id: "goal", q: "What are we working towards? Pick up to two.", type: "choice", multi: 2, options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
     { id: "experience", q: "Where are you starting from?", type: "choice", options: Object.values(EXPERIENCE_ANSWERS), custom: true },
-    { id: "days_per_week", q: "How many days can you realistically train?", type: "choice", options: ["1 day", "2 days", "3 days", "4 days", "5 days", "6 days", "7 days"] },
-    { id: "preferred_days", q: "Which days work best for you?", type: "days" },
+    // One question for both: the days ticked give the number of days.
+    { id: "preferred_days", q: "Which days can you train?", type: "days" },
     { id: "session_length", q: "How much time do you have for training?", type: "availability" },
     { id: "equipment", q: "What equipment can you use?", type: "choice", options: ["Full gym", "Home gym with weights", "Dumbbells only", "Bodyweight only"], custom: true },
     { id: "split", q: "Do you have a preferred training split?", type: "choice", options: ["Let the coach choose", "Full body", "Upper / lower", "Push / pull / legs"], custom: true },
     { id: "favourites", q: "Which exercises do you enjoy?", type: "text", placeholder: "Exercises you want included — or no preference", skipLabel: "Not sure – let the coach choose" },
-    { id: "priorities", q: "What would you like to focus on?", type: "text", placeholder: "Muscle groups, skills or performance goals — or balanced progress" },
-    { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments — or none" },
+    { id: "priorities", q: "What would you like to focus on?", type: "text", placeholder: "Muscle groups, skills or performance goals", skipLabel: "Balanced progress" },
+    { id: "limitations", q: "Anything the coach should work around?", type: "text", placeholder: "Injuries, movements to avoid, other commitments", skipLabel: "Nothing to work around" },
   ];
 
   // Answers are strings, except goal (up to two options plus goal_custom) and preferred_days (day codes or FLEXIBLE).
@@ -6371,8 +6374,11 @@ function withPlanApproval(sessions, now = new Date()) {
   };
   // Experience is not asked again when the profile has it (unless CHANGE).
   const skipExperience = Boolean(knownExperience && !askExperience);
+  // Beginners are not asked for a split: the coach chooses (full body).
+  const builderBeginner = normaliseExperience(aiAnswers.experience) === "beginner";
   const aiAskedQuestions = AI_QUESTIONS.filter(question => (question.id === "experience"
     ? !skipExperience && (!aiQuestionIds || aiQuestionIds.includes(question.id) || askExperience)
+    : question.id === "split" && builderBeginner ? false
     : !aiQuestionIds || aiQuestionIds.includes(question.id)));
   // When the AI can't build a programme: try again with the same answers,
   // or a built-in starter plan from them (S0a), so setup never dead-ends.
@@ -6425,6 +6431,16 @@ function withPlanApproval(sessions, now = new Date()) {
   // The profile's experience fills in the builder's answer.
   const withKnownExperience = (answers = {}) => (knownExperience && !answers.experience ? { ...answers, experience: EXPERIENCE_ANSWERS[knownExperience] } : answers);
 
+  // "Change something" on the built programme: rebuilt with the same
+  // answers, the plan as it was and the change asked for.
+  const [aiPlanTweak, setAiPlanTweak] = useState("");
+  const tweakAiPlan = () => {
+    const request = aiPlanTweak.trim();
+    if (!request || !aiPlan) return;
+    const previous = JSON.stringify({ split_name: aiPlan.split_name, sessions: aiPlan.sessions });
+    setAiPlanTweak("");
+    buildAIPlan(aiAnswers, `${aiChatContext ? `${aiChatContext}\n\n` : ""}The programme you built: ${previous}\nThe user asked to change: "${request}". Keep everything else the same unless the change needs it.`);
+  };
   const openAiBuilder = () => {
     setAiStep(0); setAiAnswers(withKnownExperience({})); setAskExperience(false); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
   };
@@ -7213,7 +7229,8 @@ function withPlanApproval(sessions, now = new Date()) {
     setAiPlanError("");
     setAiBuildStage(0);
     setAiBuilding(true);
-    const context = AI_QUESTIONS.map(question => `${question.q}: ${aiAnswerText(question, answers) || "not answered"}`).join("\n")
+    const context = AI_QUESTIONS.map(question => `${question.q}: ${aiAnswerText(question, answers) || (question.id === "split" ? "Let the coach choose" : "not answered")}`).join("\n")
+      + `\nDays per week: ${parseInt(answers.days_per_week, 10) || "not answered"}`
       + (chatContext ? `\n\nEarlier conversation with the coach (respect anything relevant, such as injuries or preferences):\n${chatContext}` : "");
     const budgetText = String(answers.session_length || "");
     const budgetFor = session => requestedBudget(budgetText, session.days || []);
@@ -7438,7 +7455,7 @@ function withPlanApproval(sessions, now = new Date()) {
               <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginBottom: 12 }}>Ask about your current plan, progress, recovery or exercise choices.</p>
               {coachMessages.length === 0 && (
                 <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 12 }}>
-                  {["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"].map(prompt => (
+                  {(sessions.length ? ["What should I train today?", "How should I progress this week?", "Can I swap an exercise?"] : ["Help me choose a plan"]).map(prompt => (
                     <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanCoach(prompt)}>{prompt}</button>
                   ))}
                 </div>
@@ -7979,10 +7996,10 @@ function withPlanApproval(sessions, now = new Date()) {
       <div className="t3d-fade">
         <div className="t3d-card">
           <h2 className="t3d-ctitle">{aiPlan.starter ? "YOUR STARTER PROGRAMME" : "YOUR AI COACH PROGRAMME"} — {aiPlan.split_name}</h2>
-          <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds. X means an explosive movement.</p>
+          <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds.{aiPlan.sessions?.some(session => (session.exercises || []).some(exercise => /x/i.test(String(exercise.tempo || "")))) ? " X means an explosive movement." : ""}</p>
           {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
           {aiPlanError && aiPlanFailure}
-          {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>{aiPlan.notes}</div>}
+          {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6, whiteSpace: "pre-line" }}>{aiPlan.notes}</div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
@@ -7999,6 +8016,18 @@ function withPlanApproval(sessions, now = new Date()) {
               ))}
             </div>
           ))}
+          {!aiPlan.starter && (
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: "block", fontSize: 11, color: "#E0EAF0" }}>
+                Change something?
+                <input className="t3d-input" style={{ marginTop: 6 }} value={aiPlanTweak} disabled={aiBuilding}
+                  placeholder="e.g. swap deadlifts for hip thrusts, shorter Fridays"
+                  onChange={event => setAiPlanTweak(event.target.value)}
+                  onKeyDown={event => { if (event.key === "Enter" && aiPlanTweak.trim()) tweakAiPlan(); }} />
+              </label>
+              <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 8, minHeight: 40 }} disabled={!aiPlanTweak.trim() || aiBuilding} onClick={tweakAiPlan}>UPDATE PLAN</button>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setAiPlan(null)}>REBUILD</button>
             <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={async () => {
@@ -8037,7 +8066,8 @@ function withPlanApproval(sessions, now = new Date()) {
       </div></div>
     );
     const isLastQuestion = aiStep >= aiAskedQuestions.length - 1;
-    const answered = Boolean(aiAnswerText(currentQ).trim());
+    const daysAnswer = trainingDaysAnswer(aiAnswers);
+    const answered = currentQ.type === "days" ? daysAnswer.complete : Boolean(aiAnswerText(currentQ).trim());
     const goNext = (answers = aiAnswers) => isLastQuestion ? buildAIPlan(answers) : setAiStep(step => step + 1);
     const selectedValues = Array.isArray(aiAnswers[currentQ.id]) ? aiAnswers[currentQ.id] : aiAnswers[currentQ.id] ? [aiAnswers[currentQ.id]] : [];
     const optionStyle = selected => ({
@@ -8047,12 +8077,20 @@ function withPlanApproval(sessions, now = new Date()) {
       color: selected ? NEON : "#C5D6DC",
       boxShadow: selected ? `0 0 10px ${NEON}40` : "none",
     });
-    const chooseOption = option => setAiAnswers(answers => {
-      if (!currentQ.multi) return { ...answers, [currentQ.id]: option };
-      const current = Array.isArray(answers[currentQ.id]) ? answers[currentQ.id] : [];
-      if (current.includes(option)) return { ...answers, [currentQ.id]: current.filter(item => item !== option) };
-      return { ...answers, [currentQ.id]: [...current, option].slice(-currentQ.multi) };
-    });
+    // A single-choice answer moves on by itself, as in the nutrition questions.
+    const chooseOption = option => {
+      if (!currentQ.multi) {
+        const answers = { ...aiAnswers, [currentQ.id]: option };
+        setAiAnswers(answers);
+        setTimeout(() => goNext(answers), 250);
+        return;
+      }
+      setAiAnswers(answers => {
+        const current = Array.isArray(answers[currentQ.id]) ? answers[currentQ.id] : [];
+        if (current.includes(option)) return { ...answers, [currentQ.id]: current.filter(item => item !== option) };
+        return { ...answers, [currentQ.id]: [...current, option].slice(-currentQ.multi) };
+      });
+    };
     return (
       <div className="t3d-fade">
         <div className="t3d-card">
@@ -8104,26 +8142,53 @@ function withPlanApproval(sessions, now = new Date()) {
                     <button key={day} type="button" aria-pressed={selected} className="t3d-btn" style={{ ...optionStyle(selected), minWidth: 52, minHeight: 44, textAlign: "center", padding: "10px 8px" }}
                       onClick={() => setAiAnswers(answers => {
                         const current = (Array.isArray(answers.preferred_days) ? answers.preferred_days : []).filter(item => item !== "FLEXIBLE");
-                        return { ...answers, preferred_days: current.includes(day) ? current.filter(item => item !== day) : DAYS.filter(item => item === day || current.includes(item)) };
+                        const next = current.includes(day) ? current.filter(item => item !== day) : DAYS.filter(item => item === day || current.includes(item));
+                        return { ...answers, preferred_days: next, days_per_week: next.length ? `${next.length} ${next.length === 1 ? "day" : "days"}` : "" };
                       })}>{day}</button>
                   );
                 })}
               </div>
               <button type="button" aria-pressed={selectedValues.includes("FLEXIBLE")} className="t3d-btn" style={{ ...optionStyle(selectedValues.includes("FLEXIBLE")), width: "100%" }}
-                onClick={() => setAiAnswers(answers => ({ ...answers, preferred_days: ["FLEXIBLE"] }))}>
+                onClick={() => setAiAnswers(answers => ({ ...answers, preferred_days: ["FLEXIBLE"], days_per_week: answers.days_said || "" }))}>
                 {selectedValues.includes("FLEXIBLE") ? "✓ " : ""}I&apos;m flexible – let the coach choose
               </button>
+              {daysAnswer.flexible && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 11, color: "#C5D6DC", marginBottom: 8 }}>How many days a week?</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {[1, 2, 3, 4, 5, 6, 7].map(count => {
+                      const selected = daysAnswer.count === count;
+                      return <button key={count} type="button" aria-pressed={selected} className="t3d-btn" style={{ ...optionStyle(selected), minWidth: 44, minHeight: 44, textAlign: "center", padding: "10px 0" }}
+                        onClick={() => setAiAnswers(answers => ({ ...answers, days_per_week: `${count} ${count === 1 ? "day" : "days"}` }))}>{count}</button>;
+                    })}
+                  </div>
+                </div>
+              )}
+              {daysAnswer.mismatch && (
+                <div role="status" data-testid="days-mismatch" style={{ marginTop: 12, padding: 10, borderRadius: 6, border: "1px solid rgba(255,181,71,.45)", background: "rgba(255,181,71,.06)", fontSize: 11, color: "#FFB547", lineHeight: 1.6 }}>
+                  You picked {daysAnswer.mismatch.picked} day{daysAnswer.mismatch.picked === 1 ? "" : "s"} but said {daysAnswer.mismatch.said}. Use {daysAnswer.mismatch.picked}, or pick {daysAnswer.mismatch.picked < daysAnswer.mismatch.said ? "another day" : "fewer days"}?
+                  <div><button type="button" className="t3d-btn t3d-btn-sm" style={{ marginTop: 8, minHeight: 40 }} onClick={() => setAiAnswers(answers => ({ ...answers, days_said: "" }))}>USE {daysAnswer.mismatch.picked} DAY{daysAnswer.mismatch.picked === 1 ? "" : "S"}</button></div>
+                </div>
+              )}
             </div>
           )}
           {currentQ.type === "availability" && (
             <div style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                {[30, 45, 60, 75, 90].map(minutes => {
+                  const value = `${minutes} minutes every session`;
+                  const selected = aiAnswers[currentQ.id] === value;
+                  return <button key={minutes} type="button" aria-pressed={selected} className="t3d-btn" style={{ ...optionStyle(selected), flex: "1 1 60px", minHeight: 44, textAlign: "center", padding: "10px 6px" }}
+                    onClick={() => { const answers = { ...aiAnswers, [currentQ.id]: value }; setAiAnswers(answers); setTimeout(() => goNext(answers), 250); }}>{minutes} MIN</button>;
+                })}
+              </div>
               <p style={{ fontSize: 12, color: "#8AABB8", lineHeight: 1.6 }}>
-                Enter any duration or range. If your time varies, tell the coach what works on each day.
+                Or, if it varies, say what works on each day.
               </p>
               <label style={{ display: "block", fontSize: 12 }}>
                 Your available time
                 <textarea className="t3d-input" rows={4} style={{ marginTop: 8, resize: "vertical" }}
-                  placeholder={"e.g. 35 minutes every session\nOr Monday 30 minutes, Wednesday 45–60, Saturday 75"}
+                  placeholder={"e.g. Monday 30 minutes, Wednesday 45–60, Saturday 75"}
                   value={aiAnswers[currentQ.id] || ""}
                   onChange={event => setAiAnswers(answers => ({ ...answers, [currentQ.id]: event.target.value }))} />
               </label>
@@ -8167,9 +8232,9 @@ function withPlanApproval(sessions, now = new Date()) {
   };
 
   // A plan the user built by hand is theirs: save it approved, starting now.
-  // Coach check before a plan the user wrote is saved: per-set rep ranges,
-  // staggered (heaviest set first) or straight for beginners. The user can
-  // take the suggestions or keep their own.
+  // First a coach check: per-set rep ranges, staggered (heaviest set first)
+  // or straight for beginners. The user can take the suggestions or keep
+  // their own.
   const saveManualPlan = async (planSessions = sessions, { checked = false } = {}) => {
     if (!checked) {
       const review = planRangeReview(planSessions, { straight: straightSets });
@@ -8378,7 +8443,8 @@ function withPlanApproval(sessions, now = new Date()) {
                 ))}
               </div>
               <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={() => {
-                setSessions(Array.from({ length: numSessions }, (_, i) => ({ name: `Session ${i+1}`, days: [], exercises: [] })));
+                const names = sessionNameSuggestions(numSessions);
+                setSessions(Array.from({ length: numSessions }, (_, i) => ({ name: names[i], days: [], exercises: [] })));
                 setSetupStep(1); setCurrentSessionIdx(0);
               }}>NEXT →</button>
             </div>
@@ -8394,7 +8460,7 @@ function withPlanApproval(sessions, now = new Date()) {
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>SESSION NAME</div>
                 <input className="t3d-input" aria-label={`Session ${currentSessionIdx + 1} name`} placeholder="e.g. Push, Pull, Legs, Upper..."
-                  value={sessions[currentSessionIdx].name}
+                  value={sessions[currentSessionIdx].name} onFocus={event => event.target.select()}
                   onChange={e => setSessions(prev => prev.map((s, i) => i === currentSessionIdx ? { ...s, name: e.target.value } : s))} />
               </div>
 
@@ -8443,7 +8509,7 @@ function withPlanApproval(sessions, now = new Date()) {
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
-                {currentSessionIdx > 0 && <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setCurrentSessionIdx(i => i-1)}>← BACK</button>}
+                <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => (currentSessionIdx > 0 ? setCurrentSessionIdx(i => i-1) : setSetupStep(0))}>← BACK</button>
                 {currentSessionIdx < sessions.length-1 ? (
                   <button className="t3d-btn" style={{ flex: 1, padding: 12 }} onClick={() => setCurrentSessionIdx(i => i+1)}>NEXT SESSION →</button>
                 ) : (
@@ -8539,7 +8605,10 @@ function withPlanApproval(sessions, now = new Date()) {
 
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>EXERCISE NAME</div>
-                <input className="t3d-input" placeholder="e.g. Bench Press" value={newEx.name} onChange={e => setNewEx(n => ({ ...n, name: e.target.value }))} />
+                <input className="t3d-input" placeholder="e.g. Bench Press" list="exercise-names" autoComplete="off" value={newEx.name} onChange={e => setNewEx(n => ({ ...n, name: e.target.value }))} />
+                <datalist id="exercise-names">
+                  {[...new Set([...history.flatMap(log => (log.exercises || []).map(exercise => exercise.name)).filter(Boolean), ...EXERCISE_LIBRARY])].map(name => <option key={name} value={name} />)}
+                </datalist>
               </div>
 
               <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
@@ -8553,9 +8622,10 @@ function withPlanApproval(sessions, now = new Date()) {
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>TEMPO (OPT)</div>
-                  <input className="t3d-input" placeholder="3-1-0-1" value={newEx.tempo} onChange={e => setNewEx(n => ({ ...n, tempo: e.target.value }))} />
+                  <input className="t3d-input" placeholder="3-1-1-0" value={newEx.tempo} onChange={e => setNewEx(n => ({ ...n, tempo: e.target.value }))} />
                 </div>
               </div>
+              <div style={{ fontSize: 9, color: "#8AABB8", margin: "-4px 0 12px", lineHeight: 1.5 }}>Tempo: seconds to lower · pause · lift · pause. Leave it blank if you&apos;re not sure.</div>
 
               {/* Reps: one box for all sets, per-set optional */}
               <div style={{ marginBottom: 16 }}>
@@ -8586,8 +8656,9 @@ function withPlanApproval(sessions, now = new Date()) {
                 <button className="t3d-btn" style={{ flex: 1 }} disabled={!newEx.name.trim()}
                   onClick={() => {
                     const setCount = newEx.sets || 3;
+                    const knownNames = [...sessions.flatMap(session => (session.exercises || []).map(item => item.name)), ...history.flatMap(log => (log.exercises || []).map(item => item.name))].filter(Boolean);
                     const exercise = {
-                      name: newEx.name.trim(), sets: setCount, tempo: newEx.tempo,
+                      name: canonicalExerciseName(newEx.name, knownNames), sets: setCount, tempo: newEx.tempo,
                       reps: Array.from({ length: setCount }, (_, index) => (newEx.perSet ? newEx.reps[index] : newEx.repsAll)?.trim() || "8-12"),
                     };
                     setSessions(prev => prev.map((s, i) => i === addExerciseModal ? {
@@ -8740,6 +8811,8 @@ function withPlanApproval(sessions, now = new Date()) {
     }
     setAiPrefillNote(Object.keys(answers).length ? "" : "We could not read your answers from the coach chat, so please answer the questions below.");
     answers = withKnownExperience(answers);
+    // A number of days from the chat is checked against the days ticked.
+    if (answers.days_per_week && !(Array.isArray(answers.preferred_days) && answers.preferred_days.length)) answers = { ...answers, days_said: answers.days_per_week };
     setAskExperience(false);
     const missing = AI_QUESTIONS.filter(question => !aiAnswerText(question, answers).trim()).map(question => question.id);
     setPlanRebuildPreparing(false);
@@ -9068,6 +9141,10 @@ function withPlanApproval(sessions, now = new Date()) {
   // No session on today's day of the plan: say so first. A missed session is
   // only an optional catch-up, not the day's workout.
   const restDay = !todaySession && sessions.length > 0;
+  // A plan built today with nothing trained yet: offer its first session
+  // today, whatever day it is scheduled for.
+  const dayOneSession = planStartKey === today && !realHistoryForDayOne(history, planStartKey)
+    ? sessions.find(session => !isActivitySession(session)) || null : null;
   let nextScheduled = null;
   for (let daysAhead = 1; daysAhead <= 7 && !nextScheduled; daysAhead += 1) {
     const date = new Date(homeTodayAnchor);
@@ -9233,6 +9310,12 @@ function withPlanApproval(sessions, now = new Date()) {
               <div data-testid="rest-day">
                 <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: NEON2, letterSpacing: 2, marginBottom: 6 }}>REST DAY</div>
                 <div style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6 }}>Nothing is scheduled today. Rest is part of the plan.</div>
+                {dayOneSession && (
+                  <div data-testid="day-one" style={{ marginTop: 14, padding: 12, border: `1px solid ${NEON}`, borderRadius: 7, background: "rgba(0,255,178,.06)" }}>
+                    <div style={{ fontSize: 11, color: "#E0EAF0", lineHeight: 1.6, marginBottom: 10 }}>Just built your plan? You can start with {dayOneSession.name} today.</div>
+                    <button className="t3d-big-btn" style={{ margin: 0, minHeight: 44, background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 11, fontWeight: 900, letterSpacing: 2 }} onClick={() => requestStartWorkout(dayOneSession)}>START {dayOneSession.name.toUpperCase()} TODAY</button>
+                  </div>
+                )}
                 {/* The next day of the plan is the main suggestion. */}
                 {nextScheduled && (
                   <div data-testid="next-session" style={{ marginTop: 14, padding: 12, border: `1px solid ${BORDER}`, borderRadius: 7, background: SURFACE2 }}>
@@ -9503,7 +9586,7 @@ function withPlanApproval(sessions, now = new Date()) {
             {planNotice && <div role="status" data-testid="plan-notice" style={{ marginBottom: 12, fontSize: 11, color: NEON }}>✓ {planNotice}</div>}
             <div style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${programmeApproved ? "rgba(0,255,178,.3)" : "rgba(255,181,71,.3)"}`, borderRadius: 6, background: programmeApproved ? "rgba(0,255,178,.04)" : "rgba(255,181,71,.04)" }}>
               <div style={{ fontSize: 9, color: programmeApproved ? NEON : "#FFB547", marginBottom: programmeApproved ? 0 : 7 }}>
-                {programmeApproved ? `8-WEEK COMMITMENT APPROVED · REVIEW FROM ${(() => { const reviewAfter = sessions.find(session => session.approval?.reviewAfter)?.approval?.reviewAfter; return /^\d{4}-\d{2}-\d{2}$/.test(String(reviewAfter || "")) ? dateKeyLabel(reviewAfter, { day: "numeric", month: "short" }).toUpperCase() : "LATER"; })()}` : "OPTIONAL: CHECK THE DAYS AND EXERCISES, THEN LOCK THIS PLAN IN FOR 8 WEEKS. YOU CAN TRAIN WITHOUT DOING THIS."}
+                {programmeApproved ? `PLAN SET · REVIEW YOUR PLAN ON ${(() => { const reviewAfter = sessions.find(session => session.approval?.reviewAfter)?.approval?.reviewAfter; return /^\d{4}-\d{2}-\d{2}$/.test(String(reviewAfter || "")) ? dateKeyLabel(reviewAfter, { day: "numeric", month: "short" }).toUpperCase() : "LATER"; })()}` : "OPTIONAL: CHECK THE DAYS AND EXERCISES, THEN LOCK THIS PLAN IN FOR 8 WEEKS. YOU CAN TRAIN WITHOUT DOING THIS."}
               </div>
               {!programmeApproved && <button className="t3d-btn t3d-btn-sm" onClick={() => { setApprovalMessages([]); setApprovalReview("all"); }}>REVIEW &amp; LOCK IN PLAN</button>}
             </div>
