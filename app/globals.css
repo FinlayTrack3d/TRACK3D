@@ -54,6 +54,9 @@ a {
 .workout-number::placeholder { color: #7D8C95; opacity: 1; }
 .workout-log-set { width: 82px; min-height: 72px; margin-bottom: 16px; padding: 8px; font: 800 10px "Orbitron", monospace; letter-spacing: 1px; }
 .workout-field { min-width: 0; }
+/* LOG SET with the small warm-up chip under it: the wrapper takes the grid cell. */
+.workout-log-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-bottom: 16px; }
+.workout-log-wrap .workout-log-set { margin-bottom: 0; }
 .workout-steppers { display: flex; gap: 6px; margin-top: 8px; }
 .workout-steppers .t3d-btn { flex: 1; min-height: 44px; padding: 6px 4px; font-size: 11px; background: rgba(0,200,255,.08); border-color: rgba(0,200,255,.45); color: #00C8FF; }
 .workout-steppers .t3d-btn:hover { background: rgba(0,200,255,.16); }
@@ -68,4 +71,5 @@ a {
  .workout-set-fields > .workout-field:last-child { grid-column: 2; grid-row: 1; }
  .workout-number { height: 88px !important; font-size: 32px !important; }
  .workout-log-set { grid-column: 1 / -1; grid-row: 2; width: 100% !important; min-height: 50px !important; margin: 0; }
+ .workout-log-wrap { grid-column: 1 / -1; grid-row: 2; width: 100%; margin: 0; }
 }

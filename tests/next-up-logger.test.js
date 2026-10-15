@@ -112,7 +112,7 @@ test("the halfway check-in compares today's sets with the same sets last time", 
   assert.equal(midSessionCheckIn({ exercises, completedSets: { 0: [{ weight: "80", reps: "8" }] }, lastSetsByExercise }).halfway, false);
   const strong = midSessionCheckIn({ exercises, completedSets: { 0: [{ weight: "82.5", reps: "8" }, { weight: "80", reps: "7" }] }, lastSetsByExercise });
   assert.deepEqual({ halfway: strong.halfway, better: strong.better, same: strong.same, under: strong.under, verdict: strong.verdict }, { halfway: true, better: 1, same: 1, under: 0, verdict: "strong" });
-  assert.deepEqual(strong.lines, ["Bench Press: 8×82.5kg, 7×80kg (last time 8×80kg, 7×80kg)"]);
+  assert.deepEqual(strong.lines, ["Bench Press: set 1 8×82.5kg, set 2 7×80kg (last time: set 1 8×80kg, set 2 7×80kg)"]);
   assert.deepEqual(strong.remaining, ["Row"]);
   const off = midSessionCheckIn({ exercises, completedSets: { 0: [{ weight: "80", reps: "5" }, { weight: "80", reps: "4" }] }, lastSetsByExercise });
   assert.equal(off.verdict, "off");

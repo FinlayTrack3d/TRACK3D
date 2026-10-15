@@ -21,12 +21,14 @@ import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDay
 import { nextUpItems } from "../lib/next-up";
 import { dailyScore } from "../lib/daily-score";
 import { linkedHabitIds } from "../lib/habit-links";
-import { EXPERIENCE_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
+import { EXPERIENCE_CHOICES, GYM_STEP_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseGymSteps, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
 import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, targetUpdateSuggestion } from "../lib/nutrition-setup";
 import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, mealSwap, swappedMealResult, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
+import { swapAlternatives } from "../lib/exercise-swaps";
+import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, defaultRanges, exerciseKind, withRanges, inSessionCue, parseRange, planExercise, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
 // On start the dashboard, the hidden Morning and Fitness tabs and the weekly
@@ -525,6 +527,41 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   const endRef = useRef(null);
   const messageListRef = useRef(null);
 
+  // Unread coach messages (playbook Rule 49a): the coach shows grey when
+  // there is nothing new, yellow with a count when there is. A reply to
+  // something the user just asked is not "new"; opening the coach reads all.
+  const readKey = storageKey ? `track3d-coach-read-${storageKey}` : null;
+  const [assistantRead, setAssistantRead] = useState(() => {
+    try { return readKey ? Number(localStorage.getItem(readKey)) || 0 : 0; } catch { return 0; }
+  });
+  // Coach messages the user didn't ask for (a check-in, a review), in order.
+  const unpromptedAssistant = [];
+  messages.forEach((message, index) => {
+    if (message.role !== "assistant" || message.hidden || message.error) return;
+    const before = messages.slice(0, index).reverse().find(item => item.role !== "note");
+    if (!(before?.role === "user" && !before.hidden)) unpromptedAssistant.push(index);
+  });
+  const assistantTotal = unpromptedAssistant.length;
+  const unreadCount = compact && !expanded ? Math.max(0, assistantTotal - Math.min(assistantRead, assistantTotal)) : 0;
+  // Opening or minimising the coach reads everything in it.
+  const markRead = () => {
+    setAssistantRead(assistantTotal);
+    try { if (readKey) localStorage.setItem(readKey, String(assistantTotal)); } catch { /* storage unavailable */ }
+  };
+  const toggleExpanded = () => { markRead(); setExpanded(value => !value); };
+
+  // A new workout starts a fresh page in the minimised chat: last
+  // workout's messages stay in the history, not between today's sets.
+  useEffect(() => {
+    if (!storageKey) return;
+    const divider = event => {
+      if (event.detail?.storageKey !== storageKey) return;
+      setMessages(current => (current.some(message => message.role === "assistant" || message.role === "user") ? [...current, { role: "note", content: event.detail?.note || "New workout", divider: true }] : current));
+    };
+    window.addEventListener("track3d-coach-divider", divider);
+    return () => window.removeEventListener("track3d-coach-divider", divider);
+  }, [storageKey]);
+
   useEffect(() => {
     if (!storageKey) return;
     try {
@@ -638,6 +675,7 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
 
   const activate = () => {
     setStarted(true);
+    markRead();
     if (compact) setExpanded(true);
     if (!openWithoutPrompt) send(openingMessage || "Give me a quick assessment of my day so far and what I should focus on.", { hidden: true });
   };
@@ -647,6 +685,8 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
     let result;
     try { result = await onAction(action, permanent); } catch (error) { result = { ok: false, message: `Not saved: ${error?.message || "something went wrong"}.` }; }
     setMessages(previous => [...previous, { role: "assistant", content: result?.message || (result?.ok ? "Done." : "Nothing was changed.") }]);
+    // The result of a tap is not news.
+    setAssistantRead(previous => { const next = previous + 1; try { if (readKey) localStorage.setItem(readKey, String(next)); } catch { /* storage unavailable */ } return next; });
     setTimeout(scroll, 50);
   };
 
@@ -722,14 +762,18 @@ function AICoach({ dayContext, area = "dashboard", context, onOpenChangePlan, ti
   // Messages on screen with their place in the conversation (for the
   // changes proposed under them). The minimised chat shows the last two.
   const visibleEntries = messages.map((m, index) => ({ m, index })).filter(({ m }) => !m.hidden);
-  const shownEntries = compact && !expanded ? visibleEntries.slice(-2) : visibleEntries;
+  const lastDivider = visibleEntries.map(entry => entry.m.divider ? entry.index : -1).reduce((a, b) => Math.max(a, b), -1);
+  const shownEntries = compact && !expanded ? visibleEntries.filter(entry => entry.index > lastDivider).slice(-2) : visibleEntries;
   const shownIndexes = new Set(shownEntries.map(entry => entry.index));
 
   return (
-    <div data-testid={compact ? "compact-coach" : undefined} className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20, ...(compact ? { borderColor: "rgba(0,255,178,.4)", background: "linear-gradient(160deg, rgba(0,255,178,.06), #0D1318 60%)" } : {}) }}>
+    <div data-testid={compact ? "compact-coach" : undefined} data-unread={compact ? unreadCount : undefined} className={`t3d-card ${compact ? "t3d-compact-coach" : ""} ${expanded ? "t3d-coach-expanded" : ""}`} style={{ height: compact ? "auto" : "100%", display: "flex", flexDirection: "column", padding: compact ? 10 : 20, ...(compact ? { borderColor: unreadCount ? "#FFB547" : "rgba(138,171,184,.35)", background: unreadCount ? "linear-gradient(160deg, rgba(255,181,71,.07), #0D1318 60%)" : "#0D1318", transition: "border-color .2s" } : {}) }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? NEON : undefined }}>{compact && <span aria-hidden="true">🤖 </span>}{title || "AI COACH"}</div>
-        {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5 }} onClick={() => setExpanded(value => !value)}>{expanded ? "MINIMISE" : "OPEN"}</button>}
+        <div className="t3d-ctitle" style={{ marginBottom: compact ? 6 : 14, color: compact ? (unreadCount ? "#FFB547" : "#A9BBC3") : undefined, display: "flex", alignItems: "center", gap: 6 }}>
+          {compact && <span aria-hidden="true">🤖</span>}{title || "AI COACH"}
+          {unreadCount > 0 && <span data-testid="coach-unread-badge" aria-hidden="true" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: "#FFB547", color: "#080C10", fontFamily: "'Inter',sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: 0 }}>{unreadCount > 9 ? "9+" : unreadCount}</span>}
+        </div>
+        {compact && started && <button type="button" className="t3d-btn t3d-btn-sm" aria-label={expanded ? "Minimise the coach" : `Open the coach${unreadCount ? `, ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : ""}`} style={{ padding: "4px 7px", fontSize: 7, marginBottom: 5, ...(unreadCount ? { borderColor: "#FFB547", color: "#FFB547" } : {}) }} onClick={toggleExpanded}>{expanded ? "MINIMISE" : "OPEN"}</button>}
       </div>
       {!started ? (
         <div style={{ flex: 1, display: "flex", flexDirection: compact ? "row" : "column", alignItems: "center", justifyContent: compact ? "space-between" : "center", gap: compact ? 10 : 0, padding: compact ? 0 : "20px 0" }}>
@@ -5147,6 +5191,8 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   const [sex, setSex] = useState(sexLabel(profile?.sex));
   const [experienceLevel, setExperienceLevel] = useState(profile?.experienceLevel || "");
   const [personality, setPersonality] = useState(profile?.personality || "balanced");
+  // The weight steps the user's gym goes up in (playbook Rule 20).
+  const [gymSteps, setGymSteps] = useState(() => ({ ...normaliseGymSteps(profile?.gymSteps) }));
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
   const problem = profileProblem({ heightCm, dateOfBirth, sex, experienceLevel }, today, { partial: true });
@@ -5154,7 +5200,8 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   const profileValues = profileUpdate({ heightCm, dateOfBirth, sex });
   const profileChanged = Object.keys(profileChanges(profile || {}, { heightCm, dateOfBirth, sex })).length > 0;
   const coachChanged = (experienceLevel || null) !== (profile?.experienceLevel || null) || personality !== (profile?.personality || "balanced");
-  const canSave = !problem && !saving && (profileChanged || coachChanged);
+  const gymStepsChanged = JSON.stringify(normaliseGymSteps(gymSteps)) !== JSON.stringify(normaliseGymSteps(profile?.gymSteps));
+  const canSave = !problem && !saving && (profileChanged || coachChanged || gymStepsChanged);
   const touched = Boolean(heightCm || dateOfBirth || sex);
   const save = async () => {
     if (!canSave) return;
@@ -5168,7 +5215,13 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
       profileChanged ? supabase.from("user_profiles").upsert({ user_id: user.id, ...values, updated_at: updatedAt }, { onConflict: "user_id" }) : { error: null },
       coachChanged ? supabase.from("coach_profiles").upsert({ user_id: user.id, ...(experienceLevel ? { experience_level: experienceLevel } : {}), personality, updated_at: updatedAt }, { onConflict: "user_id" }) : { error: null },
     ]);
+    // Gym steps are saved on their own, so a database without the
+    // gym_steps column still saves the rest of the profile.
+    const stepsResult = gymStepsChanged
+      ? await supabase.from("user_profiles").upsert({ user_id: user.id, gym_steps: normaliseGymSteps(gymSteps), updated_at: updatedAt }, { onConflict: "user_id" })
+      : { error: null };
     setSaving(false);
+    if (stepsResult.error) console.error("Gym steps save error:", stepsResult.error.message);
     const error = profileResult.error || coachResult.error;
     if (error) {
       console.error("Profile save error:", error.message);
@@ -5188,7 +5241,9 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
       sex: savedFields.sex ?? profile?.sex ?? null,
       experienceLevel: savedFields.experienceLevel,
       personality,
+      gymSteps: stepsResult.error ? normaliseGymSteps(profile?.gymSteps) : normaliseGymSteps(gymSteps),
     });
+    if (stepsResult.error) setStatus("Your profile is saved, but your gym's weight steps couldn't be: the database needs the latest update (gym_steps).");
   };
   return (
     <div data-testid="profile-form" style={{ padding: "12px 0 4px" }}>
@@ -5229,6 +5284,22 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
           </button>
         ))}
       </div>
+      <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, margin: "12px 0 6px" }}>YOUR GYM&apos;S WEIGHT STEPS <span style={{ color: "#8AABB8", letterSpacing: 0 }}>· what the next weight up is</span></div>
+      <div data-testid="gym-steps" style={{ display: "grid", gap: 6, marginBottom: 6 }}>
+        {Object.entries(GYM_STEP_CHOICES).map(([equipment, choices]) => {
+          const current = gymSteps[equipment] ?? DEFAULT_GYM_STEPS[equipment];
+          return (
+            <div key={equipment} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ flex: 1, fontSize: 10, color: "#8AABB8" }}>{EQUIPMENT_LABELS[equipment]}</span>
+              {choices.map(choice => (
+                <button key={choice} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={current === choice} aria-label={`${EQUIPMENT_LABELS[equipment]}: ${choice} kg steps`}
+                  onClick={() => setGymSteps(steps => ({ ...steps, [equipment]: choice }))}
+                  style={{ minWidth: 44, fontSize: 9, background: current === choice ? "rgba(0,255,178,.12)" : "transparent", borderColor: current === choice ? NEON : BORDER, color: current === choice ? NEON : "#8AABB8" }}>{choice} kg</button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
       {touched && problem && <div style={{ fontSize: 10, color: "#FFB547", margin: "6px 0" }}>{problem}</div>}
       {!problem && missing.length > 0 && (
         <div data-testid="profile-missing" style={{ fontSize: 10, color: "#8AABB8", margin: "6px 0", lineHeight: 1.5 }}>
@@ -5240,6 +5311,95 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
         <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={onCancel}>CANCEL</button>
         <button className="t3d-btn" style={{ flex: 1, padding: 10 }} disabled={!canSave} onClick={save}>{saving ? "SAVING..." : "SAVE PROFILE"}</button>
       </div>
+    </div>
+  );
+}
+
+// ─── Daily steps (playbook Rules 55-56) ──────────────────────────────────────
+// Today's steps against the goal, a quick way to log them, and yesterday's
+// until midday the next day. Stored in daily_steps (one row per day).
+const DEFAULT_STEP_GOAL = 8000;
+function StepsCard({ user, today, profile, onProfileSaved }) {
+  const yesterday = shiftDateKey(today, -1);
+  const [rows, setRows] = useState({});
+  const [loadError, setLoadError] = useState("");
+  const [entry, setEntry] = useState("");
+  const [yesterdayEntry, setYesterdayEntry] = useState("");
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goalEntry, setGoalEntry] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");
+  const goal = Number(profile?.stepGoal) > 0 ? Number(profile.stepGoal) : DEFAULT_STEP_GOAL;
+  const beforeMidday = new Date().getHours() < 12;
+
+  useEffect(() => {
+    if (!user?.id) return;
+    let cancelled = false;
+    supabase.from("daily_steps").select("date,steps").eq("user_id", user.id).in("date", [today, yesterday]).then(({ data, error }) => {
+      if (cancelled) return;
+      if (error) { setLoadError("Steps need the latest database update."); return; }
+      setLoadError("");
+      setRows(Object.fromEntries((data || []).map(row => [row.date, Number(row.steps) || 0])));
+    });
+    return () => { cancelled = true; };
+  }, [user?.id, today, yesterday]);
+
+  const saveSteps = async (date, value) => {
+    const steps = Math.round(Number(value));
+    if (!Number.isFinite(steps) || steps < 0 || steps > 100000) { setStatus("Enter a number of steps between 0 and 100,000."); return false; }
+    setSaving(true);
+    const { error } = await supabase.from("daily_steps").upsert({ user_id: user.id, date, steps, updated_at: new Date().toISOString() }, { onConflict: "user_id,date" });
+    setSaving(false);
+    if (error) { setStatus("Couldn't save your steps. Please try again."); return false; }
+    setRows(current => ({ ...current, [date]: steps }));
+    setStatus("");
+    return true;
+  };
+  const saveGoal = async () => {
+    const stepGoal = Math.round(Number(goalEntry));
+    if (!Number.isFinite(stepGoal) || stepGoal < 1000 || stepGoal > 30000) { setStatus("Set a goal between 1,000 and 30,000 steps."); return; }
+    const { error } = await supabase.from("user_profiles").upsert({ user_id: user.id, step_goal: stepGoal, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    if (error) { setStatus("Couldn't save your goal: the database needs the latest update (step_goal)."); return; }
+    onProfileSaved?.({ ...(profile || {}), stepGoal });
+    setGoalOpen(false);
+    setStatus("");
+  };
+
+  const todaySteps = rows[today];
+  const share = todaySteps ? Math.min(todaySteps / goal, 1) : 0;
+  const inputStyle = { width: 110, padding: "8px 10px", background: SURFACE2, border: `1px solid ${BORDER}`, borderRadius: 6, color: "#E0EAF0", fontSize: 12 };
+  return (
+    <div className="t3d-card" data-testid="steps-card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+        <div className="t3d-ctitle" style={{ margin: 0 }}>STEPS TODAY</div>
+        <button type="button" onClick={() => { setGoalEntry(String(goal)); setGoalOpen(open => !open); }} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 9, minHeight: 32, textDecoration: "underline" }}>goal {goal.toLocaleString()}</button>
+      </div>
+      {loadError ? <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 8 }}>{loadError}</div> : (
+        <>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 22, color: todaySteps >= goal ? NEON : "#E0EAF0", margin: "8px 0 6px" }}>
+            {todaySteps !== undefined ? todaySteps.toLocaleString() : "—"} <span style={{ fontSize: 10, color: "#8AABB8", letterSpacing: 1 }}>/ {goal.toLocaleString()}</span>
+          </div>
+          <div className="t3d-pbar"><div className="t3d-pfill" style={{ width: `${share * 100}%`, background: share >= 1 ? NEON : NEON2 }} /></div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+            <input type="number" inputMode="numeric" aria-label="Today's steps" placeholder={todaySteps !== undefined ? String(todaySteps) : "Today's steps"} value={entry} onChange={event => setEntry(event.target.value)} style={inputStyle} />
+            <button className="t3d-btn t3d-btn-sm" disabled={saving || entry === ""} onClick={async () => { if (await saveSteps(today, entry)) setEntry(""); }}>{todaySteps !== undefined ? "UPDATE" : "+ ADD STEPS"}</button>
+          </div>
+          {beforeMidday && rows[yesterday] === undefined && (
+            <div data-testid="steps-yesterday" style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap", fontSize: 10, color: "#8AABB8" }}>
+              <span>Missed yesterday?</span>
+              <input type="number" inputMode="numeric" aria-label="Yesterday's steps" placeholder="Yesterday's steps" value={yesterdayEntry} onChange={event => setYesterdayEntry(event.target.value)} style={inputStyle} />
+              <button className="t3d-btn t3d-btn-sm" disabled={saving || yesterdayEntry === ""} onClick={async () => { if (await saveSteps(yesterday, yesterdayEntry)) setYesterdayEntry(""); }}>SAVE</button>
+            </div>
+          )}
+        </>
+      )}
+      {goalOpen && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
+          <input type="number" inputMode="numeric" aria-label="Daily step goal" value={goalEntry} onChange={event => setGoalEntry(event.target.value)} style={inputStyle} />
+          <button className="t3d-btn t3d-btn-sm" onClick={saveGoal}>SAVE GOAL</button>
+        </div>
+      )}
+      {status && <div role="alert" style={{ fontSize: 10, color: "#FFB547", marginTop: 8 }}>{status}</div>}
     </div>
   );
 }
@@ -5529,6 +5689,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           </div>
         )}
       </div>}
+      <StepsCard user={user} today={today} profile={profile} onProfileSaved={onProfileSaved} />
       {showGetStarted && (
         <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
           <div className="t3d-ctitle">GET STARTED</div>
@@ -5858,18 +6019,21 @@ function workoutProgressLine({ activeSession, exerciseIdx = 0, completedSets = {
 
 const exerciseCountText = session => { const count = session?.exercises?.length || 0; return `${count} exercise${count === 1 ? "" : "s"}`; };
 
-function normalizeFitnessSessions(sessions = []) {
+// straight: the user trains on straight sets (beginners, Rule 70a), so a
+// single rep target becomes the same range on every set.
+function normalizeFitnessSessions(sessions = [], { straight = false } = {}) {
   return sessions.map(session => ({
     ...session,
     exercises: (session.exercises || []).map(exercise => {
       const sets = Math.max(1, parseInt(exercise.sets, 10) || 3);
       // One target per set, also when the plan kept them in one string ("6-8,6-8,8,10").
-      return { ...exercise, sets, reps: repTargets(exercise.reps, sets) };
+      // Every set has a rep range (playbook V1.3): a single target like "10" becomes one.
+      return withRanges({ ...exercise, sets, reps: repTargets(exercise.reps, sets) }, { straight });
     }),
   }));
 }
 
-function Fitness({ user, isActive = true }) {
+function Fitness({ user, isActive = true, profile = null }) {
   const homeTimeZone = resolveHomeTimeZone(user);
   const zonedToday = useZonedDateKey(homeTimeZone);
   const homeDate = { ...getZonedDateInfo(new Date(), homeTimeZone), dateKey: zonedToday };
@@ -5935,6 +6099,12 @@ function Fitness({ user, isActive = true }) {
     if (log) log.scrollTop = log.scrollHeight;
   }, [planChangeMessages.length, planChangeLoading, planChangeOpen]);
   const [replaceWarning, setReplaceWarning] = useState(null);
+  // The swap picker (playbook Rules 39-40): today only unless the user
+  // chooses to update the plan.
+  const [swapQuery, setSwapQuery] = useState("");
+  const [swapScope, setSwapScope] = useState("today");
+  const [swapError, setSwapError] = useState("");
+  const [swapSaving, setSwapSaving] = useState(false);
   const [noDaysWarning, setNoDaysWarning] = useState(false);
   const [endWorkoutConfirm, setEndWorkoutConfirm] = useState(null);
   const [addExerciseModal, setAddExerciseModal] = useState(null); // sessionIdx when open
@@ -6000,6 +6170,18 @@ function Fitness({ user, isActive = true }) {
   const [setProgress, setSetProgress] = useState({}); // { exerciseIdx: currentSetIdx }
   const [completedSets, setCompletedSets] = useState({}); // { exerciseIdx: [{weight, reps, setNum}] }
   const [currentInputs, setCurrentInputs] = useState({}); // { exerciseIdx: {weight, reps} }
+  // Warm-up sets (playbook Rule 16): logged beside the working sets, never
+  // counted as one. The toggle shows until an exercise's first working set.
+  const [warmupSets, setWarmupSets] = useState({}); // { exerciseIdx: [{weight, reps}] }
+  const warmupSetsRef = useRef({});
+  warmupSetsRef.current = warmupSets;
+  const [warmupMode, setWarmupMode] = useState(false);
+  // The form rating question after a set at the top of its range (Rule 29).
+  const [formAsk, setFormAsk] = useState(null); // { exerciseIdx, setIdx, answered }
+  const [formAsksThisWorkout, setFormAsksThisWorkout] = useState(0);
+  // After a workout: one achievement first, then the coach (Rule 51).
+  const [achievementShown, setAchievementShown] = useState(false);
+  const [shareNote, setShareNote] = useState("");
   const [workoutStart, setWorkoutStart] = useState(null);
   const [activeWorkoutLogId, setActiveWorkoutLogId] = useState(null); // row in workout_logs we're autosaving into
   const otherWorkoutsRef = useRef(null);
@@ -6154,7 +6336,7 @@ function withPlanApproval(sessions, now = new Date()) {
       const { data: splitData } = await readWorkoutSplit(user.id);
       let normalizedSessions = [];
       if (splitData) {
-        normalizedSessions = normalizeFitnessSessions(splitData.sessions || []);
+        normalizedSessions = normalizeFitnessSessions(splitData.sessions || [], { straight: (profile?.experienceLevel || "beginner") === "beginner" && splitData.set_structure !== "staggered" });
         setSplit({ ...splitData, sessions: normalizedSessions });
         setSessions(normalizedSessions);
       }
@@ -6202,7 +6384,7 @@ function withPlanApproval(sessions, now = new Date()) {
   const saveSplit = async (sessionsData, extra = {}) => {
     if (!user) return { ok: false, error: "not signed in" };
     try {
-      const normalizedSessions = normalizeFitnessSessions(sessionsData);
+      const normalizedSessions = normalizeFitnessSessions(sessionsData, { straight: straightSets });
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).maybeSingle();
 
       // Upsert so a stale lookup can never turn a save into a duplicate insert.
@@ -6230,7 +6412,7 @@ function withPlanApproval(sessions, now = new Date()) {
   const buildWorkoutLogPayload = (setsToSave, session = activeSession) => {
     // A workout belongs to the day it started, even if it runs past midnight.
     const dateStr = getZonedDateInfo(new Date(workoutStart || Date.now()), homeTimeZone).dateKey;
-    const exerciseData = buildLoggedExercises(session, setsToSave);
+    const exerciseData = buildLoggedExercises(session, setsToSave, warmupSetsRef.current);
     const totalVol = workoutVolume(exerciseData);
     return {
       user_id: user.id, date: dateStr, session_name: session?.name || "Workout",
@@ -6418,11 +6600,17 @@ function withPlanApproval(sessions, now = new Date()) {
     // just to look at, leaves nothing behind.
     setActiveSession(sessionToStart);
     setWorkoutInProgress(true);
+    // The coach's minimised chat starts fresh for this workout.
+    window.dispatchEvent(new CustomEvent("track3d-coach-divider", { detail: { storageKey: `fitness-${user.id}`, note: `New workout: ${sessionToStart.name}` } }));
     setExerciseIdx(0);
     setMissedExerciseNotice(null);
     setSetProgress({});
     setCompletedSets({});
     setCurrentInputs({});
+    setWarmupSets({});
+    setWarmupMode(false);
+    setFormAsk(null);
+    setFormAsksThisWorkout(0);
     setWorkoutStart(startedAt);
     setActiveWorkoutLogId(null);
     workoutLogIdRef.current = null;
@@ -6553,6 +6741,9 @@ function withPlanApproval(sessions, now = new Date()) {
     setSetProgress({});
     setCompletedSets({});
     setCurrentInputs({});
+    setWarmupSets({});
+    setWarmupMode(false);
+    setFormAsk(null);
     setWorkoutStart(null);
     setRestActive(false);
     setRestDeadline(null);
@@ -6700,8 +6891,13 @@ function withPlanApproval(sessions, now = new Date()) {
     let sentFor = null;
     try { sentFor = localStorage.getItem(`track3d-checkin-${user.id}`); } catch { /* storage unavailable */ }
     if (sentFor === id) return;
-    const result = midSessionCheckIn({ exercises: activeSession.exercises || [], completedSets, lastSetsByExercise: (activeSession.exercises || []).map(exercise => getLastSessionData(exercise) || []) });
+    const result = midSessionCheckIn({ exercises: activeSession.exercises || [], completedSets, lastSetsByExercise: (activeSession.exercises || []).map(exercise => workingSets(getLastSessionData(exercise) || [])) });
     if (!result.halfway) return;
+    // Only once an exercise is finished, never in the middle of one (Rule 49).
+    const lastLogged = Object.entries(completedSets)
+      .flatMap(([index, sets]) => (sets || []).map(set => ({ index: Number(index), at: set.at || "" })))
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
+    if (!lastLogged || (completedSets[lastLogged.index] || []).length < (Number(activeSession.exercises?.[lastLogged.index]?.sets) || 0)) return;
     try { localStorage.setItem(`track3d-checkin-${user.id}`, id); } catch { /* storage unavailable */ }
     const strong = result.verdict === "strong";
     const prompt = [
@@ -6709,6 +6905,7 @@ function withPlanApproval(sessions, now = new Date()) {
       `So far: ${result.logged} of ${result.planned} sets. Against the same sets last time: ${result.better} better, ${result.same} about the same, ${result.under} under.`,
       ...result.lines.slice(0, 10).map(line => line.slice(0, 300)),
       result.remaining.length ? `Still to do: ${result.remaining.join(", ")}.` : "",
+      "Quote only the sets exactly as listed above (set numbers, reps and weights). Do not merge, renumber or round them: set 1 may be lighter than later sets.",
       strong
         ? "In 2-3 short sentences, like a coach beside me: tell me I'm smashing it and to keep it up, naming what's going well. No question, no plan change."
         : "In 2-4 short sentences, like a coach beside me: say kindly that I'm a bit off it today, tell me to finish strong, and give me 2 practical alternatives for the rest of this session (for example a small weight drop to keep my reps in range, a little more rest between sets, or cutting a set from a remaining exercise). No question, no plan change.",
@@ -6730,6 +6927,8 @@ function withPlanApproval(sessions, now = new Date()) {
       setWorkoutInProgress(false);
       setRestActive(false);
       setRestDeadline(null);
+      setAchievementShown(false);
+      setShareNote("");
       setView("complete");
     } catch {
       // persistWorkoutLog supplies the actionable message and leaves the
@@ -6751,16 +6950,37 @@ function withPlanApproval(sessions, now = new Date()) {
     setEditingSet(null);
   };
 
+  // Earlier sessions of an exercise at this gym, newest first ({ sets, date }).
+  const getExposures = exercise => {
+    const currentContext = activeSession?.gymContext || { type: "usual", name: "" };
+    if (currentContext.type === "away") return [];
+    return history.flatMap(log => {
+      const ex = log.exercises?.find(item => exerciseMatchesHistory(exercise, item.name));
+      const savedContext = ex?.context || { type: "usual", name: "" };
+      const sameContext = currentContext.type === "usual"
+        ? savedContext.type === "usual"
+        : savedContext.type === "different" && savedContext.name?.toLowerCase() === currentContext.name?.toLowerCase();
+      return ex?.sets?.length && sameContext && workingSets(ex.sets).length ? [{ sets: ex.sets, date: log.date }] : [];
+    });
+  };
+  // Week 1 of a programme is the calibration week (playbook Rule 8).
+  const programmeWeek = (() => {
+    const approvedAt = Date.parse(activeSession?.approval?.approvedAt || "");
+    return Number.isFinite(approvedAt) && Date.now() - approvedAt < 7 * 86400000 ? 1 : 2;
+  })();
+  const stepForExercise = exercise => stepFor(exercise?.name, profile?.gymSteps);
+  // Beginners train on straight sets (same range and weight every set) until
+  // they switch to staggered sets (playbook Rule 70a).
+  const straightSets = (profile?.experienceLevel || "beginner") === "beginner" && split?.set_structure !== "staggered";
+  // The plan for every set of an exercise today, from earlier sessions
+  // (playbook V1.3: per-set rep ranges, the Rep-Range Result Table).
+  const exercisePlan = exercise => planExercise({ ranges: repTargets(exercise.reps, Number(exercise.sets) || 0), exposures: getExposures(exercise), step: stepForExercise(exercise), todayKey: today });
   // The set logger's suggestion for an exercise's current set: the weight,
-  // the reps to aim for and why (setLoggerSuggestion), from last time here.
+  // the reps to aim for and why, from the plan and today's sets so far.
   const suggestionFor = (eIdx, chosenWeight = null) => {
     const exercise = activeSession?.exercises?.[eIdx];
     if (!exercise) return { weight: "", reps: "", note: "" };
-    const setIndex = getCurrentSetIdx(eIdx);
-    const lastSets = getLastSessionData(exercise) || [];
-    const equipmentHistory = getExerciseHistory(exercise).flatMap(item => item.sets || []).map(set => Number(set.weight)).filter(Number.isFinite);
-    const { increment, largeRelativeJump } = inferIncrement({ currentWeight: Number((lastSets[setIndex] || lastSets.at(-1))?.weight) || 0, equipmentHistory });
-    return setLoggerSuggestion({ ranges: repTargets(exercise.reps, Number(exercise.sets) || 0), setIndex, lastSets, todaySets: completedSets[eIdx] || [], increment, bigStep: largeRelativeJump, chosenWeight });
+    return suggestSet({ ranges: repTargets(exercise.reps, Number(exercise.sets) || 0), setIndex: getCurrentSetIdx(eIdx), plan: exercisePlan(exercise), todaySets: completedSets[eIdx] || [], step: stepForExercise(exercise), chosenWeight, week: programmeWeek });
   };
   // The reps and weight in the set logger: what the user typed, else the
   // suggestion (shown faintly, and logged as it is). prefilled says which are
@@ -6771,19 +6991,39 @@ function withPlanApproval(sessions, now = new Date()) {
     const typedReps = typed.reps === "" ? undefined : typed.reps;
     // A typed weight changes the reps to aim for.
     const suggestion = suggestionFor(eIdx, typedWeight ?? null);
-    return { weight: typedWeight ?? suggestion.weight, reps: typedReps ?? suggestion.reps, prefilled: { weight: typedWeight === undefined, reps: typedReps === undefined }, note: suggestion.note };
+    return { weight: typedWeight ?? suggestion.weight, reps: typedReps ?? suggestion.reps, prefilled: { weight: typedWeight === undefined, reps: typedReps === undefined }, note: suggestion.note, formFocus: Boolean(suggestion.formFocus) };
   };
   const stepSetInput = (field, delta) => {
     const current = setInputsFor(exerciseIdx);
     setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], [field]: stepSetValue(current[field], delta) } }));
+  };
+  // The weight − / + buttons move by the gym's step for this exercise.
+  const weightStep = stepForExercise(activeSession?.exercises?.[exerciseIdx]);
+
+  // A form rating for a logged set: saved on the set (autosave follows).
+  const rateForm = rating => {
+    if (!formAsk) return;
+    const { exerciseIdx: eIdx, setIdx } = formAsk;
+    setCompletedSets(previous => ({ ...previous, [eIdx]: (previous[eIdx] || []).map((set, index) => index === setIdx ? { ...set, formRating: rating } : set) }));
+    setFormAsk({ ...formAsk, answered: rating });
   };
 
   const confirmSet = () => {
     const eIdx = exerciseIdx;
     const sIdx = getCurrentSetIdx(eIdx);
     const { weight, reps } = setInputsFor(eIdx);
-    if (!weight || !reps) return;
+    if (weight === "" || !reps) return;
     setMissedExerciseNotice(null);
+    // A warm-up is kept beside the working sets and moves nothing on.
+    if (warmupMode && !(completedSets[eIdx] || []).length) {
+      const updatedWarmups = { ...warmupSets, [eIdx]: [...(warmupSets[eIdx] || []), { weight, reps, warmup: true, at: new Date().toISOString() }] };
+      setWarmupSets(updatedWarmups);
+      warmupSetsRef.current = updatedWarmups;
+      setCurrentInputs(prev => ({ ...prev, [eIdx]: {} }));
+      if (Object.values(completedSets).some(sets => sets?.length)) persistWorkoutLog(completedSets).catch(() => {});
+      return;
+    }
+    setWarmupMode(false);
 
     const priorSets = getExerciseHistory(activeSession.exercises[eIdx]).flatMap(exposure => exposure.sets || []);
     const personalBest = detectPersonalBest({ weight, reps }, priorSets);
@@ -6794,6 +7034,17 @@ function withPlanApproval(sessions, now = new Date()) {
     setCompletedSets(newCompleted);
     // The next set starts from this weight and its own target reps.
     setCurrentInputs(prev => ({ ...prev, [eIdx]: {} }));
+
+    // At the top of the range: now and then, how was the form? (Rule 29)
+    const setRange = repTargets(activeSession.exercises[eIdx]?.reps, Number(activeSession.exercises[eIdx]?.sets) || 0)[sIdx];
+    const rated = getExposures(activeSession.exercises[eIdx]).flatMap(exposure => workingSets(exposure.sets).filter(set => Number(set.formRating) > 0).map(set => ({ rating: Number(set.formRating), date: exposure.date })));
+    const lastRated = rated[0] || null;
+    const lastAskedDaysAgo = lastRated?.date ? Math.round((Date.parse(today) - Date.parse(lastRated.date)) / 86400000) : null;
+    const ratedToday = Object.values(newCompleted).some(sets => (sets || []).some(set => Number(set.formRating) > 0));
+    if (!(ratedToday && completedSets[eIdx]?.some(set => Number(set.formRating) > 0)) && shouldAskFormRating({ reps, range: setRange, week: programmeWeek, askedThisWorkout: formAsksThisWorkout, lastAskedDaysAgo, lastRating: lastRated?.rating ?? null })) {
+      setFormAsk({ exerciseIdx: eIdx, setIdx: sIdx, answered: null });
+      setFormAsksThisWorkout(count => count + 1);
+    }
 
     const totalSets = activeSession.exercises[eIdx]?.sets || 0;
 
@@ -7105,9 +7356,11 @@ function withPlanApproval(sessions, now = new Date()) {
     const exerciseRepRanges = repTargets(currentExercise.reps, totalSets);
     const currentSetRepRange = exerciseRepRanges[sIdx] || "8-12";
     const lastSets = getLastSessionData(currentExercise);
-    // Suggested numbers show faintly in the boxes (placeholders), so typing
-    // replaces them; what you type or step to shows in full.
-    const { weight, reps, prefilled, note: setNote } = setInputsFor(exerciseIdx);
+    // The suggested numbers are filled in as real values (playbook V1.3):
+    // LOG SET logs them; typing or stepping changes them.
+    const { weight, reps, note: setNote, formFocus } = setInputsFor(exerciseIdx);
+    const loggingWarmup = warmupMode && !exerciseCompletedSets.length;
+    const canLog = weight !== "" && Boolean(reps);
     const progression = getProgressionRecommendation(currentExercise);
     const progressionTip = progression && !Array.isArray(progression) && progression.decision === "review_down" ? progression.reason : "";
     const valuesLookSwapped = Number(reps) >= 30 && Number(weight) > 0 && Number(weight) <= 30;
@@ -7187,9 +7440,9 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
-                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={prefilled.reps ? "" : reps} data-suggested={prefilled.reps && reps ? "true" : undefined}
+                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps ?? ""}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
-                      placeholder={(prefilled.reps && reps) || "reps"}
+                      placeholder="reps"
                       style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
                   </label>
                   <div className="workout-steppers">
@@ -7198,19 +7451,28 @@ function withPlanApproval(sessions, now = new Date()) {
                   </div>
                   {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8", textAlign: "center" }}>LAST TIME: {Number(lastSets[sIdx].reps) > 0 ? lastSets[sIdx].reps : "—"}</div>}
                 </div>
-                <button className="workout-log-set" aria-label="Log set" onClick={confirmSet} disabled={!weight || !reps}
-                  style={{ background: weight && reps ? NEON : BORDER, border: "none", borderRadius: 10, cursor: weight && reps ? "pointer" : "not-allowed", color: "#080C10", fontWeight: 800, boxShadow: weight && reps ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>LOG SET</button>
+                <div className="workout-log-wrap">
+                  <button className="workout-log-set" aria-label={loggingWarmup ? "Log warm-up set" : "Log set"} onClick={confirmSet} disabled={!canLog}
+                    style={{ background: canLog ? (loggingWarmup ? "#8AABB8" : NEON) : BORDER, border: "none", borderRadius: 10, cursor: canLog ? "pointer" : "not-allowed", color: "#080C10", fontWeight: 800, boxShadow: canLog && !loggingWarmup ? `0 0 18px rgba(0,255,178,.45)` : "none" }}>{loggingWarmup ? "LOG WARM-UP" : "LOG SET"}</button>
+                  {/* Warm-up toggle: small, and gone once the first working set is logged (Rule 16) */}
+                  {!exerciseCompletedSets.length && (
+                    <button type="button" data-testid="warmup-toggle" aria-pressed={warmupMode} onClick={() => setWarmupMode(on => !on)}
+                      style={{ background: "transparent", border: `1px solid ${warmupMode ? "#8AABB8" : BORDER}`, borderRadius: 10, color: warmupMode ? "#E0EAF0" : "#6F8792", fontSize: 8, letterSpacing: 1, padding: "3px 8px", cursor: "pointer", minHeight: 24 }}>
+                      {warmupMode ? "✓ WARM-UP" : "WARM-UP"}
+                    </button>
+                  )}
+                </div>
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
-                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={prefilled.weight ? "" : weight} data-suggested={prefilled.weight && weight ? "true" : undefined}
+                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight ?? ""}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
-                      placeholder={(prefilled.weight && weight) || "kg"}
+                      placeholder="kg"
                       style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
                   </label>
                   <div className="workout-steppers">
-                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label="2.5 kg less" onClick={() => stepSetInput("weight", -2.5)}>−2.5</button>
-                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label="2.5 kg more" onClick={() => stepSetInput("weight", 2.5)}>+2.5</button>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`${weightStep} kg less`} onClick={() => stepSetInput("weight", -weightStep)}>−{weightStep}</button>
+                    <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`${weightStep} kg more`} onClick={() => stepSetInput("weight", weightStep)}>+{weightStep}</button>
                   </div>
                   {lastSets?.[sIdx] && <div style={{ marginTop: 6, fontSize: 9, color: "#8AABB8", textAlign: "center" }}>LAST TIME: {lastSets[sIdx].weight}kg</div>}
                 </div>
@@ -7235,6 +7497,7 @@ function withPlanApproval(sessions, now = new Date()) {
               )}
 
               {/* Why these numbers: last time, and the weight or reps to aim for */}
+              {formFocus && <div data-testid="form-focus" style={{ marginTop: 10, display: "inline-block", padding: "3px 8px", borderRadius: 4, border: "1px solid rgba(255,181,71,.45)", color: "#FFB547", fontSize: 9, letterSpacing: 1 }}>FORM FOCUS{currentExercise.tempo ? ` · TEMPO ${currentExercise.tempo}` : ""} · control every rep</div>}
               {setNote && <div data-testid="set-note" style={{ marginTop: 10, fontSize: 10, color: NEON, lineHeight: 1.5 }}>{setNote}</div>}
               {progressionTip && <div style={{ marginTop: 6, fontSize: 10, color: "#FFB547", lineHeight: 1.5 }}>{progressionTip}</div>}
               {valuesLookSwapped && (
@@ -7254,6 +7517,38 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
           )}
 
+          {/* The form rating question (Rule 29): small and inline, never a pop-up */}
+          {formAsk && formAsk.exerciseIdx === exerciseIdx && (
+            <div data-testid="form-rating" role="group" aria-label="Rate your form on that set" style={{ marginBottom: 10, padding: "8px 10px", border: "1px solid rgba(0,200,255,.25)", borderRadius: 6, background: "rgba(0,200,255,.05)", textAlign: "center" }}>
+              {formAsk.answered === null ? (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ fontSize: 10, color: "#E0EAF0" }}>How was your form on set {formAsk.setIdx + 1}?</span>
+                    <button type="button" aria-label="Skip the form rating" onClick={() => setFormAsk(null)} style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 14, minWidth: 32, minHeight: 32 }}>×</button>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+                    {[1, 2, 3, 4, 5].map(rating => (
+                      <button key={rating} type="button" className="t3d-btn t3d-btn-sm" aria-label={`Form ${rating} out of 5`} onClick={() => rateForm(rating)} style={{ minWidth: 40, minHeight: 40, borderRadius: 20, padding: 0 }}>{rating}</button>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 5, fontSize: 8, color: "#6F8792" }}>1 = form broke down · 5 = every rep clean and controlled</div>
+                </>
+              ) : (
+                <div role="status" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10, color: formAsk.answered >= 4 ? NEON : "#FFB547" }}>
+                  <span>{formAsk.answered >= 4 ? "Solid. The weight goes up next time." : "Same weight next time — focus on control."}</span>
+                  <button type="button" aria-label="Close" onClick={() => setFormAsk(null)} style={{ background: "none", border: 0, color: "#6F8792", cursor: "pointer", fontSize: 14, minWidth: 32, minHeight: 32 }}>×</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Warm-up sets: greyed, never counted (Rule 16) */}
+          {(warmupSets[exerciseIdx] || []).length > 0 && (
+            <div data-testid="warmup-sets" style={{ marginBottom: 8, display: "flex", gap: 6, flexWrap: "wrap", fontSize: 9, color: "#6F8792" }}>
+              {warmupSets[exerciseIdx].map((set, index) => <span key={index} style={{ padding: "3px 7px", border: `1px dashed ${BORDER}`, borderRadius: 4 }}>WARM-UP {set.reps} × {set.weight}kg</span>)}
+            </div>
+          )}
+
           {/* Completed sets this session */}
           {exerciseCompletedSets.length > 0 && (
             <div style={{ marginBottom: 10, padding: "7px 9px", border: `1px solid ${BORDER}`, borderRadius: 5 }}>
@@ -7265,7 +7560,11 @@ function withPlanApproval(sessions, now = new Date()) {
                   <div key={index} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", alignItems: "stretch", minWidth: 0, background: "rgba(0,200,255,.05)", border: "1px solid rgba(0,200,255,.12)", borderRadius: 5, overflow: "hidden" }}>
                     <button type="button" aria-label={`Edit set ${index + 1}`} onClick={() => setEditingSet({ exerciseIdx, setIdx: index, reps: set.reps, weight: set.weight })} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 6, minWidth: 0, background: "transparent", border: 0, color: "#D8E5EA", cursor: "pointer", fontFamily: "'Inter',sans-serif", fontSize: 9, padding: "7px 8px", textAlign: "left" }}>
                       <span style={{ color: "#8AABB8" }}>SET {index + 1}</span>
-                      <span style={{ color: NEON2, whiteSpace: "nowrap" }}>{set.reps} reps · {set.weight}kg{set.personalBest ? ` · ${set.personalBest.label}` : ""}</span>
+                      <span style={{ color: NEON2, whiteSpace: "nowrap" }}>
+                        {set.reps} reps · {set.weight}kg
+                        {set.personalBest && <span data-testid="pb-marker" title={set.personalBest.label} aria-label={set.personalBest.label} style={{ marginLeft: 4 }}>🏆</span>}
+                        {(() => { const status = setStatus(set.reps, exerciseRepRanges[index]); return status.tone === "under" ? <span style={{ display: "block", color: "#FFB547", fontSize: 8 }}>{status.label}</span> : status.tone === "top" ? <span style={{ display: "block", color: NEON, fontSize: 8 }}>{status.label}</span> : null; })()}
+                      </span>
                       <span style={{ color: "#FFB547", fontWeight: 700, fontSize: 8 }}>EDIT</span>
                     </button>
                     <button type="button" aria-label={`Delete set ${index + 1}`} title="Delete set" onClick={() => deleteActiveSet(exerciseIdx, index)} style={{ minWidth: 44, minHeight: 44, border: 0, borderLeft: "1px solid rgba(255,45,120,.24)", background: "rgba(255,45,120,.08)", color: "#FF6B9E", cursor: "pointer", fontSize: 17 }}>×</button>
@@ -7275,27 +7574,58 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
           )}
 
-          {replaceWarning !== null && (
-            <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-              <div style={{ background: SURFACE, border: `1px solid ${NEON3}`, borderRadius: 8, padding: 28, maxWidth: 320, textAlign: "center" }}>
-                <div style={{ fontSize: 24, marginBottom: 12 }}>⚠️</div>
-                <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON3, letterSpacing: 2, marginBottom: 12 }}>REPLACE EXERCISE</div>
-                <div style={{ fontSize: 12, color: "#8AABB8", marginBottom: 20, lineHeight: 1.6 }}>Changing an exercise takes this workout off the saved plan. Do you want to continue?</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="t3d-btn t3d-btn-sm" style={{ flex: 1 }} onClick={() => setReplaceWarning(null)}>STAY ON PLAN</button>
-                  <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={() => {
-                    const newName = prompt("Enter replacement exercise name:");
-                    if (newName) {
-                      const updated = JSON.parse(JSON.stringify(activeSession));
-                      updated.exercises[replaceWarning].name = newName;
-                      setActiveSession(updated);
-                    }
-                    setReplaceWarning(null);
-                  }}>CONFIRM REPLACEMENT</button>
+          {replaceWarning !== null && activeSession.exercises[replaceWarning] && (() => {
+            const original = activeSession.exercises[replaceWarning];
+            const alternatives = swapAlternatives(original.name);
+            const typed = swapQuery.trim();
+            const close = () => { setReplaceWarning(null); setSwapQuery(""); setSwapScope("today"); setSwapError(""); };
+            // A swapped exercise starts its own history (Rule 37).
+            const swap = async name => {
+              const chosen = String(name || "").trim();
+              if (!chosen || swapSaving) return;
+              setSwapError("");
+              if (swapScope === "plan") {
+                setSwapSaving(true);
+                const updatedSessions = sessions.map(session => session.name === activeSession.name
+                  ? { ...session, exercises: (session.exercises || []).map(exercise => exercise.name === original.name ? { ...exercise, name: chosen, historyAliases: [] } : exercise) }
+                  : session);
+                const saved = await saveSplit(updatedSessions);
+                setSwapSaving(false);
+                if (!saved.ok) { setSwapError(`Not saved: ${saved.error}. Your plan has not changed.`); return; }
+              }
+              const updated = { ...activeSession, exercises: activeSession.exercises.map((exercise, index) => index === replaceWarning ? { ...exercise, name: chosen, historyAliases: [], swappedFrom: original.name } : exercise) };
+              setActiveSession(updated);
+              setCurrentInputs(previous => ({ ...previous, [replaceWarning]: {} }));
+              if (Object.values(completedSets).some(sets => sets?.length)) persistWorkoutLog(completedSets, { session: updated }).catch(() => {});
+              close();
+            };
+            return (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 100 }}>
+                <div className="t3d-card" role="dialog" aria-modal="true" aria-labelledby="swap-title" data-testid="swap-picker" style={{ width: "100%", maxWidth: 360, borderColor: NEON2 }}>
+                  <div id="swap-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON2, letterSpacing: 2, marginBottom: 6 }}>SWAP {original.name.toUpperCase()}</div>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                    {[["today", "JUST TODAY"], ["plan", "UPDATE MY PLAN"]].map(([value, label]) => (
+                      <button key={value} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={swapScope === value} onClick={() => setSwapScope(value)}
+                        style={{ flex: 1, fontSize: 9, background: swapScope === value ? "rgba(0,200,255,.12)" : "transparent", borderColor: swapScope === value ? NEON2 : BORDER, color: swapScope === value ? NEON2 : "#8AABB8" }}>{label}</button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>
+                    {swapScope === "today" ? "Swap for today only? Your plan stays the same." : `This changes ${activeSession.name} in your plan from now on. Your ${original.name} history is kept.`}
+                  </div>
+                  {alternatives.length > 0 && <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                    {alternatives.map(option => (
+                      <button key={option} type="button" className="t3d-btn t3d-btn-sm" disabled={swapSaving} onClick={() => swap(option)} style={{ textAlign: "left", padding: "9px 10px", fontSize: 10, whiteSpace: "normal" }}>{option}</button>
+                    ))}
+                  </div>}
+                  <input className="t3d-input" aria-label="Search or type an exercise" placeholder="Search or type an exercise" value={swapQuery} onChange={event => setSwapQuery(event.target.value)}
+                    onKeyDown={event => { if (event.key === "Enter" && typed) swap(typed); }} style={{ marginBottom: 8 }} />
+                  {typed && <button type="button" className="t3d-btn t3d-btn-sm" disabled={swapSaving} style={{ width: "100%", marginBottom: 8 }} onClick={() => swap(typed)}>USE “{typed}”</button>}
+                  {swapError && <div role="alert" style={{ color: "#FF8AAD", fontSize: 10, marginBottom: 8 }}>{swapError}</div>}
+                  <button type="button" className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ width: "100%" }} onClick={close}>{swapSaving ? "SAVING..." : "KEEP " + original.name.toUpperCase()}</button>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
           {discardWorkoutDialog}
 
           {editingSet && (
@@ -7348,6 +7678,42 @@ function withPlanApproval(sessions, now = new Date()) {
     const weekProgress = weeklyWorkoutProgress(earlierLogs, today, sessions, finishedLogId, { countCurrent: completionReview.completedSets > 0 });
     const highlightRow = { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "7px 0", borderTop: `1px solid ${BORDER}` };
     const highlightTitle = color => ({ fontFamily: "'Orbitron',monospace", fontSize: 10, color, letterSpacing: 2, marginBottom: 6 });
+    // The one achievement of the session: a weight PB, then a rep PB, then
+    // the biggest step up since last time, then a full week (Rule 51).
+    const bestPb = newPbs.find(pb => pb.type === "weight_pb") || newPbs[0] || null;
+    const bestImprovement = [...improvements].sort((a, b) => (b.kind === "weight") - (a.kind === "weight") || b.delta - a.delta)[0] || null;
+    const weekDone = weekProgress.planned > 0 && weekProgress.completed >= weekProgress.planned;
+    const achievement = bestPb
+      ? { icon: "🏆", title: bestPb.type === "weight_pb" ? "NEW WEIGHT PB" : "NEW REP PB", detail: `${bestPb.exercise}: ${bestPb.type === "weight_pb" ? `${bestPb.weight}kg × ${bestPb.reps}` : `${bestPb.reps} reps @ ${bestPb.weight}kg`}` }
+      : bestImprovement
+        ? { icon: "📈", title: "BETTER THAN LAST TIME", detail: `${bestImprovement.exercise}: ${bestImprovement.kind === "weight" ? `${bestImprovement.previousWeight} → ${bestImprovement.weight}kg` : `+${bestImprovement.delta} rep${bestImprovement.delta === 1 ? "" : "s"} @ ${bestImprovement.weight}kg`}` }
+        : weekDone ? { icon: "✅", title: "WEEK COMPLETE", detail: `Every planned session done this week (${weekProgress.completed}/${weekProgress.planned}).` } : null;
+    if (achievement && !achievementShown) {
+      const shareText = `${achievement.title} on TRACK3D — ${achievement.detail}`;
+      const share = async () => {
+        try {
+          if (navigator.share) { await navigator.share({ title: "TRACK3D", text: shareText }); return; }
+          await navigator.clipboard.writeText(shareText);
+          setShareNote("Copied — paste it anywhere to share.");
+        } catch { /* the share sheet was closed */ }
+      };
+      return (
+        <div className="t3d-fade">
+          <div className="t3d-card" data-testid="achievement-card" style={{ textAlign: "center", padding: 28, borderColor: "rgba(255,181,71,.6)", background: "linear-gradient(160deg, rgba(255,181,71,.12), #0D1318 70%)" }}>
+            <div aria-hidden="true" style={{ fontSize: 46, marginBottom: 10 }}>{achievement.icon}</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 9, color: "#8AABB8", letterSpacing: 2, marginBottom: 6 }}>ACHIEVEMENT OF THE SESSION</div>
+            <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 16, color: "#FFB547", letterSpacing: 2, marginBottom: 8 }}>{achievement.title}</div>
+            <div style={{ fontSize: 13, color: "#E0EAF0", marginBottom: 6 }}>{achievement.detail}</div>
+            <div style={{ fontSize: 10, color: "#8AABB8", marginBottom: 22 }}>{activeSession?.name}</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="t3d-btn" style={{ flex: 1, padding: 11, borderColor: "#FFB547", color: "#FFB547" }} onClick={share}>SHARE ACHIEVEMENT</button>
+              <button className="t3d-btn" style={{ flex: 1, padding: 11, background: "rgba(0,255,178,.12)", borderColor: NEON, color: NEON }} onClick={() => setAchievementShown(true)}>CONTINUE</button>
+            </div>
+            {shareNote && <div role="status" style={{ marginTop: 10, fontSize: 10, color: "#8AABB8" }}>{shareNote}</div>}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="t3d-fade">
         <div className="t3d-card" style={{ textAlign: "center", padding: 20 }}>
@@ -7407,7 +7773,11 @@ function withPlanApproval(sessions, now = new Date()) {
                   <div key={set.setNumber} style={{ display: "grid", gridTemplateColumns: "54px 1fr auto", gap: 8, alignItems: "center", fontSize: 10, padding: "5px 0", borderTop: `1px solid ${BORDER}` }}>
                     <span style={{ color: "#8AABB8" }}>SET {set.setNumber}</span>
                     <span style={{ color: set.status === "completed" ? NEON : "#6F8792" }}>{set.status === "completed" ? `${set.reps} reps @ ${set.weightKg}kg` : `Target ${set.targetReps || "—"} reps`}</span>
-                    <span style={{ color: set.status === "completed" ? NEON : "#FFB547", fontSize: 8 }}>{set.extra ? "EXTRA · COMPLETED" : set.status === "completed" ? "COMPLETED" : "SKIPPED / NOT LOGGED"}</span>
+                    {(() => {
+                      // A set below its rep range is not shown as a plain "completed" (V1.3).
+                      const below = set.status === "completed" && setStatus(set.reps, set.targetReps).tone === "under";
+                      return <span style={{ color: set.status === "completed" && !below ? NEON : "#FFB547", fontSize: 8 }}>{set.extra ? "EXTRA · COMPLETED" : below ? `BELOW ${set.targetReps}` : set.status === "completed" ? "COMPLETED" : "SKIPPED / NOT LOGGED"}</span>;
+                    })()}
                   </div>
                 ))}
               </div>
@@ -7494,7 +7864,7 @@ function withPlanApproval(sessions, now = new Date()) {
               try {
                 // Saving is the approval: no second "review & approve" step.
                 const now = new Date();
-                const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions), now);
+                const approvedSessions = withPlanApproval(normalizeFitnessSessions(aiPlan.sessions, { straight: straightSets }), now);
                 // saveSplit reads the row back and only updates the screen once it matches.
                 const saved = await saveSplit(approvedSessions, { split_name: aiPlan.split_name || "My Programme", programme_started_at: now.toISOString(), week_reviewed_at: null });
                 if (!saved.ok) throw new Error(saved.error);
@@ -7724,7 +8094,7 @@ function withPlanApproval(sessions, now = new Date()) {
     setImportSaving(true);
     setImportError("");
     const now = new Date();
-    const approved = withPlanApproval(normalizeFitnessSessions(importedSessions(importResult)), now);
+    const approved = withPlanApproval(normalizeFitnessSessions(importedSessions(importResult), { straight: straightSets }), now);
     const saved = await saveSplit(approved, { split_name: importResult.planName || "Imported plan", programme_started_at: now.toISOString(), week_reviewed_at: null });
     setImportSaving(false);
     if (!saved.ok) { setImportError(`Your plan could not be saved: ${saved.error}. Your previous plan is unchanged.`); return; }
@@ -8552,6 +8922,31 @@ function withPlanApproval(sessions, now = new Date()) {
     if (!saved.ok) setPlanSaveError(`The week review could not be recorded: ${saved.error}. You may be asked again.`);
   };
 
+  // Beginners move from straight sets to staggered sets once they have a base:
+  // 4 weeks into the programme and 8 workouts done (playbook Rule 70a).
+  const workoutsSinceStart = history.filter(log => !activityOfLog(log) && programmeStartedAt && new Date(log.created_at) >= programmeStartedAt).length;
+  const staggerSwitchDue = straightSets && Boolean(programmeStartedAt)
+    && Date.now() - programmeStartedAt.getTime() >= 28 * 24 * 60 * 60 * 1000 && workoutsSinceStart >= 8
+    && !(split?.set_structure_snooze_until && String(split.set_structure_snooze_until) > today);
+  const switchToStaggered = async () => {
+    const staggered = sessions.map(session => isActivitySession(session) ? session : {
+      ...session,
+      exercises: (session.exercises || []).map(exercise => {
+        const ranges = repTargets(exercise.reps, Number(exercise.sets) || 1);
+        const same = ranges.every(range => range === ranges[0]) && !/[a-z]/i.test(ranges[0]);
+        return same ? { ...exercise, reps: defaultRanges(Number(exercise.sets) || 3, { kind: exerciseKind(exercise.name) }) } : exercise;
+      }),
+    });
+    const saved = await saveSplit(staggered, { set_structure: "staggered" });
+    if (!saved.ok) { setPlanSaveError(`Not switched: ${saved.error}. Your plan has not changed.`); return; }
+    setPlanNotice("Staggered sets on: your first set is your heaviest");
+  };
+  const snoozeStaggerSwitch = async () => {
+    const until = shiftDateKey(today, 28);
+    const saved = await saveSplit(sessions, { set_structure_snooze_until: until });
+    if (!saved.ok) setPlanSaveError(`Couldn't save that: ${saved.error}. You may be asked again.`);
+  };
+
   return (
     <div className="t3d-fade">
       {!split ? (
@@ -8588,6 +8983,16 @@ function withPlanApproval(sessions, now = new Date()) {
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                 <button className="t3d-btn" onClick={startWeekReview}>REVIEW MY WEEK</button>
                 <button type="button" onClick={() => setWeekReviewDismissed(true)} style={{ background: "none", border: 0, color: "#4A6070", cursor: "pointer", fontSize: 9, minHeight: 44, padding: "0 6px", textDecoration: "underline" }}>remind me later</button>
+              </div>
+            </div>
+          )}
+          {staggerSwitchDue && !weekReviewDue && (
+            <div className="t3d-card" data-testid="stagger-switch" style={{ marginBottom: 16, borderColor: NEON2, background: "rgba(0,200,255,.05)" }}>
+              <h2 style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, fontWeight: 400, color: NEON2, letterSpacing: 2, margin: "0 0 8px" }}>READY FOR THE NEXT STEP</h2>
+              <div style={{ fontSize: 11, color: "#E0EAF0", marginBottom: 12, lineHeight: 1.6 }}>You&apos;ve built a base. Your first set will now be your heaviest, with lighter follow-up sets for more reps.</div>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <button className="t3d-btn" onClick={switchToStaggered}>SWITCH MY SETS</button>
+                <button type="button" onClick={snoozeStaggerSwitch} style={{ background: "none", border: 0, color: "#4A6070", cursor: "pointer", fontSize: 9, minHeight: 44, padding: "0 6px", textDecoration: "underline" }}>keep it simple for now</button>
               </div>
             </div>
           )}
@@ -9032,12 +9437,9 @@ function withPlanApproval(sessions, now = new Date()) {
                     ))}
                     <button className="t3d-btn t3d-btn-sm" style={{ width: "100%", marginTop: 6, fontSize: 8 }}
                       onClick={() => {
-                        const name = prompt("Exercise name:");
-                        if (!name) return;
-                        const sets = prompt("Sets?") || "3";
-                        const reps = prompt("Reps? (e.g. 8-10)") || "8-10";
+                        // A new row to name; default ranges by level (Rule 11a).
                         setSessions(prev => prev.map((s, i) => i === sIdx ? {
-                          ...s, exercises: [...(s.exercises||[]), { name, sets: parseInt(sets)||3, reps: Array.from({ length: parseInt(sets) || 3 }, () => reps), tempo: "" }]
+                          ...s, exercises: [...(s.exercises||[]), { name: "", sets: 3, reps: defaultRanges(3, { kind: "compound", straight: straightSets }), tempo: "" }]
                         } : s));
                       }}>+ ADD EXERCISE</button>
                   </div>
@@ -9045,10 +9447,20 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button className="t3d-btn t3d-btn-sm t3d-btn-red" style={{ flex: 1 }} onClick={cancelSessionEdits}>CANCEL</button>
                   <button className="t3d-btn" style={{ flex: 1 }} onClick={async () => {
+                    // Every exercise needs a name, and every set a valid range.
+                    const problem = sessions.flatMap(session => (session.exercises || []).flatMap(exercise => {
+                      if (!String(exercise.name || "").trim()) return [`${session.name}: give every exercise a name.`];
+                      return repTargets(exercise.reps, Number(exercise.sets) || 1).map((range, index) => {
+                        const issue = rangeProblem(range);
+                        return issue ? `${exercise.name} set ${index + 1}: ${issue}` : "";
+                      }).filter(Boolean);
+                    }))[0];
+                    if (problem) { setPlanSaveError(problem); return; }
                     const saved = await saveSplit(sessions);
                     if (!saved.ok) { setPlanSaveError(`Your changes were not saved: ${saved.error}. Please try again.`); return; }
                     setPlanSaveError("");
                     setEditDaysModal(false);
+                    setPlanNotice("Sessions saved");
                   }}>SAVE ✓</button>
                 </div>
                 {planSaveError && <p role="alert" style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "10px 0 0" }}>{planSaveError}</p>}
@@ -12484,7 +12896,8 @@ export default function App() {
     const timer = setTimeout(() => setNotice(""), 4000);
     return () => clearTimeout(timer);
   }, [notice]);
-  const profileSaved = saved => { setProfile(saved); setNotice("Profile saved ✓"); };
+  // Merged, so a part saved on its own (a step goal) keeps the rest.
+  const profileSaved = saved => { setProfile(previous => ({ ...(previous || {}), ...saved })); setNotice("Profile saved ✓"); };
   // What each active session is up to, for the banner ("Upper A · Set 2 of 4 · Bench Press").
   const [activeSummaries, setActiveSummaries] = useState({});
   const homeTimeZone = resolveHomeTimeZone(user);
@@ -12849,7 +13262,7 @@ export default function App() {
           ))}
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} profile={profile} onProfileSaved={profileSaved} workoutBannerShown={activeBanners.some(banner => banner.tab === "fitness")} onOpenProfile={() => setProfileOpen(true)} />}
           <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
-          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} /></div>
+          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} profile={profile} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} profile={profile} onProfileChange={setProfile} />}
           {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
         </main>
