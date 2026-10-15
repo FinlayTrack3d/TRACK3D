@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  defaultRanges, equipmentOf, inSessionCue, nextForSet, planExercise, rangeProblem, reorderAfterFirstSession,
+  defaultRanges, equipmentOf, planRangeReview, inSessionCue, nextForSet, planExercise, rangeProblem, reorderAfterFirstSession,
   setStatus, shouldAskFormRating, snapWeight, stepFor, suggestSet, withRanges,
 } from "../lib/set-progression.js";
 
@@ -169,4 +169,28 @@ test("a set beaten today at the planned weight raises the next set's aim", () =>
   const next = suggestSet({ ranges: ["8-12", "8-12"], setIndex: 1, plan: [{ weight: 25, reps: 8 }, { weight: 25, reps: 8 }], todaySets: [set(25, 10)], step: 2.5 });
   assert.equal(next.weight, "25");
   assert.equal(next.reps, "10");
+});
+
+test("a plan the user wrote gets per-set ranges: staggered, or straight for beginners", () => {
+  const sessions = [{ name: "Upper A", exercises: [
+    { name: "Bench Press", sets: 3, reps: ["8-10", "8-10", "8-10"] },
+    { name: "Cable Curl", sets: 3, reps: "12" },
+    { name: "Barbell Row", sets: 3, reps: ["6-8", "8-10", "10-12"] },
+    { name: "Plank", sets: 2, reps: ["30s", "30s"] },
+    { name: "Push-Up", sets: 3, reps: ["10-15", "10-15", "10-15"] },
+  ] }];
+  const staggered = planRangeReview(sessions);
+  assert.deepEqual(staggered.changes.map(change => [change.exercise, change.to.join(" / ")]), [
+    ["Bench Press", "6-8 / 8-10 / 10-12"],
+    ["Cable Curl", "10-12 / 12-15 / 12-15"],
+  ]);
+  assert.deepEqual(staggered.sessions[0].exercises[0].reps, ["6-8", "8-10", "10-12"]);
+  assert.equal(staggered.sessions[0].exercises[3], sessions[0].exercises[3], "timed targets untouched");
+  // Beginners: one range on every set.
+  const straight = planRangeReview(sessions, { straight: true });
+  assert.deepEqual(straight.changes.map(change => [change.exercise, change.to.join(" / ")]), [
+    ["Cable Curl", "10-15 / 10-15 / 10-15"],
+    ["Barbell Row", "8-10 / 8-10 / 8-10"],
+  ]);
+  assert.deepEqual(planRangeReview([{ name: "A", exercises: [{ name: "Squat", sets: 3, reps: ["6-8", "8-10", "10-12"] }] }]).changes, []);
 });

@@ -124,7 +124,7 @@ const londonKey = (offset = 0) => new Intl.DateTimeFormat('en-CA', { timeZone: '
     await page.getByRole('button', { name: /AI BUILD MY PROGRAMME/ }).click();
     const next = () => page.getByRole('button', { name: /^(NEXT →|BUILD MY PROGRAMME)$/ }).click();
     await page.getByRole('button', { name: /Build muscle/ }).click(); await next();
-    await page.getByRole('button', { name: /New to training/ }).click(); await next();
+    await page.getByRole('button', { name: /Beginner – under a year/ }).click(); await next();
     await page.getByRole('button', { name: /^1 day$/ }).click(); await next();
     await page.getByRole('button', { name: 'MON', exact: true }).click(); await next();
     await page.locator('textarea').fill('40 minutes'); await next();

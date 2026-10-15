@@ -20,15 +20,17 @@ import { IMPORT_FILE_MAX_BYTES, importSourceText, isSupportedImportFile, normali
 import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDayOnTarget, parseCoachSummary, reportWeek, weeklyFactsForCoach, weeklyFactsKey } from "../lib/weekly-report";
 import { nextUpItems } from "../lib/next-up";
 import { dailyScore } from "../lib/daily-score";
-import { linkedHabitIds } from "../lib/habit-links";
+import { inMorningRoutine, linkedHabitIds } from "../lib/habit-links";
 import { EXPERIENCE_CHOICES, GYM_STEP_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseGymSteps, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
-import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, targetUpdateSuggestion } from "../lib/nutrition-setup";
+import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, activitySuggestionText, targetUpdateSuggestion } from "../lib/nutrition-setup";
 import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, mealSwap, swappedMealResult, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
 import { swapAlternatives } from "../lib/exercise-swaps";
-import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, defaultRanges, exerciseKind, withRanges, inSessionCue, parseRange, planExercise, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
+import { starterPlan } from "../lib/starter-plans";
+import { EXPERIENCE_ANSWERS, nextSetupStep, setupComplete, setupSavedBanner, setupSteps, tomorrowPlan } from "../lib/setup-steps";
+import { DEFAULT_GYM_STEPS, EQUIPMENT_LABELS, defaultRanges, exerciseKind, withRanges, inSessionCue, parseRange, planExercise, planRangeReview, rangeProblem, rangeText, setStatus, shouldAskFormRating, stepFor, suggestSet, workingSets } from "../lib/set-progression";
 
 // ─── Shared reads ─────────────────────────────────────────────────────────────
 // On start the dashboard, the hidden Morning and Fitness tabs and the weekly
@@ -92,11 +94,17 @@ async function streamCoachText(payload, onText = () => {}) {
 // empty, so a screen never shows canned text as if the coach had written it.
 async function readCoachReply(res) {
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `the coach is unavailable (${res.status})`);
+  // offline: the coach is down (billing, key), so trying again won't help yet.
+  if (!res.ok) throw Object.assign(new Error(data.error || `the coach is unavailable (${res.status})`), { offline: Boolean(data.offline), publicMessage: data.error || "" });
   const text = (data.content || []).map(block => block.text || "").join("").trim();
   if (!text) throw new Error("the coach sent an empty reply");
   return text;
 }
+
+// What to show when a coach call fails: "offline" when the coach is down
+// (trying again can't help), otherwise the caller's own message.
+const COACH_OFFLINE_TEXT = "The coach is offline for a few minutes. Your data is safe.";
+const coachErrorText = (error, fallback) => (error?.offline ? error.publicMessage || COACH_OFFLINE_TEXT : fallback);
 
 const NEON = "#00FFB2";
 const EXPERIENCE_OPTIONS = [["beginner", "BEGINNER"], ["intermediate", "INTERMEDIATE"], ["advanced", "ADVANCED"]];
@@ -138,6 +146,27 @@ const homeDateKey = (user, offsetDays = 0) => shiftDateKey(getZonedDateInfo(new 
 // Labels for a YYYY-MM-DD key, independent of the device timezone.
 const dateKeyLabel = (dateKey, options) => new Date(`${dateKey}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", ...options });
 const dateKeyDayCode = dateKey => ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${dateKey}T12:00:00Z`).getUTCDay()];
+
+// GET STARTED opens a section's setup straight away rather than its intro
+// page. The request waits until that section has loaded.
+let pendingSetupRequest = null;
+const requestSetup = section => {
+  pendingSetupRequest = section;
+  window.dispatchEvent(new CustomEvent("track3d-setup", { detail: { section } }));
+};
+const takeSetupRequest = section => {
+  if (pendingSetupRequest !== section) return false;
+  pendingSetupRequest = null;
+  return true;
+};
+// A section's first setup was saved: the app points to the next step.
+const announceSetupSaved = section => window.dispatchEvent(new CustomEvent("track3d-setup-saved", { detail: { section } }));
+// "started" once GET STARTED has been shown on this device, "done" once
+// You're all set has been seen, so accounts set up before GET STARTED
+// existed never get the banners.
+const setupTrackingKey = userId => `track3d-setup-${userId}`;
+const readSetupTracking = userId => { try { return localStorage.getItem(setupTrackingKey(userId)); } catch { return null; } };
+const writeSetupTracking = (userId, value) => { try { localStorage.setItem(setupTrackingKey(userId), value); } catch { /* kept for this visit only */ } };
 
 function useZonedDateKey(timeZone) {
   const [dateKey, setDateKey] = useState(() => getZonedDateInfo(new Date(), timeZone).dateKey);
@@ -2707,6 +2736,20 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     window.addEventListener("track3d-start", start);
     return () => window.removeEventListener("track3d-start", start);
   }, []);
+  // GET STARTED: straight into the setup, once this tab has loaded.
+  const openSetupRef = useRef(null);
+  useEffect(() => {
+    openSetupRef.current = () => {
+      if (loading || !takeSetupRequest("morning")) return;
+      if (!isSetup && view === "home") { setSetupStep(0); setView("setup"); }
+    };
+  });
+  useEffect(() => { if (!loading) openSetupRef.current?.(); }, [loading]);
+  useEffect(() => {
+    const open = event => { if (event.detail?.section === "morning") openSetupRef.current?.(); };
+    window.addEventListener("track3d-setup", open);
+    return () => window.removeEventListener("track3d-setup", open);
+  }, []);
   const liveStartDialog = pendingLiveStart ? (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
       <div className="t3d-card" role="alertdialog" aria-modal="true" aria-labelledby="live-start-title" style={{ width: "100%", maxWidth: 360, borderColor: "#FFB547", textAlign: "center" }}>
@@ -3994,6 +4037,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 setupSnapshotRef.current = null;
                 setIsSetup(true);
                 setView("home");
+                announceSetupSaved("morning");
                 window.scrollTo({ top: 0, behavior: "smooth" });
                 setRoutineSavedNotice(true);
                 setTimeout(() => setRoutineSavedNotice(false), 4000);
@@ -5443,6 +5487,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
   const today = homeDate.dateKey;
   // The "Complete your profile" to-do (the profile itself is loaded by the app).
   const [profileFormOpen, setProfileFormOpen] = useState(false);
+  const [allSetSeen, setAllSetSeen] = useState(false);
 
   // Weekly report card. A finished week's report that has not been opened
   // goes to the top of the dashboard until it is opened.
@@ -5604,11 +5649,29 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
     `- Daily score: ${score}/100 (calculated from the items above)`,
   ].join("\n");
 
+  // GET STARTED, in the order each step helps the next.
+  const setupStatus = { profile: isProfileComplete(profile), fitness: todayData.hasPlan, nutrition: Boolean(calorieGoal), morning: todayData.hasRoutine, habits: habits.length > 0 };
+  const firstRunSteps = setupSteps(setupStatus);
+  const showGetStarted = Boolean(todayData.loaded && profile && !setupComplete(setupStatus));
+  const nextStep = showGetStarted ? nextSetupStep(setupStatus) : null;
+  const stepNumber = id => firstRunSteps.findIndex(step => step.id === id) + 1;
+  // Nothing set up yet: there is no day to close out.
+  const anythingSetUp = Boolean(todayData.hasRoutine || todayData.hasPlan || calorieGoal || habits.length);
+  // You're all set: once, after GET STARTED was shown on this device.
+  const showAllSet = Boolean(user && todayData.loaded && profile && setupComplete(setupStatus) && !allSetSeen && readSetupTracking(user.id) === "started");
+  const closeAllSet = () => { writeSetupTracking(user.id, "done"); setAllSetSeen(true); };
+  useEffect(() => {
+    if (user && showGetStarted && !readSetupTracking(user.id)) writeSetupTracking(user.id, "started");
+  }, [user, showGetStarted]);
+
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (view === "weekly") return <WeeklyRecap user={user} onBack={() => setView("home")} />;
   if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   const nextUp = nextUpItems({
     hour: Number(homeDate.time.slice(0, 2)),
+    time: homeDate.time,
+    // While GET STARTED is showing, it comes first and there is no end of day yet.
+    endOfDayDue: anythingSetUp && !showGetStarted,
     morning: { hasRoutine: todayData.hasRoutine, done: morningDone, inProgress: morningInProgress, wakeTime: todayData.wakeTime },
     // The banner above already continues an active workout.
     workout: workoutBannerShown
@@ -5633,32 +5696,22 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       setShowEod(true);
     }
   };
-  const firstRunSteps = [
-    { label: "Complete your profile", done: isProfileComplete(profile), profile: true },
-    { label: "Set up your morning", done: todayData.hasRoutine, section: "morning" },
-    { label: "Build your training plan", done: todayData.hasPlan, section: "fitness" },
-    { label: "Set your calorie target", done: Boolean(calorieGoal), section: "nutrition" },
-  ];
-  const showGetStarted = todayData.loaded && profile && firstRunSteps.some(step => !step.done);
+  const startSetupStep = id => {
+    if (id === "profile") { setProfileFormOpen(true); return; }
+    onNavigate(id);
+    if (id === "morning" || id === "nutrition") requestSetup(id);
+  };
   // Shown in today's cards until the day's data is in.
   const dayWaiting = <div style={{ fontSize: 11, color: "#8AABB8" }}>{todayData.failed ? "Couldn't load today. Reload the page to try again." : "Loading..."}</div>;
-  return (
-    <div className="t3d-fade">
-      {weeklyIsNew && weeklyCard}
-      {badgeNews && !badgeNews.firstTime && <NewBadgesNotice badges={badgeNews.badges} onSeeAll={() => closeBadgeNews(true)} onDismiss={() => closeBadgeNews(false)} />}
-      {badgeNews?.firstTime && (
-        <div data-testid="badges-intro" role="status" style={{ marginBottom: 14, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(255,210,63,.6)", background: "linear-gradient(160deg, rgba(255,210,63,.14), rgba(255,140,0,.04))" }}>
-          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#FFD23F", letterSpacing: 2, marginBottom: 6 }}>🏅 ACHIEVEMENTS ARE HERE</div>
-          <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.5 }}>You&apos;ve already earned {badgeNews.earnedIds.length} {badgeNews.earnedIds.length === 1 ? "badge" : "badges"} for your training, mornings, habits and nutrition so far.</div>
-          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-            <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: "#FFD23F", color: "#FFD23F" }} onClick={() => closeBadgeNews(true)}>SEE ALL BADGES</button>
-            <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: BORDER, color: "#8AABB8" }} onClick={() => closeBadgeNews(false)}>DISMISS</button>
-          </div>
-        </div>
-      )}
-      {/* Next up: the next thing due today, one tap to start it. A new user
-          with nothing due yet sees GET STARTED first instead. */}
-      {!(showGetStarted && !nextUp.length) && <div className="t3d-card" data-testid="next-up" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)", background: "linear-gradient(160deg, rgba(0,255,178,.06), transparent 70%)" }}>
+  // While GET STARTED is showing, a card for something not set up yet is
+  // muted and points back to its step instead of having its own button.
+  const notSetUp = id => showGetStarted && !setupStatus[id];
+  const notSetUpNote = id => <div data-testid={`not-set-up-${id}`} style={{ fontSize: 11, color: "#6F8792", lineHeight: 1.6 }}>Not set up yet · step {stepNumber(id)} in Get started</div>;
+  const mutedCard = id => (notSetUp(id) ? { opacity: 0.55 } : {});
+  // Next up: the next thing due today, one tap to start it. While GET
+  // STARTED is showing it comes second, and only with something due.
+  const nextUpCard = !(showGetStarted && !nextUp.length) && (
+      <div className="t3d-card" data-testid="next-up" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)", background: "linear-gradient(160deg, rgba(0,255,178,.06), transparent 70%)" }}>
         <div className="t3d-ctitle">NEXT UP</div>
         {!todayData.loaded ? (
           <div style={{ fontSize: 11, color: "#8AABB8" }}>{todayData.failed ? "Couldn't load your day. Reload the page to try again." : "Loading your day..."}</div>
@@ -5685,32 +5738,67 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           </>
         ) : (
           <div style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6 }}>
-            All caught up for now.{!eodDone && <> <button type="button" onClick={() => setShowEod(true)} style={{ background: "none", border: 0, color: NEON2, cursor: "pointer", fontSize: 12, padding: 0, textDecoration: "underline" }}>End-of-day check-in</button> when you&apos;re done for the day.</>}
+            All caught up for now.{!eodDone && anythingSetUp && <> <button type="button" onClick={() => setShowEod(true)} style={{ background: "none", border: 0, color: NEON2, cursor: "pointer", fontSize: 12, padding: 0, textDecoration: "underline" }}>End-of-day check-in</button> when you&apos;re done for the day.</>}
           </div>
         )}
-      </div>}
-      <StepsCard user={user} today={today} profile={profile} onProfileSaved={onProfileSaved} />
-      {showGetStarted && (
-        <div className="t3d-card" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)" }}>
+      </div>
+  );
+  const getStartedCard = showGetStarted && (
+        <div className="t3d-card" data-testid="get-started" style={{ marginBottom: 16, borderColor: "rgba(0,255,178,.35)", background: "linear-gradient(160deg, rgba(0,255,178,.06), transparent 70%)" }}>
           <div className="t3d-ctitle">GET STARTED</div>
           <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {firstRunSteps.map((step, index) => (
-              <li key={step.label} data-testid={step.profile ? "profile-todo" : undefined} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, padding: "8px 0", borderBottom: index < firstRunSteps.length - 1 ? `1px solid ${BORDER}` : "none" }}>
-                <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, border: `1px solid ${step.done ? NEON : "#31434F"}`, color: step.done ? "#06100D" : "#8AABB8", background: step.done ? NEON : "transparent" }}>{step.done ? "✓" : index + 1}</span>
-                <span style={{ flex: 1, fontSize: 12, color: step.done ? "#6F8792" : "#E0EAF0", textDecoration: step.done ? "line-through" : "none" }}>
-                  {step.label}{step.done ? <span className="t3d-sr-only"> (done)</span> : null}
-                </span>
-                {!step.done && !(step.profile && profileFormOpen) && <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => (step.profile ? setProfileFormOpen(true) : onNavigate(step.section))}>START →</button>}
-                {step.profile && profileFormOpen && !step.done && (
-                  <div style={{ flexBasis: "100%" }}>
-                    <ProfileForm user={user} profile={profile} today={today} onCancel={() => setProfileFormOpen(false)} onSaved={saved => { onProfileSaved(saved); setProfileFormOpen(false); }} />
-                  </div>
-                )}
-              </li>
-            ))}
+            {firstRunSteps.map((step, index) => {
+              const isNext = nextStep?.id === step.id;
+              return (
+                <li key={step.id} data-testid={step.id === "profile" ? "profile-todo" : `setup-step-${step.id}`} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, padding: "8px 0", borderBottom: index < firstRunSteps.length - 1 ? `1px solid ${BORDER}` : "none" }}>
+                  <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, border: `1px solid ${step.done ? NEON : isNext ? NEON : "#31434F"}`, color: step.done ? "#06100D" : isNext ? NEON : "#8AABB8", background: step.done ? NEON : "transparent" }}>{step.done ? "✓" : index + 1}</span>
+                  <span style={{ flex: 1, fontSize: 12, color: step.done ? "#6F8792" : "#E0EAF0", textDecoration: step.done ? "line-through" : "none", fontWeight: isNext ? 700 : 400 }}>
+                    {step.label}{step.optional && !step.done ? <span style={{ color: "#6F8792", fontWeight: 400 }}> (optional)</span> : null}{step.done ? <span className="t3d-sr-only"> (done)</span> : null}
+                  </span>
+                  {!step.done && !(step.id === "profile" && profileFormOpen) && (isNext
+                    ? <button className="t3d-big-btn" data-testid="setup-next-action" style={{ flex: "0 1 180px", margin: 0, minHeight: 44, padding: "10px 14px", background: "linear-gradient(90deg, #00FFB2, #00D99A)", border: `1px solid ${NEON}`, color: "#06100D", fontSize: 11, fontWeight: 900, letterSpacing: 2 }} onClick={() => startSetupStep(step.id)}>START →</button>
+                    : <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => startSetupStep(step.id)}>{step.optional ? "ADD →" : "START →"}</button>)}
+                  {step.id === "profile" && profileFormOpen && !step.done && (
+                    <div style={{ flexBasis: "100%" }}>
+                      <ProfileForm user={user} profile={profile} today={today} onCancel={() => setProfileFormOpen(false)} onSaved={saved => { onProfileSaved(saved); setProfileFormOpen(false); }} />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ol>
         </div>
+      );
+  // Shown once when every step of GET STARTED is done.
+  const allSetCard = showAllSet && (
+        <div className="t3d-card" data-testid="all-set" role="status" style={{ marginBottom: 16, borderColor: NEON, background: "linear-gradient(160deg, rgba(0,255,178,.1), transparent 70%)" }}>
+          <div className="t3d-ctitle">✓ YOU&apos;RE ALL SET</div>
+          <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6, marginBottom: 8 }}>Your plan is ready. Here&apos;s what happens next:</div>
+          <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 12, color: "#C5D6DC", lineHeight: 1.8 }}>
+            {tomorrowPlan({ today, wakeTime: todayData.wakeTime, sessions: todayData.sessions, mealsFor: (dateKey, training) => mealsForDay(todayData.nutritionPlan, dateKey, training) }).map(line => <li key={line.id}>{line.text}</li>)}
+          </ul>
+          {!habits.length && <div style={{ fontSize: 11, color: "#8AABB8", marginBottom: 10 }}>Optional: <button type="button" onClick={() => { closeAllSet(); onNavigate("habits"); }} style={{ background: "none", border: 0, color: NEON2, cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}>add 1–3 daily habits</button> to tick off each day.</div>}
+          <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={closeAllSet}>GOT IT</button>
+        </div>
+      );
+  return (
+    <div className="t3d-fade">
+      {weeklyIsNew && weeklyCard}
+      {badgeNews && !badgeNews.firstTime && <NewBadgesNotice badges={badgeNews.badges} onSeeAll={() => closeBadgeNews(true)} onDismiss={() => closeBadgeNews(false)} />}
+      {badgeNews?.firstTime && (
+        <div data-testid="badges-intro" role="status" style={{ marginBottom: 14, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(255,210,63,.6)", background: "linear-gradient(160deg, rgba(255,210,63,.14), rgba(255,140,0,.04))" }}>
+          <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#FFD23F", letterSpacing: 2, marginBottom: 6 }}>🏅 ACHIEVEMENTS ARE HERE</div>
+          <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.5 }}>You&apos;ve already earned {badgeNews.earnedIds.length} {badgeNews.earnedIds.length === 1 ? "badge" : "badges"} for your training, mornings, habits and nutrition so far.</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: "#FFD23F", color: "#FFD23F" }} onClick={() => closeBadgeNews(true)}>SEE ALL BADGES</button>
+            <button type="button" className="t3d-btn t3d-btn-sm" style={{ borderColor: BORDER, color: "#8AABB8" }} onClick={() => closeBadgeNews(false)}>DISMISS</button>
+          </div>
+        </div>
       )}
+      {getStartedCard}
+      {nextUpCard}
+      {allSetCard}
+      <StepsCard user={user} today={today} profile={profile} onProfileSaved={onProfileSaved} />
       <div style={{ marginBottom: 16 }}>
         <div className="t3d-card" style={{ marginBottom: 14 }}>
           <div className="t3d-ctitle">TOP GOALS FOR TODAY</div>
@@ -5736,9 +5824,10 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
             </div>
           )}
         </div>
-        <div className="t3d-card" style={{ marginBottom: 14 }}>
+        <div className="t3d-card" style={{ marginBottom: 14, ...mutedCard("habits") }}>
           <div className="t3d-ctitle">DO YOUR DAILY HABITS</div>
-          {habits.length === 0 && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
+          {notSetUp("habits") && notSetUpNote("habits")}
+          {habits.length === 0 && !notSetUp("habits") && <div style={{ color: "#8AABB8", fontSize: 11, lineHeight: 1.6 }}>You have not added any habits yet.<br /><button className="t3d-btn t3d-btn-sm" style={{ marginTop: 10 }} onClick={() => onNavigate("habits")}>ADD YOUR HABITS</button></div>}
           {habits.map(h => (
             <button type="button" key={h.id} className="t3d-hrow" aria-pressed={Boolean(h.done)} aria-label={`${h.name}, ${habitStreak(h)} day streak`} onClick={() => setHabits(hh => hh.map(x => x.id===h.id ? {...x, done:!x.done} : x))}
               style={{ width: "100%", minHeight: 44, background: "none", border: 0, borderBottom: `1px solid ${BORDER}`, color: "inherit", font: "inherit", textAlign: "left" }}>
@@ -5781,17 +5870,17 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
             )}
           </>}
         </div>
-        <div className="t3d-card">
+        <div className="t3d-card" style={mutedCard("morning")}>
           <div className="t3d-ctitle">MORNING ROUTINE</div>
-          {!todayData.loaded ? dayWaiting : <>
+          {!todayData.loaded ? dayWaiting : notSetUp("morning") ? notSetUpNote("morning") : <>
             <div style={{ fontSize: 46, color: morningDone && !morningSkipped ? NEON : morningInProgress ? "#FFB547" : BORDER, lineHeight: 1 }}>{morningDone && !morningSkipped ? "✓" : morningInProgress ? "…" : "○"}</div>
             <div className="t3d-slabel" style={{ marginTop: 10 }}>{morningSkipped ? "SKIPPED TODAY" : morningDone ? `DONE · SCORE ${todayData.morning?.score || 0}/10` : morningInProgress ? "STARTED · NOT FINISHED" : "NOT DONE YET"}</div>
             <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("morning")}>{morningDone ? "VIEW MORNING" : morningInProgress ? "GO TO MORNING →" : !todayData.hasRoutine ? "SET UP MY MORNING →" : "START MORNING →"}</button>
           </>}
         </div>
-        <div className="t3d-card">
+        <div className="t3d-card" style={mutedCard("fitness")}>
           <div className="t3d-ctitle">FITNESS TODAY</div>
-          {!todayData.loaded ? dayWaiting : activeWorkout ? <>
+          {!todayData.loaded ? dayWaiting : notSetUp("fitness") && !activeWorkout ? notSetUpNote("fitness") : activeWorkout ? <>
             <div style={{ fontSize: 22, color: "#FFB547", fontFamily: "'Orbitron',monospace", overflowWrap: "anywhere" }}>{activeWorkout.session_name}</div>
             <div className="t3d-slabel" style={{ marginTop: 10 }}>WORKOUT IN PROGRESS</div>
           </> : todaySession && !fitnessDone ? <>
@@ -5802,11 +5891,11 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
             <div className="t3d-slabel" style={{ marginTop: 10 }}>COMPLETED TODAY</div>
           </> : !todayData.hasPlan ? <div style={{ color: "#8AABB8", fontSize: 12 }}>No training plan yet.</div>
             : <div style={{ color: "#8AABB8", fontSize: 12 }}>Rest day. Nothing scheduled.</div>}
-          {todayData.loaded && !(activeWorkout && workoutBannerShown) && <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? (isActivitySession(todaySession) ? "LOG IT →" : "START WORKOUT →") : !todayData.hasPlan ? "BUILD MY PLAN →" : "OPEN FITNESS"}</button>}
+          {todayData.loaded && !(activeWorkout && workoutBannerShown) && !(notSetUp("fitness") && !activeWorkout) && <button className="t3d-btn t3d-btn-sm" style={{ marginTop: 12 }} onClick={() => onNavigate("fitness")}>{activeWorkout ? "CONTINUE WORKOUT →" : todaySession && !fitnessDone ? (isActivitySession(todaySession) ? "LOG IT →" : "START WORKOUT →") : !todayData.hasPlan ? "BUILD MY PLAN →" : "OPEN FITNESS"}</button>}
         </div>
-        <div className="t3d-card">
+        <div className="t3d-card" style={mutedCard("nutrition")}>
           <div className="t3d-ctitle">CALORIES</div>
-          {!todayData.loaded ? dayWaiting : calorieGoal ? <>
+          {!todayData.loaded ? dayWaiting : notSetUp("nutrition") ? notSetUpNote("nutrition") : calorieGoal ? <>
             <div className="t3d-sval" style={{ color: NEON2 }}>{caloriesEaten.toLocaleString()} <span style={{ fontSize: 12, letterSpacing: 1 }}>KCAL</span></div>
             <div className="t3d-slabel">EATEN OF {calorieGoal.toLocaleString()} TARGET</div>
             {unloggedFoodFromLog(todayData.nutrition).length > 0 && <div data-testid="kcal-excludes" style={{ fontSize: 9, color: "#FFB547", marginTop: 4 }}>Excludes: {unloggedFoodFromLog(todayData.nutrition).join(", ")}</div>}
@@ -5818,8 +5907,8 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
         </div>
       </div>
 
-      {/* End of Day Check-in */}
-      <div className="t3d-card" style={{ textAlign: "center", padding: 28 }}>
+      {/* End of Day Check-in (not offered until something is set up) */}
+      {(!todayData.loaded || anythingSetUp) && <div className="t3d-card" style={{ textAlign: "center", padding: 28 }}>
         {!todayData.loaded ? dayWaiting : eodDone ? (
           <>
             <div style={{ fontSize: 28, marginBottom: 8 }}>🌙</div>
@@ -5837,7 +5926,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
             <div style={{ fontSize: 10, color: "#6F8792", marginTop: 12 }}>Do this last, once your morning, workout and meals are logged.</div>
           </>
         )}
-      </div>
+      </div>}
       {!weeklyIsNew && weeklyCard}
 
       <div className="t3d-card">
@@ -6033,7 +6122,9 @@ function normalizeFitnessSessions(sessions = [], { straight = false } = {}) {
   }));
 }
 
-function Fitness({ user, isActive = true, profile = null }) {
+// onProfileChange: answers this setup gives that the rest of the app reuses
+// (experience, training goal). onSessionsChange: the saved plan's sessions.
+function Fitness({ user, isActive = true, profile = null, onProfileChange = () => {}, onSessionsChange = () => {} }) {
   const homeTimeZone = resolveHomeTimeZone(user);
   const zonedToday = useZonedDateKey(homeTimeZone);
   const homeDate = { ...getZonedDateInfo(new Date(), homeTimeZone), dateKey: zonedToday };
@@ -6048,6 +6139,10 @@ function Fitness({ user, isActive = true, profile = null }) {
   const [sessions, setSessions] = useState([]);
   const [planPreview, setPlanPreview] = useState(null); // read-only plan sheet
   const [setupExperience, setSetupExperience] = useState(null); // asked once during fitness setup
+  // Experience comes from the profile when it is known; CHANGE asks again.
+  const knownExperience = profile?.experienceLevel || null;
+  const [askExperience, setAskExperience] = useState(false);
+  const [rangeReview, setRangeReview] = useState(null); // coach check on SAVE SPLIT
   const [importText, setImportText] = useState("");
   const [importResult, setImportResult] = useState(null); // interpreted plan awaiting review
   const [importError, setImportError] = useState("");
@@ -6256,7 +6351,7 @@ function withPlanApproval(sessions, now = new Date()) {
 
   const AI_QUESTIONS = [
     { id: "goal", q: "What are we working towards? Pick up to two.", type: "choice", multi: 2, options: ["Build muscle", "Build strength", "Lose fat", "General fitness", "Athletic performance"], custom: true },
-    { id: "experience", q: "Where are you starting from?", type: "choice", options: ["New to training", "Training for a few months", "1–3 years of training", "3+ years of training"], custom: true },
+    { id: "experience", q: "Where are you starting from?", type: "choice", options: Object.values(EXPERIENCE_ANSWERS), custom: true },
     { id: "days_per_week", q: "How many days can you realistically train?", type: "choice", options: ["1 day", "2 days", "3 days", "4 days", "5 days", "6 days", "7 days"] },
     { id: "preferred_days", q: "Which days work best for you?", type: "days" },
     { id: "session_length", q: "How much time do you have for training?", type: "availability" },
@@ -6274,7 +6369,27 @@ function withPlanApproval(sessions, now = new Date()) {
     if (question.type === "days") return Array.isArray(value) ? (value.includes("FLEXIBLE") ? "Flexible" : value.join(", ")) : String(value || "");
     return String(value || "");
   };
-  const aiAskedQuestions = aiQuestionIds ? AI_QUESTIONS.filter(question => aiQuestionIds.includes(question.id)) : AI_QUESTIONS;
+  // Experience is not asked again when the profile has it (unless CHANGE).
+  const skipExperience = Boolean(knownExperience && !askExperience);
+  const aiAskedQuestions = AI_QUESTIONS.filter(question => (question.id === "experience"
+    ? !skipExperience && (!aiQuestionIds || aiQuestionIds.includes(question.id) || askExperience)
+    : !aiQuestionIds || aiQuestionIds.includes(question.id)));
+  // When the AI can't build a programme: try again with the same answers,
+  // or a built-in starter plan from them (S0a), so setup never dead-ends.
+  const useStarterPlan = () => {
+    const level = normaliseExperience(aiAnswers.experience) || profile?.experienceLevel || null;
+    setAiPlan(starterPlan({ ...aiAnswers, preferred_days: aiAnswers.preferred_days }, level));
+    setAiPlanError("");
+  };
+  const aiPlanFailure = (
+    <div role="alert" data-testid="ai-plan-failure" style={{ margin: "4px 0 12px", padding: 12, borderRadius: 6, border: "1px solid rgba(255,45,120,.35)", background: "rgba(255,45,120,.06)" }}>
+      <p style={{ color: "#FF8AAD", fontSize: 12, lineHeight: 1.5, margin: "0 0 10px" }}>{aiPlanError}</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button className="t3d-btn t3d-btn-sm" disabled={aiBuilding} onClick={() => buildAIPlan(aiAnswers, aiChatContext)}>TRY AGAIN</button>
+        <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={useStarterPlan}>USE A STARTER PLAN INSTEAD</button>
+      </div>
+    </div>
+  );
   const AI_BUILD_STAGES = ["Reading your answers", "Choosing your training days", "Selecting exercises for your equipment", "Setting sets, reps and tempo", "Checking each session fits your time"];
 
   useEffect(() => {
@@ -6283,15 +6398,35 @@ function withPlanApproval(sessions, now = new Date()) {
     return () => clearInterval(timer);
   }, [aiBuilding]);
 
-  // The training level every coach uses (coach_profiles.experience_level).
+  // The training level every coach uses (coach_profiles.experience_level),
+  // also shown in the profile.
   const saveExperienceLevel = async level => {
     if (!user || !level) return;
+    onProfileChange({ experienceLevel: level });
     const { error } = await supabase.from("coach_profiles").upsert({ user_id: user.id, experience_level: level, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
     if (error) console.log("Experience level not saved:", error.message);
   };
+  // The builder's answers other setups reuse: the goal (nutrition starts
+  // from it), equipment, injuries and time available.
+  const saveTrainingAnswers = async answers => {
+    if (!user) return;
+    const goalQuestion = AI_QUESTIONS.find(question => question.id === "goal");
+    const primaryGoal = aiAnswerText(goalQuestion, answers).trim() || null;
+    if (primaryGoal) onProfileChange({ primaryGoal });
+    const { error } = await supabase.from("coach_profiles").upsert({
+      user_id: user.id,
+      primary_goal: primaryGoal,
+      equipment_context: { equipment: answers.equipment || null, limitations: answers.limitations || null },
+      typical_availability: { days_per_week: answers.days_per_week || null, preferred_days: answers.preferred_days || null, session_length: answers.session_length || null },
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    if (error) console.log("Training answers not saved:", error.message);
+  };
+  // The profile's experience fills in the builder's answer.
+  const withKnownExperience = (answers = {}) => (knownExperience && !answers.experience ? { ...answers, experience: EXPERIENCE_ANSWERS[knownExperience] } : answers);
 
   const openAiBuilder = () => {
-    setAiStep(0); setAiAnswers({}); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
+    setAiStep(0); setAiAnswers(withKnownExperience({})); setAskExperience(false); setAiPlan(null); setAiPlanError(""); setAiQuestionIds(null); setAiChatContext(""); setAiPrefillNote(""); setView("ai_builder");
   };
 
   useEffect(() => { if (!user) return; loadData(); }, [user, today]);
@@ -6383,6 +6518,7 @@ function withPlanApproval(sessions, now = new Date()) {
   // Returns { ok, error }. Callers must not report a change unless ok is true.
   const saveSplit = async (sessionsData, extra = {}) => {
     if (!user) return { ok: false, error: "not signed in" };
+    const firstPlan = !split?.sessions?.length;
     try {
       const normalizedSessions = normalizeFitnessSessions(sessionsData, { straight: straightSets });
       const { data: existing } = await supabase.from("workout_splits").select("id").eq("user_id", user.id).maybeSingle();
@@ -6402,6 +6538,8 @@ function withPlanApproval(sessions, now = new Date()) {
       }
       setSessions(normalizedSessions);
       setSplit(previous => ({ ...(previous || {}), sessions: normalizedSessions, ...extra }));
+      onSessionsChange(normalizedSessions);
+      if (firstPlan && normalizedSessions.length) announceSetupSaved("fitness");
       return { ok: true };
     } catch (e) {
       console.error("saveSplit exception:", e);
@@ -6833,8 +6971,8 @@ function withPlanApproval(sessions, now = new Date()) {
         messages: [{ role: "user", content: completionFeedbackReview() }, { role: "assistant", content: completionFeedback }, ...updated],
       }, text => setCompletionFollowUps([...updated, { role: "assistant", content: text }]));
       setCompletionFollowUps([...updated, { role: "assistant", content: reply }]);
-    } catch {
-      setCompletionFollowUps([...updated, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
+    } catch (error) {
+      setCompletionFollowUps([...updated, { role: "assistant", content: coachErrorText(error, "I couldn't connect just now. Please try again.") }]);
     }
     setCompletionReplyLoading(false);
   };
@@ -7070,7 +7208,8 @@ function withPlanApproval(sessions, now = new Date()) {
     if (aiBuilding) return;
     const experienceQuestion = AI_QUESTIONS.find(question => question.id === "experience");
     const builderLevel = experienceQuestion ? normaliseExperience(aiAnswerText(experienceQuestion, answers)) : null;
-    if (builderLevel) saveExperienceLevel(builderLevel);
+    if (builderLevel && builderLevel !== knownExperience) saveExperienceLevel(builderLevel);
+    saveTrainingAnswers(answers);
     setAiPlanError("");
     setAiBuildStage(0);
     setAiBuilding(true);
@@ -7098,8 +7237,9 @@ function withPlanApproval(sessions, now = new Date()) {
           method: "POST", headers: await chatHeaders(),
           body: JSON.stringify({ responseTokens: 6000, area: "programme_builder", context: builderContext, messages }),
         });
-        if (!res.ok) throw new Error("Could not build programme");
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        // The coach offline (billing, key): trying again won't help, so say so.
+        if (!res.ok) throw Object.assign(new Error("Could not build programme"), { offline: Boolean(data?.offline), publicMessage: data?.error });
         const text = data.content?.map(b => b.text || "").join("") || "";
         let parsed = null;
         try { parsed = JSON.parse(text.replace(/```json|```/g, "").trim()); } catch { parsed = null; }
@@ -7117,7 +7257,11 @@ function withPlanApproval(sessions, now = new Date()) {
       if (!plan) throw new Error("Incomplete programme");
       // Whatever the model returned, never show a session longer than the stated limit.
       setAiPlan({ ...plan, sessions: plan.sessions.map(session => fitSessionToBudget(session, budgetFor(session))) });
-    } catch { setAiPlanError("The coach could not finish your programme. Your answers are saved here — please try again."); }
+    } catch (error) {
+      setAiPlanError(error?.offline
+        ? `${error.publicMessage || "The coach is offline for a few minutes. Your data is safe."} Your answers are saved: try again shortly, or use a starter plan now.`
+        : "The coach could not finish your programme. Your answers are saved here: try again, or use a starter plan instead.");
+    }
     setAiBuilding(false);
   };
 
@@ -7834,10 +7978,10 @@ function withPlanApproval(sessions, now = new Date()) {
     if (aiPlan) return (
       <div className="t3d-fade">
         <div className="t3d-card">
-          <h2 className="t3d-ctitle">YOUR AI COACH PROGRAMME — {aiPlan.split_name}</h2>
+          <h2 className="t3d-ctitle">{aiPlan.starter ? "YOUR STARTER PROGRAMME" : "YOUR AI COACH PROGRAMME"} — {aiPlan.split_name}</h2>
           <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds. X means an explosive movement.</p>
           {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
-          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+          {aiPlanError && aiPlanFailure}
           {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>{aiPlan.notes}</div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
@@ -7884,7 +8028,7 @@ function withPlanApproval(sessions, now = new Date()) {
       <div className="t3d-fade"><div className="t3d-card">
         <h2 className="t3d-ctitle">YOUR ANSWERS ARE READY</h2>
         <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>Everything the coach needs came from your chat.</p>
-        {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+        {aiPlanError && aiPlanFailure}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className="t3d-btn" onClick={() => buildAIPlan()}>BUILD MY PROGRAMME</button>
           <button className="t3d-btn t3d-btn-sm" onClick={() => { setAiQuestionIds(null); setAiStep(0); }}>REVIEW ALL ANSWERS</button>
@@ -7922,6 +8066,12 @@ function withPlanApproval(sessions, now = new Date()) {
             <p style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.6, marginTop: 0 }}>
               Your other answers were taken from your chat with the coach. Only the missing ones are asked here.
             </p>
+          )}
+          {aiStep === 0 && skipExperience && (
+            <div data-testid="known-experience" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 11, color: "#8AABB8", marginBottom: 12 }}>
+              <span>Experience: <span style={{ color: "#E0EAF0" }}>{EXPERIENCE_CHOICES.find(choice => choice.id === knownExperience)?.label}</span> (from your profile)</span>
+              <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 36 }} onClick={() => setAskExperience(true)}>CHANGE</button>
+            </div>
           )}
           <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 8 }}>QUESTION {aiStep+1} OF {aiAskedQuestions.length}</div>
           <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 24, lineHeight: 1.6 }}>{currentQ.q}</div>
@@ -7996,7 +8146,7 @@ function withPlanApproval(sessions, now = new Date()) {
           <button className="t3d-btn" style={{ width: "100%", padding: 12, marginBottom: 12 }} disabled={!answered} onClick={() => goNext()}>
             {isLastQuestion ? "BUILD MY PROGRAMME" : "NEXT →"}
           </button>
-          {aiPlanError && <p role="alert" style={{ color: NEON3, fontSize: 12 }}>{aiPlanError}</p>}
+          {aiPlanError && aiPlanFailure}
           <div style={{ display: "flex", gap: 10 }}>
             {aiStep > 0 && <button className="t3d-btn t3d-btn-sm" onClick={() => setAiStep(step => step - 1)}>← BACK</button>}
             <button className="t3d-btn t3d-btn-sm t3d-btn-red" onClick={() => setView("home")}>CANCEL</button>
@@ -8017,7 +8167,15 @@ function withPlanApproval(sessions, now = new Date()) {
   };
 
   // A plan the user built by hand is theirs: save it approved, starting now.
-  const saveManualPlan = async (planSessions = sessions) => {
+  // Coach check before a plan the user wrote is saved: per-set rep ranges,
+  // staggered (heaviest set first) or straight for beginners. The user can
+  // take the suggestions or keep their own.
+  const saveManualPlan = async (planSessions = sessions, { checked = false } = {}) => {
+    if (!checked) {
+      const review = planRangeReview(planSessions, { straight: straightSets });
+      if (review.changes.length) { setRangeReview({ original: planSessions, ...review }); return; }
+    }
+    setRangeReview(null);
     const now = new Date();
     const approved = withPlanApproval(planSessions, now);
     const extra = { programme_started_at: now.toISOString(), week_reviewed_at: null };
@@ -8191,14 +8349,24 @@ function withPlanApproval(sessions, now = new Date()) {
           {setupStep === 0 && (
             <div>
               <button className="t3d-btn t3d-btn-sm" style={{ marginBottom: 14 }} onClick={() => setView("home")}>← BACK</button>
+              {skipExperience ? (
+                <div data-testid="known-experience" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 11, color: "#8AABB8", marginBottom: 22 }}>
+                  <span>Experience: <span style={{ color: "#E0EAF0" }}>{EXPERIENCE_CHOICES.find(choice => choice.id === knownExperience)?.label}</span> (from your profile)</span>
+                  <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 36 }} onClick={() => setAskExperience(true)}>CHANGE</button>
+                </div>
+              ) : <>
               <h2 className="t3d-ctitle">YOUR TRAINING EXPERIENCE</h2>
-              <p style={{ fontSize: 10, color: "#8AABB8", margin: "0 0 8px" }}>The coach explains things to match. You can change this later in any coach chat.</p>
+              <p style={{ fontSize: 10, color: "#8AABB8", margin: "0 0 8px" }}>The coach explains things to match. This also updates your profile.</p>
               <div style={{ display: "flex", gap: 6, marginBottom: 22 }}>
-                {EXPERIENCE_OPTIONS.map(([key, label]) => (
-                  <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={setupExperience === key} style={{ flex: 1, fontSize: 8, background: setupExperience === key ? "rgba(0,255,178,.15)" : "transparent", borderColor: setupExperience === key ? NEON : BORDER, color: setupExperience === key ? NEON : "#E0EAF0" }}
-                    onClick={() => { setSetupExperience(key); saveExperienceLevel(key); }}>{label}</button>
-                ))}
+                {EXPERIENCE_OPTIONS.map(([key, label]) => {
+                  const chosen = (setupExperience || knownExperience) === key;
+                  return (
+                    <button key={key} className="t3d-btn t3d-btn-sm" aria-pressed={chosen} style={{ flex: 1, fontSize: 8, background: chosen ? "rgba(0,255,178,.15)" : "transparent", borderColor: chosen ? NEON : BORDER, color: chosen ? NEON : "#E0EAF0" }}
+                      onClick={() => { setSetupExperience(key); saveExperienceLevel(key); }}>{label}</button>
+                  );
+                })}
               </div>
+              </>}
               <h2 className="t3d-ctitle">HOW MANY SESSIONS PER WEEK?</h2>
               <button className="t3d-btn t3d-btn-sm" onClick={openAiBuilder}>LET AI COACH CHOOSE MY PROGRAMME</button>
               <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "32px 0" }}>
@@ -8290,6 +8458,29 @@ function withPlanApproval(sessions, now = new Date()) {
             </div>
           )}
         </div>
+
+        {rangeReview && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }}>
+            <div role="alertdialog" aria-modal="true" aria-labelledby="range-review-title" data-testid="range-review" style={{ background: SURFACE, border: `1px solid ${NEON}`, borderRadius: 8, padding: 22, width: "100%", maxWidth: 420, maxHeight: "85dvh", overflowY: "auto" }}>
+              <div id="range-review-title" style={{ fontFamily: "'Orbitron',monospace", fontSize: 11, color: NEON, letterSpacing: 2, marginBottom: 10 }}>COACH CHECK · REP RANGES</div>
+              <div style={{ fontSize: 12, color: "#C5D6DC", lineHeight: 1.6, marginBottom: 12 }}>
+                {straightSets
+                  ? "For your first weeks, every set uses the same weight and the same rep range. When you reach the top of the range on every set, the weight goes up."
+                  : "Every set gets its own range: your first set is the heaviest, then each set is a little lighter for a few more reps. Your weights are suggested from these."}
+              </div>
+              {rangeReview.changes.map(change => (
+                <div key={`${change.session}-${change.exercise}`} style={{ padding: "8px 0", borderTop: `1px solid ${BORDER}`, fontSize: 11 }}>
+                  <div style={{ color: "#E0EAF0" }}>{change.exercise} <span style={{ color: "#6F8792" }}>· {change.session}</span></div>
+                  <div style={{ color: "#8AABB8", marginTop: 3 }}>{change.from.join(" / ")} <span style={{ color: NEON }}>→ {change.to.join(" / ")}</span> reps</div>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+                <button className="t3d-btn t3d-btn-sm" style={{ flex: "1 1 160px", minHeight: 44 }} onClick={() => { setSessions(rangeReview.sessions); saveManualPlan(rangeReview.sessions, { checked: true }); }}>USE THESE RANGES ✓</button>
+                <button className="t3d-btn t3d-btn-sm" style={{ flex: "1 1 120px", minHeight: 44, borderColor: BORDER, color: "#E0EAF0" }} onClick={() => saveManualPlan(rangeReview.original, { checked: true })}>KEEP MINE</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* No days warning modal */}
         {noDaysWarning && (
@@ -8479,7 +8670,7 @@ function withPlanApproval(sessions, now = new Date()) {
         }),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Coach request failed");
+      if (!response.ok) throw Object.assign(new Error(result.error || "Coach request failed"), { offline: Boolean(result.offline) });
       const proposal = result.changes?.length ? makePlanProposal(result.changes) : null;
       // A newer proposal replaces one still waiting.
       setPlanChangeMessages(current => [
@@ -8488,7 +8679,8 @@ function withPlanApproval(sessions, now = new Date()) {
       ]);
       setPlanChangeRecommendation(result);
     } catch (error) {
-      setPlanChangeMessages(current => [...current, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again." }]);
+      // Offline: offer the questions and a starter plan, so a rebuild isn't stuck.
+      setPlanChangeMessages(current => [...current, { role: "assistant", content: error.message || "I couldn't review the plan just now. Please try again.", offline: Boolean(error.offline) }]);
     } finally {
       setPlanChangeLoading(false);
     }
@@ -8547,6 +8739,8 @@ function withPlanApproval(sessions, now = new Date()) {
       }
     }
     setAiPrefillNote(Object.keys(answers).length ? "" : "We could not read your answers from the coach chat, so please answer the questions below.");
+    answers = withKnownExperience(answers);
+    setAskExperience(false);
     const missing = AI_QUESTIONS.filter(question => !aiAnswerText(question, answers).trim()).map(question => question.id);
     setPlanRebuildPreparing(false);
     setPlanChangeOpen(false);
@@ -8601,6 +8795,11 @@ function withPlanApproval(sessions, now = new Date()) {
           </div>
         )}
 
+        {planChangeMessages.at(-1)?.offline && (
+          <button type="button" data-testid="plan-change-offline-rebuild" className="t3d-btn t3d-btn-sm" style={{ width: "100%", margin: "4px 0 8px", borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => { setPlanChangeOpen(false); openAiBuilder(); }}>
+            REBUILD FROM QUESTIONS (STARTER PLAN IF THE COACH IS STILL OFFLINE)
+          </button>
+        )}
         <button type="button" onClick={openImport} style={{ display: "block", background: "none", border: 0, color: "#8AABB8", fontSize: 10, textDecoration: "underline", cursor: "pointer", padding: "4px 0 10px" }}>Have a new plan from your own coach? Import it instead</button>
         <div style={{ display: "flex", gap: 7 }}>
           <input className="t3d-ai-input" placeholder="Tell the coach what you want to change..." value={planChangeInput} onChange={event => setPlanChangeInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); askPlanChangeCoach(); } }} />
@@ -8797,8 +8996,8 @@ function withPlanApproval(sessions, now = new Date()) {
         messages: recentChatMessages(updatedMessages),
       }, text => setCoachMessages([...updatedMessages, { role: "assistant", content: text }]));
       setCoachMessages([...updatedMessages, { role: "assistant", content: reply }]);
-    } catch {
-      setCoachMessages([...updatedMessages, { role: "assistant", content: "I couldn't connect just now. Please try again." }]);
+    } catch (error) {
+      setCoachMessages([...updatedMessages, { role: "assistant", content: coachErrorText(error, "I couldn't connect just now. Please try again.") }]);
     } finally {
       setCoachLoading(false);
     }
@@ -10135,6 +10334,8 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   const [sex, setSex] = useState("");
   const [wakeTime, setWakeTime] = useState("");
   const [routineWakeTime, setRoutineWakeTime] = useState("");
+  // Average daily steps over the last two weeks (when any were logged), for the activity level.
+  const [averageSteps, setAverageSteps] = useState(null);
   const [latestWeight, setLatestWeight] = useState("");
   const [allergyCheckConfirmed, setAllergyCheckConfirmed] = useState(false);
   const [calculatedMacros, setCalculatedMacros] = useState(null);
@@ -10172,6 +10373,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
   const [aiFeedbackError, setAiFeedbackError] = useState("");
   const [mealPlanWarning, setMealPlanWarning] = useState(""); // AI meal plan off its own targets
+  const [mealBuildFailure, setMealBuildFailure] = useState(""); // the AI couldn't build a plan at all
   const [reviewSkipAnswered, setReviewSkipAnswered] = useState(false); // DAY REVIEW skips meals already logged
   const [foodEstimate, setFoodEstimate] = useState(null);
   const [foodEstimateStatus, setFoodEstimateStatus] = useState("");
@@ -10322,6 +10524,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
         supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(14),
       ]);
       setRoutineWakeTime(routineRow?.wake_time || "");
+      const { data: stepRows } = await supabase.from("daily_steps").select("steps").eq("user_id", user.id).gte("date", shiftDateKey(today, -14));
+      const loggedSteps = (stepRows || []).map(row => Number(row.steps)).filter(steps => steps > 0);
+      setAverageSteps(loggedSteps.length >= 3 ? loggedSteps.reduce((sum, steps) => sum + steps, 0) / loggedSteps.length : null);
       const weighed = (weighIns || []).find(row => Number(row.data?.weight) > 0);
       setLatestWeight(weighed ? String(weighed.data.weight) : "");
       const { data: logData } = await supabase.from("nutrition_logs").select("*").eq("user_id", user.id).order("date", { ascending: false }).limit(30);
@@ -10422,8 +10627,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     setSex(sexLabel(profile?.sex) || saved.sex || "");
     setEditProfileFields(false);
     setProfileSaveNote("");
-    setGoal(normaliseNutritionGoal(saved.goal || plan?.goal) || "Maintain");
-    setActivityLevel(ACTIVITY_LEVELS.some(level => level.id === saved.activityLevel) ? saved.activityLevel : suggestActivityLevel(trainingDaysCount));
+    // A first plan starts from the training goal (Lose fat, Build muscle...).
+    setGoal(normaliseNutritionGoal(saved.goal || plan?.goal) || normaliseNutritionGoal(profile?.primaryGoal) || "Maintain");
+    setActivityLevel(ACTIVITY_LEVELS.some(level => level.id === saved.activityLevel) ? saved.activityLevel : suggestActivityLevel(trainingDaysCount, averageSteps));
     setAiNutritionAnswers(saved.answers || {});
     setAiNutritionStep(0);
     setShowAiQuestions(false);
@@ -10447,6 +10653,14 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     }
     setView("setup");
   };
+  // GET STARTED: straight into the setup, once the plan has loaded.
+  const openSetupRef = useRef(null);
+  useEffect(() => {
+    openSetupRef.current = () => {
+      if (!loading && takeSetupRequest("nutrition") && !plan) openSetup();
+    };
+  });
+  useEffect(() => { if (!loading) openSetupRef.current?.(); }, [loading]);
 
   // EDIT MEALS / EDIT MEAL PLAN: straight to the meals step, keeping the
   // current targets.
@@ -10634,7 +10848,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     } catch (e) {
       console.log("Nutrition feedback error:", e?.message);
       setAiFeedback("");
-      setAiFeedbackError("Couldn't get feedback on your day.");
+      setAiFeedbackError(coachErrorText(e, "Couldn't get feedback on your day."));
     }
     setAiFeedbackLoading(false);
   };
@@ -10671,12 +10885,19 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     const minCalories = calorieFloor(sex);
     const slots = mealTimeSlots(wakeTime, mealsPerDay);
     setMealPlanWarning("");
+    setMealBuildFailure("");
     try {
       const targets = { calories: Math.max(macros.calories, minCalories), protein: macros.protein };
       const result = await requestMealPlan("meal_plan_build", `Build a ${mealsPerDay} meal daily plan. Goal: ${goal}. Targets: ${targets.calories} kcal, ${macros.protein}g protein, ${macros.carbs}g carbs, ${macros.fats}g fats.${slots.length ? ` The user wakes at ${wakeTime}; use these meal times in order: ${slots.join(", ")}.` : ""}\nUser preferences:\n${preferencesText(answers) || "none given"}`, targets, { allergies: parseAllergies(answers.allergies), wakeTime, minCalories });
       setPlanMeals(result.meals);
       if (mealPlanNeedsWarning(result.check)) setMealPlanWarning(mealPlanWarningText(result.check, targets));
-    } catch (e) { console.error("AI meals error:", e); setMealPlanWarning(e?.belowMinimum ? belowMinimumText(minCalories) : "Couldn't build your meal plan just now. Please try again."); }
+    } catch (e) {
+      console.error("AI meals error:", e);
+      if (e?.belowMinimum) setMealPlanWarning(belowMinimumText(minCalories));
+      else setMealBuildFailure(e?.offline
+        ? `${e.publicMessage || "The coach is offline for a few minutes. Your data is safe."} Your answers are saved: try again shortly, or pick from common meals now.`
+        : "Couldn't build your meal plan just now. Your answers are saved: try again, or pick from common meals instead.");
+    }
     setAiMealLoading(false);
   };
 
@@ -10936,7 +11157,8 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     // Rest days only get their own meals when that was chosen and some exist.
     const preparedRestDayMeals = hasRestDayPlan && restDayMeals.length ? prepareNutritionMeals(restDayMeals, nutritionStyle, mealsPerDay, getFinalMacros()) : [];
     const buildMode = editingRestDay ? restBuildMode : mealBuildMode;
-    const setBuildMode = editingRestDay ? setRestBuildMode : setMealBuildMode;
+    // Switching how to build meals clears a failed AI attempt's message.
+    const setBuildMode = mode => { setMealBuildFailure(""); if (mode !== "ai") setMealPlanWarning(""); (editingRestDay ? setRestBuildMode : setMealBuildMode)(mode); };
     const allergyList = parseAllergies(aiNutritionAnswers.allergies);
     const currentConflicts = mealAllergyConflicts(currentMeals, allergyList);
     const reviewConflicts = mealAllergyConflicts([...preparedPlanMeals, ...preparedRestDayMeals], allergyList);
@@ -11093,7 +11315,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 4 }}>ACTIVITY LEVEL</div>
                 <div style={{ fontSize: 10, color: "#8AABB8", marginBottom: 8, lineHeight: 1.5 }}>
-                  {trainingDaysCount ? `Suggested from the ${trainingDaysCount} training day${trainingDaysCount === 1 ? "" : "s"} a week in your split. ` : ""}Count your job and daily steps too, not just workouts.
+                  {activitySuggestionText(trainingDaysCount, averageSteps)
+                    ? <><span style={{ color: "#E0EAF0" }}>{activitySuggestionText(trainingDaysCount, averageSteps)}</span> Pick a higher level if your job keeps you on your feet.</>
+                    : "Count your job and daily steps too, not just workouts."}
                 </div>
                 {ACTIVITY_LEVELS.map(level => {
                   const preview = calculateNutritionTargets({ ...stats, activityLevel: level.id });
@@ -11288,9 +11512,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                       🍽️ Choose from common meals
                       <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>Pick from breakfast, lunch, dinner, snacks</div>
                     </button>
-                    <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11, borderColor: "rgba(0,200,255,.3)", color: NEON2 }} onClick={() => { if (editingRestDay) { buildRestDayAI(); return; } setMealBuildMode("ai"); setShowAiQuestions(true); }}>
+                    <button className="t3d-btn" style={{ padding: "14px", textAlign: "left", whiteSpace: "normal", fontSize: 11, borderColor: "rgba(0,200,255,.3)", color: NEON2 }} onClick={() => { if (editingRestDay) { buildRestDayAI(); return; } setMealBuildMode("ai"); setAiNutritionStep(String(aiNutritionAnswers.allergies || "").trim() ? 1 : 0); setShowAiQuestions(true); }}>
                       🤖 AI build my meal plan
-                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>5 quick questions, allergies first</div>
+                      <div style={{ fontSize: 9, color: "#E0EAF0", marginTop: 4 }}>{String(aiNutritionAnswers.allergies || "").trim() ? "4 quick questions + optional budget (allergies already given)" : "5 quick questions + optional budget, allergies first"}</div>
                     </button>
                   </div>
                 </div>
@@ -11351,6 +11575,15 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                   {editingRestDay && restAiLoading && <div style={{ textAlign: "center", padding: 20, fontSize: 11, color: "#E0EAF0" }}>🤖 Building your rest day meals...</div>}
                   {editingRestDay && restPlanNote && <div role="alert" data-testid="rest-plan-note" style={{ fontSize: 11, color: "#FFB547", margin: "10px 0", lineHeight: 1.5 }}>{restPlanNote}</div>}
                   {!editingRestDay && mealPlanWarning && <div role="alert" data-testid="meal-plan-warning" style={{ fontSize: 11, color: "#FFB547", margin: "10px 0", lineHeight: 1.5 }}>{mealPlanWarning}</div>}
+                  {!editingRestDay && mealBuildFailure && !aiMealLoading && (
+                    <div role="alert" data-testid="meal-build-failure" style={{ margin: "10px 0", padding: 12, borderRadius: 6, border: "1px solid rgba(255,45,120,.35)", background: "rgba(255,45,120,.06)" }}>
+                      <p style={{ color: "#FF8AAD", fontSize: 11, lineHeight: 1.5, margin: "0 0 10px" }}>{mealBuildFailure}</p>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button className="t3d-btn t3d-btn-sm" onClick={() => buildAIMeals(aiNutritionAnswers)}>TRY AGAIN</button>
+                        <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => setBuildMode("common")}>PICK FROM COMMON MEALS INSTEAD</button>
+                      </div>
+                    </div>
+                  )}
                   {!editingRestDay && buildMode === "ai" && currentMeals.length > 0 && !aiMealLoading && (
                     <AiTweaksBox
                       meals={currentMeals}
@@ -11533,6 +11766,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 <button className="t3d-btn" style={{ flex: 1, padding: 12 }} disabled={savingPlan || !preparedPlanMeals.length || (reviewConflicts.length > 0 && !allergyCheckConfirmed) || Boolean(targetMinimumProblem) || mealMinimumProblems.length > 0} onClick={async () => {
                   setSavingPlan(true);
                   setPlanSaveError(false);
+                  const firstPlan = !plan;
                   const realMacros = getFinalMacros();
                   const saved = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
@@ -11543,6 +11777,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                   await persistNutritionPlanning(nextLibrary, weeklyMealPlan);
                   setPlan(current => ({ ...current, ...saved, meal_library: nextLibrary, weekly_meal_plan: weeklyMealPlan }));
                   setView("home");
+                  if (firstPlan) announceSetupSaved("nutrition");
                 }}>{savingPlan ? "SAVING..." : "SAVE PLAN ✓"}</button>
               </div>
             </div>
@@ -11623,7 +11858,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   // Plan meals show once, in LOG AS YOU GO; the library lists the others.
   const libraryOnly = mealLibrary.map((meal, index) => ({ meal, index })).filter(({ meal }) => !planMealNames.has(String(meal.name || "").trim().toLowerCase()));
   // A profile completed after the plan was made can change the targets.
-  const targetSuggestion = plan ? targetUpdateSuggestion({ plan, profile, weight: latestWeight, activityLevel: suggestActivityLevel(trainingDaysCount), todayKey: today }) : null;
+  const targetSuggestion = plan ? targetUpdateSuggestion({ plan, profile, weight: latestWeight, activityLevel: suggestActivityLevel(trainingDaysCount, averageSteps), todayKey: today }) : null;
   // Kept dismissed while the plan's target and the suggested one stay the same.
   const targetSuggestionKey = targetSuggestion ? `${Number(plan?.daily_calories) || 0}|${targetSuggestion.targets.calories}` : "";
   const showTargetSuggestion = Boolean(targetSuggestion) && dismissedTargetSuggestion !== targetSuggestionKey && plan?.setup?.targetSuggestionDismissed !== targetSuggestionKey;
@@ -12070,7 +12305,7 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
     } catch (e) {
       console.log("Debrief feedback error:", e?.message);
       setAiFeedback("");
-      setAiFeedbackError("Couldn't get feedback on your day.");
+      setAiFeedbackError(coachErrorText(e, "Couldn't get feedback on your day."));
     }
     setAiFeedbackLoading(false);
   };
@@ -12431,12 +12666,19 @@ function Calendar({ user, fitnessSessions, nutritionPlan, isTrainingDay: default
 
 
 
-function HabitsPage({ habits, setHabits }) {
+function HabitsPage({ habits, setHabits, user = null }) {
   const [adding, setAdding] = useState(false);
   const [newHabit, setNewHabit] = useState({ name: "" });
   const [renaming, setRenaming] = useState(null); // { id, name } while a habit is being renamed
   const cats = [...new Set(habits.map(h => h.category))];
-  const remainingSuggestions = POPULAR_DAILY_HABITS.filter(suggestion => !habits.some(habit => habit.name.toLowerCase() === suggestion.name.toLowerCase()));
+  // Suggestions the morning routine already covers are left out, so the
+  // same thing isn't ticked twice a day.
+  const [morningTaskNames, setMorningTaskNames] = useState([]);
+  useEffect(() => {
+    if (!user) return;
+    readMorningRoutine(user.id).then(({ data }) => setMorningTaskNames((data?.tasks || []).map(task => task.name)));
+  }, [user]);
+  const remainingSuggestions = POPULAR_DAILY_HABITS.filter(suggestion => !habits.some(habit => habit.name.toLowerCase() === suggestion.name.toLowerCase()) && !inMorningRoutine(suggestion.name, morningTaskNames));
   const addHabit = (habit = newHabit) => {
     const name = habit.name?.trim();
     if (!name || habits.some(existing => existing.name.toLowerCase() === name.toLowerCase())) return;
@@ -12900,6 +13142,34 @@ export default function App() {
   const profileSaved = saved => { setProfile(previous => ({ ...(previous || {}), ...saved })); setNotice("Profile saved ✓"); };
   // What each active session is up to, for the banner ("Upper A · Set 2 of 4 · Bench Press").
   const [activeSummaries, setActiveSummaries] = useState({});
+  // After a new account saves a setup step: "Morning set ✓ · Next: …", on
+  // the tab it was saved on.
+  const [setupBanner, setSetupBanner] = useState(null);
+  useEffect(() => {
+    if (!user) return;
+    const saved = async event => {
+      if (readSetupTracking(user.id) !== "started") return;
+      const savedOn = event.detail?.section;
+      const [routine, split, nutrition] = await Promise.all([readMorningRoutine(user.id), readWorkoutSplit(user.id), readNutritionPlan(user.id)]);
+      const status = {
+        profile: isProfileComplete(profile),
+        fitness: Boolean(split.data?.sessions?.length),
+        nutrition: Number(nutrition.data?.daily_calories) > 0,
+        morning: Boolean(routine.data),
+        habits: habits.length > 0,
+      };
+      const banner = setupSavedBanner(savedOn, status);
+      if (banner) setSetupBanner({ ...banner, tab: savedOn });
+    };
+    window.addEventListener("track3d-setup-saved", saved);
+    return () => window.removeEventListener("track3d-setup-saved", saved);
+  }, [user, profile, habits]);
+  const goToSetupStep = id => {
+    setSetupBanner(null);
+    if (id === "profile") { setTab("dashboard"); setProfileOpen(true); return; }
+    setTab(id);
+    if (id === "morning" || id === "nutrition") requestSetup(id);
+  };
   const homeTimeZone = resolveHomeTimeZone(user);
   const todayLabel = new Date().toLocaleDateString("en-US", { timeZone: homeTimeZone, weekday: "long", month: "long", day: "numeric" });
   const todayKey = getZonedDateInfo(new Date(), homeTimeZone).dateKey;
@@ -13129,7 +13399,7 @@ export default function App() {
       readCoachProfile(user.id),
     ]).then(([row, coach]) => {
       if (cancelled) return;
-      setProfile({ ...normaliseProfile(row.data, coach.data?.experience_level), personality: coach.data?.personality || "balanced" });
+      setProfile({ ...normaliseProfile(row.data, coach.data?.experience_level), personality: coach.data?.personality || "balanced", primaryGoal: coach.data?.primary_goal || null });
       const status = healthConsentStatus({ profileRow: row.data, metadata: user.user_metadata });
       setConsent(status);
       // Consent ticked at sign-up (or given while the profile couldn't be
@@ -13248,6 +13518,15 @@ export default function App() {
               <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={retryHabitSave}>RETRY</button>
             </div>
           )}
+          {setupBanner && setupBanner.tab === tab && (
+            <div role="status" data-testid="setup-banner" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14, padding: "10px 12px", border: `1px solid ${NEON}`, borderRadius: 7, background: "rgba(0,255,178,.08)" }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "#E0EAF0" }}><span style={{ color: NEON, fontWeight: 700 }}>{setupBanner.title}</span> · {setupBanner.text}</span>
+              {setupBanner.allSet
+                ? <button type="button" className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={() => { setSetupBanner(null); setTab("dashboard"); }}>SEE WHAT&apos;S NEXT →</button>
+                : <button type="button" className="t3d-btn t3d-btn-sm" data-testid="setup-banner-next" style={{ minHeight: 44 }} onClick={() => goToSetupStep(setupBanner.next)}>NEXT →</button>}
+              <button type="button" aria-label="Dismiss" onClick={() => setSetupBanner(null)} style={{ border: 0, background: "transparent", color: "#6F8792", cursor: "pointer", fontSize: 16, minWidth: 44, minHeight: 44, padding: 0 }}>×</button>
+            </div>
+          )}
           {notice && <div role="status" data-testid="app-notice" style={{ marginBottom: 14, padding: "10px 12px", border: `1px solid ${NEON}`, borderRadius: 7, background: "rgba(0,255,178,.08)", color: NEON, fontSize: 12 }}>{notice}</div>}
           {/* One place to continue an active workout or morning: what it is up to, one tap back. */}
           {activeBanners.filter(banner => banner.tab !== tab).map(banner => (
@@ -13262,9 +13541,9 @@ export default function App() {
           ))}
           {tab === "dashboard" && <Dashboard habits={habits} setHabits={setHabits} user={user} onNavigate={setTab} profile={profile} onProfileSaved={profileSaved} workoutBannerShown={activeBanners.some(banner => banner.tab === "fitness")} onOpenProfile={() => setProfileOpen(true)} />}
           <div hidden={tab !== "morning"}><MorningSection key={user?.id} user={user} /></div>
-          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} profile={profile} /></div>
+          <div hidden={tab !== "fitness"}><Fitness key={user?.id} user={user} isActive={tab === "fitness"} profile={profile} onProfileChange={changes => setProfile(previous => ({ ...(previous || {}), ...changes }))} onSessionsChange={setFitnessSessions} /></div>
           {tab === "nutrition" && <Nutrition user={user} userSessions={fitnessSessions} profile={profile} onProfileChange={setProfile} />}
-          {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} />}
+          {tab === "habits" && <HabitsPage habits={habits} setHabits={setHabits} user={user} />}
         </main>
 
         {profileOpen && (

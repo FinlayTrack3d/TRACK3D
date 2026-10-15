@@ -62,6 +62,10 @@ test("activity is suggested from training days", () => {
   assert.equal(suggestActivityLevel(2), "Lightly active");
   assert.equal(suggestActivityLevel(4), "Moderately active");
   assert.equal(suggestActivityLevel(6), "Very active");
+  // Logged steps raise it; they never lower what training gives.
+  assert.equal(suggestActivityLevel(2, 9000), "Moderately active");
+  assert.equal(suggestActivityLevel(0, 6000), "Lightly active");
+  assert.equal(suggestActivityLevel(4, 2000), "Moderately active");
 });
 
 test("meal times follow the wake-up time", () => {
