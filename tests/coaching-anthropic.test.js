@@ -43,3 +43,39 @@ test("the message field of a half-written JSON reply can be shown early", async 
   assert.equal(partialJsonStringField('{"message":"caf\\u00e9 time'), "café time");
   assert.equal(partialJsonStringField('{"message":"half escape \\'), "half escape ");
 });
+
+test("a billing or key failure is an outage: users see 'offline', the owner is alerted once an hour", async () => {
+  const { COACH_OFFLINE, isProviderOutage, postAnthropicMessages, providerErrorResponse, reportProviderOutage, resetOutageAlertForTests } = await import("../lib/coaching/anthropic.js");
+  assert.equal(isProviderOutage(400, "Your credit balance is too low to access the Anthropic API."), true);
+  assert.equal(isProviderOutage(401), true);
+  assert.equal(isProviderOutage(400, "messages: field required"), false);
+  assert.equal(isProviderOutage(529), false);
+  resetOutageAlertForTests();
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    if (url.includes("anthropic")) return new Response(JSON.stringify({ error: { message: "Your credit balance is too low to access the Anthropic API." } }), { status: 400 });
+    calls.push(JSON.parse(options.body).text);
+    return new Response("ok");
+  };
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(" "));
+  try {
+    process.env.AI_ALERT_WEBHOOK_URL = "https://hooks.example/alert";
+    const result = await postAnthropicMessages({}, { apiKey: "k", fetchImpl, retryDelayMs: 0 });
+    assert.equal(result.ok, false);
+    assert.equal(result.outage, true);
+    assert.equal(result.publicError, COACH_OFFLINE);
+    const response = providerErrorResponse(result);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: COACH_OFFLINE, offline: true });
+    assert.equal(calls.length, 1, "alerted once");
+    assert.equal(await reportProviderOutage({ status: 400, detail: "credit" }, { fetchImpl }), false, "not again within the hour");
+    assert.equal(calls.length, 1);
+    assert.ok(logged.some(line => line.includes("[TRACK3D-AI-OUTAGE]")), "tagged in the logs every time");
+  } finally {
+    console.error = originalError;
+    delete process.env.AI_ALERT_WEBHOOK_URL;
+    resetOutageAlertForTests();
+  }
+});

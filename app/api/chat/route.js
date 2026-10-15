@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { openAnthropicStream, postAnthropicMessages, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
+import { openAnthropicStream, postAnthropicMessages, providerErrorResponse, readAnthropicStream } from "../../../lib/coaching/anthropic.js";
 import { CHAT_LIMITS, validateChatPayload } from "../../../lib/chat-limits.js";
 import { aiRequestAllowed, limitedResponse } from "../../../lib/ai-guard.js";
 import { areaMaxTokens, chatArea } from "../../../lib/coaching/chat-areas.js";
@@ -75,7 +75,7 @@ export async function POST(request) {
     // Conversations stream as plain text so the first words show at once.
     if (checked.value.stream && area.kind === "conversation") {
       const opened = await openAnthropicStream(providerRequest);
-      if (!opened.ok) return Response.json({ error: opened.publicError }, { status: opened.status === 429 ? 429 : 502 });
+      if (!opened.ok) return providerErrorResponse(opened);
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
@@ -89,7 +89,7 @@ export async function POST(request) {
       return new Response(stream, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Coach-Stream": "1" } });
     }
     const result = await postAnthropicMessages(providerRequest);
-    if (!result.ok) return Response.json({ error: result.publicError }, { status: result.status === 429 ? 429 : 502 });
+    if (!result.ok) return providerErrorResponse(result);
     return Response.json({ content: result.payload.content });
   } catch (error) {
     console.error("Route error:", error.message);
