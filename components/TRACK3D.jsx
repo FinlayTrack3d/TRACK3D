@@ -27,6 +27,7 @@ import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, 
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
+import { PHOTO_FREQUENCIES, minutesLate, photosDue, restackSchedule, routineSettings, shiftSchedule, wakeTimeFor, withRoutineSettings } from "../lib/morning-schedule";
 import { scaleMealsToCalories, withIngredientMacros } from "../lib/food-table";
 import { EXERCISE_LIBRARY, canonicalExerciseName, swapAlternatives } from "../lib/exercise-swaps";
 import { sessionNameSuggestions, starterPlan } from "../lib/starter-plans";
@@ -146,6 +147,7 @@ const getZonedDateInfo = (date = new Date(), timeZone = DEFAULT_HOME_TIME_ZONE) 
 const homeDateKey = (user, offsetDays = 0) => shiftDateKey(getZonedDateInfo(new Date(), resolveHomeTimeZone(user)).dateKey, offsetDays);
 // Labels for a YYYY-MM-DD key, independent of the device timezone.
 const dateKeyLabel = (dateKey, options) => new Date(`${dateKey}T12:00:00Z`).toLocaleDateString("en-GB", { timeZone: "UTC", ...options });
+const WEEKDAY_CODES = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 const dateKeyDayCode = dateKey => ["SUN","MON","TUE","WED","THU","FRI","SAT"][new Date(`${dateKey}T12:00:00Z`).getUTCDay()];
 
 // GET STARTED opens a section's setup straight away rather than its intro
@@ -947,7 +949,7 @@ Finishes at ${finishTime}.`,
 }
 
 // ─── Schedule Review with Drag ────────────────────────────────────────────────
-function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, recalcTimes, calcFinishTime, LOCKED_LAST, nonRemovableIds = [], onRemoveTask, onBack, onSave }) {
+function ScheduleReview({ scheduledTasks, setScheduledTasks, wakeTime, readyBy = "", recalcTimes, calcFinishTime, LOCKED_LAST, nonRemovableIds = [], onRemoveTask, onBack, onSave }) {
   const [dragIdx, setDragIdx] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiConversation, setAiConversation] = useState([]);
@@ -1088,7 +1090,12 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
               style={{ width: 40, minHeight: 44, display: "flex", alignItems: "center", justifyContent: "center", color: "#8AABB8", fontSize: 22, cursor: aiLoading ? "default" : "grab", touchAction: "none", userSelect: "none" }}>≡</div>
             <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 10, color: "#00C8FF", width: 42 }}>{t.scheduledTime}</div>
             <div style={{ flex: 1, minWidth: 0, fontSize: 12, overflowWrap: "anywhere" }}>{t.name}</div>
-            <div style={{ fontSize: 10, color: "#E0EAF0", whiteSpace: "nowrap" }}>{t.duration} min</div>
+            {/* Tap the length to change it. */}
+            <select aria-label={`Minutes for ${t.name}`} value={String(t.duration)} disabled={aiLoading}
+              onChange={event => { const minutes = Number(event.target.value); setScheduledTasks(recalcTimes([...draggable.map((task, index) => (index === i ? { ...task, duration: minutes } : task)), locked])); }}
+              style={{ background: "transparent", border: `1px solid ${BORDER}`, borderRadius: 5, color: "#E0EAF0", fontSize: 10, minHeight: 36, padding: "0 4px", colorScheme: "dark" }}>
+              {[...new Set([1, 2, 3, 5, 10, 15, 20, 25, 30, 45, 60, Number(t.duration) || 5])].sort((a, b) => a - b).map(minutes => <option key={minutes} value={minutes}>{minutes} min</option>)}
+            </select>
             <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Move ${t.name} up`} disabled={aiLoading || i === 0}
               onClick={() => moveTask(i, i - 1)} style={{ minWidth: 44, minHeight: 44, padding: 4 }}>↑</button>
             <button type="button" className="t3d-btn t3d-btn-sm" aria-label={`Move ${t.name} down`} disabled={aiLoading || i === draggable.length - 1}
@@ -1106,6 +1113,9 @@ Locked final step: ${JSON.stringify({ name: locked.name, duration: locked.durati
         <span style={{ fontSize: 11, color: "#E0EAF0" }}>ROUTINE FINISHES AT</span>
         <span style={{ fontFamily: "'Orbitron',monospace", fontSize: 12, color: "#00C8FF" }}>{calcFinishTime(wakeTime, scheduledTasks)}</span>
       </div>
+      {readyBy && (minutesLate(calcFinishTime(wakeTime, scheduledTasks), readyBy) > 0
+        ? <p role="alert" data-testid="ready-by-late" style={{ fontSize: 11, color: "#FFB547", lineHeight: 1.5, marginTop: -8 }}>That&apos;s {minutesLate(calcFinishTime(wakeTime, scheduledTasks), readyBy)} min after your ready-by time of {readyBy}. Shorten or remove a task, or wake up earlier.</p>
+        : <p data-testid="ready-by-ok" style={{ fontSize: 11, color: NEON, marginTop: -8 }}>Done before your ready-by time of {readyBy} ✓</p>)}
       {aiChangeStatus && <p role="status" style={{ fontSize: 12, color: NEON, lineHeight: 1.5 }}>{aiChangeStatus}</p>}
       <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16 }}>
         <div className="t3d-ai-tag" style={{ color: NEON }}>AI COACH</div>
@@ -1914,6 +1924,11 @@ function MorningSection({ user }) {
   const [photoPreviews, setPhotoPreviews] = useState({ front: null, side: null, back: null });
   const [savingCheckin, setSavingCheckin] = useState(false);
   const [isSetup, setIsSetup] = useState(false);
+  // Progress photos weekly (on photoDay), daily or off; different wake-up
+  // times on some days; the time the routine should be done by.
+  const [photoFrequency, setPhotoFrequency] = useState("weekly");
+  const [dayWakeTimes, setDayWakeTimes] = useState({});
+  const [readyBy, setReadyBy] = useState("");
   const [completedToday, setCompletedToday] = useState(false);
   const [skippedToday, setSkippedToday] = useState(false);
   const [olderCheckins, setOlderCheckins] = useState([]); // beyond the 30 loaded into history, for the streak only
@@ -1977,6 +1992,10 @@ function MorningSection({ user }) {
   ];
   const LOCKED_LAST = { id: "checkin", name: "TRACK3D Morning Check-in", type: "tick", icon: "📱", duration: 2 };
   const PHOTO_ANGLES = ["front", "side", "back"];
+  // The always-included tasks as set up: photos as often as chosen.
+  const setupNonNegs = NON_NEGS
+    .filter(task => task.id !== "photos" || photoFrequency !== "off")
+    .map(task => (task.id === "photos" ? { ...task, frequency: photoFrequency, photoDay: "MON", name: photoFrequency === "weekly" ? "Take progress photos (Mondays)" : task.name } : task));
 
   // Load routine and history from Supabase on mount
   useEffect(() => {
@@ -2015,6 +2034,11 @@ function MorningSection({ user }) {
         setWakeTime(routineData.wake_time || "06:00");
         // Older routines stored the sleep step as "Work out sleep duration".
         setScheduledTasks((routineData.tasks || []).map(task => task.id === "sleep" && task.name === "Work out sleep duration" ? { ...task, name: "Log last night's sleep" } : task));
+        const settings = routineSettings(routineData.tasks || []);
+        setDayWakeTimes(settings.dayWakeTimes);
+        setReadyBy(settings.readyBy);
+        const photosTask = (routineData.tasks || []).find(task => task.id === "photos");
+        setPhotoFrequency(photosTask ? photosTask.frequency || "daily" : "off");
         setDayGroups(Array.isArray(routineData.day_groups) && routineData.day_groups.length >= 2 ? routineData.day_groups : []);
         setIsSetup(true);
       }
@@ -2058,7 +2082,7 @@ function MorningSection({ user }) {
       const { error } = await supabase.from("morning_routines").upsert({
         user_id: user.id,
         wake_time: wakeTime,
-        tasks: tasks,
+        tasks: withRoutineSettings(tasks, { dayWakeTimes, readyBy }),
         day_groups: groups,
         updated_at: new Date().toISOString(),
       }, { onConflict: "user_id" });
@@ -2079,7 +2103,7 @@ function MorningSection({ user }) {
   useEffect(() => {
     if (!user || !["editRoutine", "rotationSetup"].includes(view)) return;
     saveRoutine(scheduledTasks, dayGroups);
-  }, [scheduledTasks, wakeTime, dayGroups, view, user]);
+  }, [scheduledTasks, wakeTime, dayGroups, view, user, dayWakeTimes, readyBy]);
 
   // created_at is only sent when today's row is first written, so later
   // saves (autosave, finishing, redo) keep the original time.
@@ -2186,7 +2210,7 @@ function MorningSection({ user }) {
     let cursor = h * 60 + m;
 
     const all = [
-      ...(orderedTasks || [...NON_NEGS, ...selectedTasks]),
+      ...(orderedTasks || [...setupNonNegs, ...selectedTasks]),
       LOCKED_LAST
     ];
 
@@ -2279,10 +2303,17 @@ function MorningSection({ user }) {
   const rotationDay = rotationGroup?.id || null;
   const dayGroupName = id => rotationGroups.find(g => g.id === id)?.name || `Day ${id}`;
   const alternatingOn = dayGroups.length >= 2;
-  const activeScheduledTasks = alternatingOn
+  // Today's wake-up (some days can have their own) and today's tasks, at
+  // today's times: weekly photos only on their day.
+  const todayWakeTime = wakeTimeFor(todayDayCode, wakeTime, dayWakeTimes);
+  const todaysTasks = (alternatingOn
     ? scheduledTasks.filter(task => !task.routineDay || task.routineDay === "daily" || task.routineDay === rotationDay || task.id === "checkin")
-    : scheduledTasks;
-  const allSteps = scheduledTasks.length > 0 ? activeScheduledTasks : [...NON_NEGS, ...selectedTasks, LOCKED_LAST];
+    : scheduledTasks).filter(task => task.id !== "photos" || photosDue(task, todayDayCode));
+  // A task left out today closes up the times after it.
+  const activeScheduledTasks = todaysTasks.length < scheduledTasks.length
+    ? restackSchedule(todaysTasks, todayWakeTime)
+    : shiftSchedule(todaysTasks, wakeTime, todayWakeTime);
+  const allSteps = scheduledTasks.length > 0 ? activeScheduledTasks : [...setupNonNegs, ...selectedTasks, LOCKED_LAST];
 
   const liveRoutineSteps = allSteps.filter(step => step.id !== "checkin");
   useEffect(() => { liveRoutineStepsRef.current = liveRoutineSteps; });
@@ -2442,7 +2473,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     setCheckinData({
       wakeTiming: {
         actual: getZonedDateInfo(now, homeTimeZone).time,
-        planned: wakeTime,
+        planned: todayWakeTime,
         source: "live",
         startedAt: now.toISOString(),
       },
@@ -2553,7 +2584,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
     return Math.round((points / total) * 10);
   };
 
-  const finishTime = isSetup ? calcFinishTime(wakeTime, activeScheduledTasks) : "--:--";
+  const finishTime = isSetup ? calcFinishTime(todayWakeTime, activeScheduledTasks) : "--:--";
 
   // 7-day chart data
   const last7 = Array.from({ length: 7 }, (_, i) => {
@@ -2700,7 +2731,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
   // Starting the guided morning records the wake-up time, so check first when
   // it is far from the planned wake-up (e.g. starting it late in the evening).
   const confirmLiveStart = start => {
-    const [plannedH, plannedM] = wakeTime.split(":").map(Number);
+    const [plannedH, plannedM] = todayWakeTime.split(":").map(Number);
     const [nowH, nowM] = getZonedDateInfo(new Date(), homeTimeZone).time.split(":").map(Number);
     const gap = Math.abs(((nowH * 60 + nowM) - (plannedH * 60 + plannedM) + 2160) % 1440 - 720);
     if (gap > 180) setPendingLiveStart(() => start);
@@ -2759,7 +2790,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           {(() => {
             // One string: the compiler dropped the space after {time} when the text followed an expression.
             const now = getZonedDateInfo(new Date(), homeTimeZone).time;
-            return `It is ${now} and your planned wake-up is ${wakeTime}. Starting now records ${now} as today's wake-up time. If you already did your morning, log it instead.`;
+            return `It is ${now} and your planned wake-up is ${todayWakeTime}. Starting now records ${now} as today's wake-up time. If you already did your morning, log it instead.`;
           })()}
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2918,19 +2949,19 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
           setView("checkin");
         }}>
           <h2 className="t3d-ctitle">WHAT TIME DID YOU WAKE UP?</h2>
-          <p style={{ fontSize: 12, color: "#8AABB8" }}>Your planned wake-up time was {wakeTime}. Enter when you actually woke up.</p>
+          <p style={{ fontSize: 12, color: "#8AABB8" }}>Your planned wake-up time was {todayWakeTime}. Enter when you actually woke up.</p>
           <label style={{ fontSize: 12 }}>
             Actual wake-up time
             <input className="t3d-input" type="time" required style={{ marginTop: 8, colorScheme: "dark" }}
               value={checkinData.wakeTiming?.actual || ""}
               onChange={event => setCheckinData(data => ({ ...data, wakeTiming: {
-                actual: event.target.value, planned: wakeTime, source: "manual",
+                actual: event.target.value, planned: todayWakeTime, source: "manual",
               } }))} />
           </label>
           {!checkinData.wakeTiming?.actual && (
             <button className="t3d-btn t3d-btn-sm" type="button" style={{ marginTop: 12 }}
-              onClick={() => setCheckinData(data => ({ ...data, wakeTiming: { actual: wakeTime, planned: wakeTime, source: "manual" } }))}>
-              I WOKE UP AT {wakeTime} AS PLANNED
+              onClick={() => setCheckinData(data => ({ ...data, wakeTiming: { actual: todayWakeTime, planned: todayWakeTime, source: "manual" } }))}>
+              I WOKE UP AT {todayWakeTime} AS PLANNED
             </button>
           )}
           <div style={{ display: "flex", gap: 14, marginTop: 20, alignItems: "center" }}>
@@ -3023,7 +3054,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               onChange={event => setEditSubmissionData(data => ({ ...data, wakeTiming: {
                 ...data.wakeTiming,
                 actual: event.target.value,
-                planned: data.wakeTiming?.planned || wakeTime,
+                planned: data.wakeTiming?.planned || todayWakeTime,
                 source: "manual",
               } }))} />
           </label>
@@ -3138,7 +3169,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
             <div className="t3d-grid3">
               <div className="t3d-card" style={{ textAlign: "center" }}>
                 <h2 className="t3d-ctitle">WAKE UP</h2>
-                <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{wakeTime}</div>
+                <div className="t3d-sval" style={{ color: NEON, fontSize: 24 }}>{todayWakeTime}</div>
+                {todayWakeTime !== wakeTime && <div style={{ fontSize: 9, color: "#8AABB8", marginTop: 4 }}>Today&apos;s time (usually {wakeTime})</div>}
               </div>
               <div className="t3d-card" style={{ textAlign: "center" }}>
                 <h2 className="t3d-ctitle">FINISH BY</h2>
@@ -3587,8 +3619,33 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 <input type="time" value={wakeTime} onChange={e => setWakeTime(e.target.value)}
                   style={{ background: SURFACE2, border: `1px solid ${NEON}`, borderRadius: 8, padding: "16px 24px", color: NEON, fontSize: 28, outline: "none", textAlign: "center", colorScheme: "dark", minWidth: 180 }} />
               </div>
-              <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", marginBottom: 24 }}>
+              <div style={{ fontSize: 11, color: "#E0EAF0", textAlign: "center", marginBottom: 20 }}>
                 Your morning routine will be scheduled from this time
+              </div>
+              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 11, color: "#C5D6DC", marginBottom: 14 }}>
+                <span>Need to be ready by a set time? <span style={{ color: "#6F8792" }}>(optional)</span></span>
+                <input type="time" aria-label="Ready by" value={readyBy} onChange={e => setReadyBy(e.target.value)} className="t3d-input" style={{ width: 120, colorScheme: "dark" }} />
+              </label>
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 11, color: "#C5D6DC", marginBottom: 8 }}>Wake up at a different time on some days?</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {WEEKDAY_CODES.map(day => {
+                    const on = Boolean(dayWakeTimes[day]);
+                    return <button key={day} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={on} style={{ minWidth: 44, minHeight: 40, borderColor: on ? NEON : BORDER, color: on ? NEON : "#8AABB8" }}
+                      onClick={() => setDayWakeTimes(current => { const next = { ...current }; if (next[day]) delete next[day]; else next[day] = day === "SAT" || day === "SUN" ? "08:00" : wakeTime; return next; })}>{day}</button>;
+                  })}
+                </div>
+                {Object.keys(dayWakeTimes).length > 0 && (
+                  <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                    {WEEKDAY_CODES.filter(day => dayWakeTimes[day]).map(day => (
+                      <label key={day} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 11, color: "#E0EAF0" }}>
+                        <span>{day}: wake up at</span>
+                        <input type="time" aria-label={`${day} wake-up`} value={dayWakeTimes[day]} onChange={e => { const value = e.target.value; setDayWakeTimes(current => ({ ...current, [day]: value })); }} className="t3d-input" style={{ width: 120, colorScheme: "dark" }} />
+                      </label>
+                    ))}
+                    <div style={{ fontSize: 9, color: "#6F8792" }}>Other days use {wakeTime}. The routine moves with the wake-up time.</div>
+                  </div>
+                )}
               </div>
               <button className="t3d-btn" style={{ width: "100%", padding: 14 }} onClick={() => setSetupStep(1)}>NEXT →</button>
             </div>
@@ -3596,7 +3653,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 
           {setupStep === 1 && (
             <div>
-              <h2 className="t3d-ctitle">CHOOSE YOUR MORNING HABITS</h2>
+              <h2 className="t3d-ctitle">CHOOSE YOUR MORNING TASKS</h2>
 
               {/* Selected habits */}
               <div style={{ display: "none" }}>
@@ -3607,7 +3664,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   color: "#E0EAF0",
                   marginBottom: 5
                 }}>
-                  YOUR MORNING HABITS
+                  YOUR MORNING TASKS
                 </div>
 
                 <div style={{
@@ -3627,7 +3684,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     fontSize: 10,
                     marginBottom: 12
                   }}>
-                    Select habits below or make your own.
+                    Select tasks below or make your own.
                   </div>
                 )}
 
@@ -3766,7 +3823,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   color: "#E0EAF0",
                   marginBottom: 5
                 }}>
-                  POPULAR MORNING HABITS
+                  POPULAR MORNING TASKS
                 </div>
 
                 <div style={{
@@ -3774,7 +3831,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   color: "#4A6070",
                   marginBottom: 10
                 }}>
-                  Select from the most popular morning habits.
+                  Select from the most popular morning tasks.
                 </div>
 
                 <div>
@@ -3808,7 +3865,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   color: "#E0EAF0",
                   marginBottom: 5
                 }}>
-                  MAKE YOUR OWN HABIT
+                  MAKE YOUR OWN TASK
                 </div>
 
                 <div style={{
@@ -3816,7 +3873,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   color: "#4A6070",
                   marginBottom: 10
                 }}>
-                  Create a habit that is specific to your morning.
+                  Create a task that is specific to your morning.
                 </div>
 
                 <div style={{
@@ -3827,7 +3884,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                 }}>
                   <input
                     className="t3d-input"
-                    placeholder="Habit name..."
+                    placeholder="Task name..."
                     value={customTask}
                     onChange={e => setCustomTask(e.target.value)}
                     onKeyDown={e =>
@@ -3899,7 +3956,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                     color: "#4A6070",
                     marginBottom: 8
                   }}>
-                    No extra habits selected yet.
+                    No extra tasks selected yet.
                   </div>
                 )}
 
@@ -3944,7 +4001,16 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   </div>
                 ))}
 
-                {[...NON_NEGS, LOCKED_LAST].map(task => (
+                {/* Photos: weekly, daily or off. Sleep, weight and the check-in stay. */}
+                <div data-testid="photo-frequency-choice" style={{ padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
+                  <div style={{ fontSize: 10, color: "#C5D6DC", marginBottom: 6 }}>📸 Progress photos <span style={{ color: "#6F8792" }}>· 3 min, private to you</span></div>
+                  <div style={{ display: "flex", gap: 5 }}>
+                    {PHOTO_FREQUENCIES.map(([value, label]) => (
+                      <button key={value} type="button" className="t3d-btn t3d-btn-sm" aria-pressed={photoFrequency === value} style={{ flex: 1, minHeight: 36, fontSize: 9, borderColor: photoFrequency === value ? NEON : BORDER, color: photoFrequency === value ? NEON : "#8AABB8" }} onClick={() => setPhotoFrequency(value)}>{label}{value === "weekly" ? " (MON)" : ""}</button>
+                    ))}
+                  </div>
+                </div>
+                {[...setupNonNegs.filter(task => task.id !== "photos"), LOCKED_LAST].map(task => (
                   <div
                     key={task.id}
                     style={{
@@ -3977,7 +4043,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                   </div>
                 ))}
                 <div style={{ fontSize: 10, color: "#8AABB8", lineHeight: 1.6, marginTop: 8 }}>
-                  🔒 Sleep, weight, photos and the check-in are in every routine: they are what TRACK3D uses to track your progress and score your morning.
+                  🔒 Sleep, weight and the check-in are in every routine: they are what TRACK3D uses to track your progress and score your morning. Photos are your choice.
                 </div>
               </div>
 
@@ -3998,7 +4064,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
                       Number(task.duration) <= 0
                   )}
                   onClick={() => {
-                    const chosen = [...NON_NEGS, ...selectedTasks];
+                    const chosen = [...setupNonNegs, ...selectedTasks];
                     let ordered = chosen;
                     if (setupReviewVisited) {
                       // Keep the order from Review; only drop removed tasks and append new ones.
@@ -4026,6 +4092,7 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
               scheduledTasks={scheduledTasks}
               setScheduledTasks={setScheduledTasks}
               wakeTime={wakeTime}
+              readyBy={readyBy}
               recalcTimes={recalcTimes}
               calcFinishTime={calcFinishTime}
               LOCKED_LAST={LOCKED_LAST}
@@ -4769,15 +4836,19 @@ function ProgressPhotos({ user }) {
   const [angle, setAngle] = useState("front");
   const [entries, setEntries] = useState([]);
   const [idx, setIdx] = useState(0);
+  // Compare: one photo stays pinned on the left; OLDER / NEWER step through
+  // the other photos of the same angle beside it.
+  const [comparing, setComparing] = useState(false);
+  const [pinnedDate, setPinnedDate] = useState(null);
+  const [otherIdx, setOtherIdx] = useState(0);
   const [urlCache, setUrlCache] = useState({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => { if (!user) return; load(); }, [user]);
-  useEffect(() => { setIdx(0); }, [angle]);
 
   const load = async () => {
     setLoading(true);
-    const { data } = await supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(90);
+    const { data } = await supabase.from("morning_checkins").select("date,data").eq("user_id", user.id).order("date", { ascending: false }).limit(180);
     setEntries((data || []).filter(e => e.data?.photos));
     setLoading(false);
   };
@@ -4786,15 +4857,60 @@ function ProgressPhotos({ user }) {
   const isPhotoPath = value => typeof value === "string" && value.includes("/");
   const filtered = entries.filter(e => isPhotoPath(e.data.photos[angle]));
   const current = filtered[Math.min(idx, Math.max(filtered.length - 1, 0))];
+  const pinned = comparing ? filtered.find(entry => entry.date === pinnedDate) || null : null;
+  const others = pinned ? filtered.filter(entry => entry.date !== pinned.date) : [];
+  const other = others[Math.min(otherIdx, Math.max(others.length - 1, 0))] || null;
+  const shown = (comparing ? [pinned, other] : [current]).filter(Boolean);
 
+  // Each photo shown gets a signed link once.
+  const shownPaths = shown.map(entry => entry.data.photos[angle]).join("|");
+  const requestedPathsRef = useRef(new Set());
   useEffect(() => {
+    shownPaths.split("|").filter(Boolean).forEach(path => {
+      if (requestedPathsRef.current.has(path)) return;
+      requestedPathsRef.current.add(path);
+      supabase.storage.from("checkin-photos").createSignedUrl(path, 3600).then(({ data }) => {
+        setUrlCache(c => ({ ...c, [path]: data?.signedUrl || "unavailable" }));
+      }).catch(() => setUrlCache(c => ({ ...c, [path]: "unavailable" })));
+    });
+  }, [shownPaths]);
+
+  const chooseAngle = value => {
+    setAngle(value);
+    setIdx(0);
+    setOtherIdx(0);
+    // Comparing carries on with the newest photo of the new angle pinned.
+    const newest = entries.find(entry => isPhotoPath(entry.data.photos[value]));
+    setPinnedDate(newest?.date || null);
+  };
+  const startCompare = () => {
     if (!current) return;
-    const path = current.data.photos[angle];
-    if (urlCache[path]) return;
-    supabase.storage.from("checkin-photos").createSignedUrl(path, 3600).then(({ data }) => {
-      setUrlCache(c => ({ ...c, [path]: data?.signedUrl || "unavailable" }));
-    }).catch(() => setUrlCache(c => ({ ...c, [path]: "unavailable" })));
-  }, [current, angle]);
+    setPinnedDate(current.date);
+    // Start with the oldest photo, for the biggest change.
+    setOtherIdx(Math.max(filtered.length - 2, 0));
+    setComparing(true);
+  };
+  const daysBetween = (a, b) => Math.round(Math.abs(new Date(`${a}T12:00:00Z`) - new Date(`${b}T12:00:00Z`)) / 86400000);
+
+  const photoBox = (entry, label, compact) => {
+    const url = urlCache[entry.data.photos[angle]];
+    return (
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 9, color: label === "PINNED" ? NEON : "#E0EAF0", letterSpacing: 1, marginBottom: 6 }}>
+          {label ? `${label} · ` : ""}{dateKeyLabel(entry.date, { day: "numeric", month: "short", year: compact ? "2-digit" : "numeric" })}
+        </div>
+        <div style={{ width: "100%", maxWidth: compact ? 220 : 280, height: compact ? 260 : 340, margin: "0 auto", borderRadius: 8, overflow: "hidden", border: `1px solid ${label === "PINNED" ? "rgba(0,255,178,.5)" : BORDER}`, display: "flex", alignItems: "center", justifyContent: "center", background: SURFACE2 }}>
+          {url === "unavailable" ? (
+            <div style={{ fontSize: 10, color: "#8AABB8", padding: 16, lineHeight: 1.6 }}>This photo could not be loaded.</div>
+          ) : url ? (
+            <img src={url} alt={`${angle}, ${entry.date}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          ) : (
+            <div style={{ fontSize: 10, color: "#E0EAF0" }}>LOADING...</div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   if (loading) return (
     <div className="t3d-card" style={{ marginBottom: 16, textAlign: "center", padding: 24 }}>
@@ -4803,8 +4919,14 @@ function ProgressPhotos({ user }) {
   );
 
   return (
-    <div className="t3d-card" style={{ marginBottom: 16 }}>
-      <div className="t3d-ctitle">PROGRESS PHOTOS</div>
+    <div className="t3d-card" data-testid="progress-photos" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <div className="t3d-ctitle" style={{ margin: 0 }}>PROGRESS PHOTOS</div>
+        {filtered.length > 1 && (
+          <button type="button" className="t3d-btn t3d-btn-sm" data-testid="photo-compare" aria-pressed={comparing} style={{ minHeight: 40, borderColor: comparing ? NEON : BORDER, color: comparing ? NEON : "#E0EAF0" }}
+            onClick={() => (comparing ? setComparing(false) : startCompare())}>{comparing ? "DONE" : "COMPARE"}</button>
+        )}
+      </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         {["front", "side", "back"].map(a => (
           <button key={a} className="t3d-btn t3d-btn-sm" style={{
@@ -4812,27 +4934,30 @@ function ProgressPhotos({ user }) {
             background: angle === a ? "rgba(0,255,178,.12)" : "transparent",
             borderColor: angle === a ? NEON : BORDER,
             color: angle === a ? NEON : "#E0EAF0",
-          }} onClick={() => { setAngle(a); setIdx(0); }}>{a.toUpperCase()}</button>
+          }} onClick={() => chooseAngle(a)}>{a.toUpperCase()}</button>
         ))}
       </div>
       {filtered.length === 0 ? (
         <div style={{ textAlign: "center", padding: "24px 0", fontSize: 11, color: "#E0EAF0" }}>
           {`No ${angle} photos yet. They'll show up here after you add photos in a morning check-in.`}
         </div>
+      ) : comparing && pinned ? (
+        <div style={{ textAlign: "center" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            {photoBox(pinned, "PINNED", true)}
+            {other ? photoBox(other, "", true) : <div style={{ flex: 1, fontSize: 10, color: "#8AABB8", alignSelf: "center" }}>No other {angle} photos yet.</div>}
+          </div>
+          {other && <div data-testid="photo-gap" style={{ fontSize: 10, color: "#8AABB8", marginBottom: 10 }}>{daysBetween(pinned.date, other.date)} days apart</div>}
+          <div style={{ display: "flex", justifyContent: "center", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <button className="t3d-btn t3d-btn-sm" disabled={otherIdx >= others.length - 1} onClick={() => setOtherIdx(i => i + 1)}>◀ OLDER</button>
+            <div style={{ fontSize: 10, color: "#E0EAF0" }}>{others.length ? `${otherIdx + 1} / ${others.length}` : "0 / 0"}</div>
+            <button className="t3d-btn t3d-btn-sm" disabled={otherIdx <= 0} onClick={() => setOtherIdx(i => i - 1)}>NEWER ▶</button>
+          </div>
+          {other && <button type="button" className="t3d-btn t3d-btn-sm" style={{ marginTop: 10, minHeight: 40 }} onClick={() => { setPinnedDate(other.date); setOtherIdx(0); }}>PIN THIS ONE INSTEAD</button>}
+        </div>
       ) : (
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 10, color: "#E0EAF0", letterSpacing: 1, marginBottom: 10 }}>
-            {dateKeyLabel(current.date, { day: "numeric", month: "short", year: "numeric" })}
-          </div>
-          <div style={{ width: "100%", maxWidth: 280, height: 340, margin: "0 auto 14px", borderRadius: 8, overflow: "hidden", border: `1px solid ${BORDER}`, display: "flex", alignItems: "center", justifyContent: "center", background: SURFACE2 }}>
-            {urlCache[current.data.photos[angle]] === "unavailable" ? (
-              <div style={{ fontSize: 10, color: "#8AABB8", padding: 16, lineHeight: 1.6 }}>This photo could not be loaded.</div>
-            ) : urlCache[current.data.photos[angle]] ? (
-              <img src={urlCache[current.data.photos[angle]]} alt={angle} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            ) : (
-              <div style={{ fontSize: 10, color: "#E0EAF0" }}>LOADING...</div>
-            )}
-          </div>
+          <div style={{ marginBottom: 14 }}>{photoBox(current, "", false)}</div>
           <div style={{ display: "flex", justifyContent: "center", gap: 16, alignItems: "center" }}>
             <button className="t3d-btn t3d-btn-sm" disabled={idx >= filtered.length - 1} onClick={() => setIdx(i => i + 1)}>◀ OLDER</button>
             <div style={{ fontSize: 10, color: "#E0EAF0" }}>{idx + 1} / {filtered.length}</div>
@@ -5575,7 +5700,10 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       setTodayData({
         loaded: true,
         hasRoutine: Boolean(routine.data),
-        wakeTime: routine.data?.wake_time || "",
+        // Today's wake-up: some days can have their own time.
+        wakeTime: wakeTimeFor(dateKeyDayCode(today), routine.data?.wake_time || "", routineSettings(routine.data?.tasks || []).dayWakeTimes),
+        baseWakeTime: routine.data?.wake_time || "",
+        dayWakeTimes: routineSettings(routine.data?.tasks || []).dayWakeTimes,
         hasPlan: Boolean(split.data?.sessions?.length),
         morning: morning.data || null,
         nutrition: nutrition.data || null,
@@ -5776,7 +5904,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
           <div className="t3d-ctitle">✓ YOU&apos;RE ALL SET</div>
           <div style={{ fontSize: 12, color: "#E0EAF0", lineHeight: 1.6, marginBottom: 8 }}>Your plan is ready. Here&apos;s what happens next:</div>
           <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 12, color: "#C5D6DC", lineHeight: 1.8 }}>
-            {tomorrowPlan({ today, wakeTime: todayData.wakeTime, sessions: todayData.sessions, mealsFor: (dateKey, training) => mealsForDay(todayData.nutritionPlan, dateKey, training) }).map(line => <li key={line.id}>{line.text}</li>)}
+            {tomorrowPlan({ today, wakeTime: wakeTimeFor(dateKeyDayCode(shiftDateKey(today, 1)), todayData.baseWakeTime, todayData.dayWakeTimes), sessions: todayData.sessions, mealsFor: (dateKey, training) => mealsForDay(todayData.nutritionPlan, dateKey, training) }).map(line => <li key={line.id}>{line.text}</li>)}
           </ul>
           {!habits.length && <div style={{ fontSize: 11, color: "#8AABB8", marginBottom: 10 }}>Optional: <button type="button" onClick={() => { closeAllSet(); onNavigate("habits"); }} style={{ background: "none", border: 0, color: NEON2, cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}>add 1–3 daily habits</button> to tick off each day.</div>}
           <button className="t3d-btn t3d-btn-sm" style={{ minHeight: 44 }} onClick={closeAllSet}>GOT IT</button>
