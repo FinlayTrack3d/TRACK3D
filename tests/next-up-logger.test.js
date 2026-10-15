@@ -21,9 +21,23 @@ test("next up follows the day: morning, workout, meal, habits, end of day", () =
   assert.deepEqual(nextUpItems({ ...day, hour: 13 }).map(item => item.id), ["workout", "meal", "habit"]);
   // A started morning stays due.
   assert.equal(nextUpItems({ ...day, hour: 13, morning: { ...day.morning, inProgress: true } })[0].action, "FINISH →");
-  // Evening: the end-of-day check-in joins the end of the list.
-  assert.deepEqual(nextUpItems({ ...day, hour: 19 }).map(item => item.id), ["workout", "meal", "habit", "endOfDay"]);
-  assert.deepEqual(nextUpItems({ ...day, hour: 19, endOfDayDone: true }).map(item => item.id), ["workout", "meal", "habit"]);
+  // Evening: the end-of-day check-in joins the end of the list (today's
+  // meals have all passed, so none is "next").
+  assert.deepEqual(nextUpItems({ ...day, hour: 19 }).map(item => item.id), ["workout", "habit", "endOfDay"]);
+  assert.deepEqual(nextUpItems({ ...day, hour: 19, endOfDayDone: true }).map(item => item.id), ["workout", "habit"]);
+  // Nothing set up yet: no end-of-day check-in.
+  assert.deepEqual(nextUpItems({ hour: 21, endOfDayDue: false }), []);
+});
+
+test("a meal whose time has passed is not next", () => {
+  const meals = [{ name: "Eggs on Toast", time: "07:30", logged: false }, { name: "Lunch", time: "12:30", logged: false }, { name: "Dinner", time: "18:30", logged: false }];
+  const mealAt = time => nextUpItems({ hour: Number(time.slice(0, 2)), time, meals }).find(item => item.id === "meal")?.title || null;
+  assert.equal(mealAt("07:00"), "Eggs on Toast");
+  assert.equal(mealAt("08:15"), "Eggs on Toast", "still next for an hour after its time");
+  assert.equal(mealAt("08:45"), "Lunch");
+  assert.equal(mealAt("22:50"), null, "after the last meal, nothing");
+  // Meals without a time stay next until they are logged.
+  assert.equal(nextUpItems({ hour: 23, meals: [{ name: "Snack", logged: false }] }).find(item => item.id === "meal").title, "Snack");
 });
 
 test("a workout in progress comes first; logged meals are skipped", () => {
