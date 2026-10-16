@@ -41,3 +41,12 @@ test("only given and changed values are saved", () => {
   assert.deepEqual(profileChanges(stored, { heightCm: "178", dateOfBirth: "1991-03-12", sex: "Male" }), { date_of_birth: "1991-03-12" });
   assert.deepEqual(profileChanges(stored, { heightCm: 178, sex: "Male" }), {});
 });
+
+test("height in feet and inches is stored in cm", async () => {
+  const { cmFromFeetInches, feetInchesFromCm } = await import("../lib/profile.js");
+  assert.equal(cmFromFeetInches(5, 11), 180);
+  assert.equal(cmFromFeetInches(6, 0), 183);
+  assert.equal(cmFromFeetInches("", ""), null);
+  assert.deepEqual(feetInchesFromCm(180), { feet: "5", inches: "11" });
+  assert.deepEqual(feetInchesFromCm(""), { feet: "", inches: "" });
+});
