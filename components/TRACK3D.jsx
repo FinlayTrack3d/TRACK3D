@@ -21,7 +21,7 @@ import { buildWeeklyMetrics, formatCoachSummary, isNewWeeklyReport, nutritionDay
 import { nextUpItems } from "../lib/next-up";
 import { dailyScore } from "../lib/daily-score";
 import { inMorningRoutine, linkedHabitIds } from "../lib/habit-links";
-import { EXPERIENCE_CHOICES, GYM_STEP_CHOICES, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseGymSteps, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
+import { EXPERIENCE_CHOICES, GYM_STEP_CHOICES, cmFromFeetInches, feetInchesFromCm, PREFER_NOT_TO_SAY_NOTE, PROFILE_SEX, ageFromDateOfBirth, formatDateOfBirth, isProfileComplete, missingProfileFields, normaliseGymSteps, normaliseProfile, profileChanges, profileProblem, profileSaveError, profileUpdate, sexLabel } from "../lib/profile";
 import { ACTIVITY_LEVELS, AI_NUTRITION_QUESTIONS, NUTRITION_GOALS, SEX_OPTIONS, allergyConflictText, allergyRule, applyMealTimes, calculateNutritionTargets, mealAllergyConflicts, mealTimeSlots, normaliseNutritionGoal, parseAllergies, preferencesText, setupStatsProblem, suggestActivityLevel, activitySuggestionText, targetUpdateSuggestion } from "../lib/nutrition-setup";
 import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, mealSwap, swappedMealResult, countCompletedMeals, dayTargets, hasRestDayMeals, inferNutritionStyle, isMealAnswered, unloggedFoodFromLog, mealPlanGapText, mealPlanTargetCheck, mealsForDay, nextReviewStep, nutritionLogFields, offPlanNutrition, restDayCalories, sumFoodEstimate, unloggedFood, isFlexibleMeal, mergeMealLibrary, prepareNutritionMeals, remainingNutritionTargets } from "../lib/nutrition-plan";
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
@@ -5355,6 +5355,40 @@ const COACH_STYLE_SUMMARIES = {
 // rather than age, so age stays right. Any part can be saved on its own
 // (for example just the training experience); only what is filled in is
 // saved, and the form says what is still missing.
+// Height in cm, typed in cm or feet and inches (the choice is remembered on
+// this device). value and onChange are cm, as text.
+function HeightInput({ value, onChange, label = "HEIGHT" }) {
+  const [unit, setUnit] = useState(() => { try { return localStorage.getItem("track3d-height-unit") || "cm"; } catch { return "cm"; } });
+  const [feetInches, setFeetInches] = useState(() => feetInchesFromCm(value));
+  const chooseUnit = next => {
+    setUnit(next);
+    if (next === "ftin") setFeetInches(feetInchesFromCm(value));
+    try { localStorage.setItem("track3d-height-unit", next); } catch { /* this visit only */ }
+  };
+  const setPart = (part, text) => {
+    const next = { ...feetInches, [part]: text };
+    setFeetInches(next);
+    const cm = cmFromFeetInches(next.feet, next.inches);
+    onChange(cm ? String(cm) : "");
+  };
+  const unitButton = (id, text) => (
+    <button type="button" aria-pressed={unit === id} onClick={() => chooseUnit(id)} style={{ background: "none", border: 0, padding: "0 3px", cursor: "pointer", fontSize: 9, color: unit === id ? NEON : "#6F8792", textDecoration: unit === id ? "underline" : "none" }}>{text}</button>
+  );
+  return (
+    <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>{label} {unitButton("cm", "CM")}{unitButton("ftin", "FT/IN")}</div>
+      {unit === "cm" ? (
+        <input className="t3d-input" type="number" inputMode="decimal" aria-label="Height (cm)" placeholder="e.g. 178" value={value} onChange={event => onChange(event.target.value)} style={{ marginTop: 5 }} />
+      ) : (
+        <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
+          <input className="t3d-input" type="number" inputMode="numeric" aria-label="Height feet" placeholder="ft" value={feetInches.feet} onChange={event => setPart("feet", event.target.value)} />
+          <input className="t3d-input" type="number" inputMode="numeric" aria-label="Height inches" placeholder="in" value={feetInches.inches} onChange={event => setPart("inches", event.target.value)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   const [heightCm, setHeightCm] = useState(profile?.heightCm ? String(profile.heightCm) : "");
   const [dateOfBirth, setDateOfBirth] = useState(profile?.dateOfBirth || "");
@@ -5417,11 +5451,9 @@ function ProfileForm({ user, profile, today, onSaved, onCancel }) {
   };
   return (
     <div data-testid="profile-form" style={{ padding: "12px 0 4px" }}>
-      <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>Used to work out your calorie targets. Only you can see it.</div>
+      <div style={{ fontSize: 11, color: "#8AABB8", lineHeight: 1.5, marginBottom: 10 }}>Used for your calorie targets and how your coaches talk to you. Only you can see it.</div>
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)", gap: 8, marginBottom: 10 }}>
-        <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>HEIGHT (cm)
-          <input className="t3d-input" type="number" inputMode="decimal" aria-label="Height (cm)" placeholder="e.g. 178" value={heightCm} onChange={event => setHeightCm(event.target.value)} style={{ marginTop: 5 }} />
-        </label>
+        <HeightInput value={heightCm} onChange={setHeightCm} />
         <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>DATE OF BIRTH
           <input className="t3d-input" type="date" aria-label="Date of birth" min="1900-01-01" max={today} value={dateOfBirth} onChange={event => setDateOfBirth(event.target.value)} style={{ marginTop: 5 }} />
         </label>
@@ -11529,9 +11561,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                 <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>WEIGHT (kg)
                   <input className="t3d-input" type="number" inputMode="decimal" aria-label="WEIGHT (kg)" placeholder="e.g. 80" value={bodyWeight} onChange={e => setBodyWeight(e.target.value)} style={{ marginTop: 5 }} />
                 </label>
-                {!fromProfile.height && <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>HEIGHT (cm)
-                  <input className="t3d-input" type="number" inputMode="decimal" aria-label="HEIGHT (cm)" placeholder="e.g. 178" value={height} onChange={e => setHeight(e.target.value)} style={{ marginTop: 5 }} />
-                </label>}
+                {!fromProfile.height && <HeightInput value={height} onChange={setHeight} />}
                 {!fromProfile.dateOfBirth && <label style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, gridColumn: "span 2" }}>DATE OF BIRTH
                   <input className="t3d-input" type="date" aria-label="DATE OF BIRTH" min="1900-01-01" max={today} value={dateOfBirth} onChange={e => setDateOfBirth(e.target.value)} style={{ marginTop: 5 }} />
                 </label>}
