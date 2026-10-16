@@ -9,7 +9,7 @@ import { detectPersonalBest, evaluateProgression, inferIncrement } from "../lib/
 import { exerciseKey, saveStructuredWorkout } from "../lib/coaching/training-data";
 import { applyCoachActionToProgramme, applyCoachActionToWorkout, coachProposal, proposalsOverlap } from "../lib/coaching/ui-actions";
 import { applyPlanChangeProposal, applyPlanChangeToWorkout, describePlanChange, exerciseMatchesHistory, isApprovalReply, isPlanChangeRequest, planChangeSummary, planOutline } from "../lib/coaching/plan-change";
-import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, midSessionCheckIn, nextUnfinishedExercise, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerSuggestion, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins } from "../lib/fitness-session";
+import { ACTIVITY_EFFORTS, ACTIVITY_TYPES, activityLogRow, activityOfLog, activitySession, activitySummary, activityTypeLabel, activeWorkoutLogIds, bestSetsSummary, buildLoggedExercises, buildWorkoutReview, midSessionCheckIn, nextUnfinishedExercise, improvementsSinceLastTime, isActivitySession, moveWorkoutDay, recentWorkoutsForCoach, recoverWorkoutState, sameJson, sessionPlannedMinutes, setsRepsSummary, loggedSetsSignature, isFinishedWorkout, setLoggerSuggestion, stepSetValue, sessionForDay, weeklyWorkoutProgress, workoutPersonalBests, workoutVolume, settledWorkoutDuration, workoutDurationMins, countsAsDone } from "../lib/fitness-session";
 import { isYesNoQuestion } from "../lib/coaching/quick-replies";
 import { recentChatMessages } from "../lib/chat-limits";
 import { extractJsonObject, questionnaireAnswersFromExtraction, trainingDaysAnswer } from "../lib/coaching/questionnaire";
@@ -27,6 +27,7 @@ import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, 
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
+import { typicalSessionMinutes, usualStartTime } from "../lib/workout-stats";
 import { PHOTO_FREQUENCIES, minutesLate, photosDue, restackSchedule, routineSettings, shiftSchedule, wakeTimeFor, withRoutineSettings } from "../lib/morning-schedule";
 import { scaleMealsToCalories, withIngredientMacros } from "../lib/food-table";
 import { EXERCISE_LIBRARY, canonicalExerciseName, swapAlternatives } from "../lib/exercise-swaps";
@@ -5727,7 +5728,9 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
       supabase.from("workout_logs").select("id,session_name,date,in_progress,total_volume,duration_mins,exercises,created_at").eq("user_id", user.id).gte("date", shiftDateKey(today, -((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7))).lte("date", today),
       readMorningRoutine(user.id),
       supabase.from("end_of_day").select("id").eq("user_id", user.id).eq("date", today).maybeSingle(),
-    ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine, endOfDay]) => {
+      // The last ten weeks of workouts, for when each session is usually done.
+      supabase.from("workout_logs").select("session_name,date,created_at,total_volume,duration_mins,exercises").eq("user_id", user.id).eq("in_progress", false).gte("date", shiftDateKey(today, -70)).order("created_at", { ascending: false }).limit(40),
+    ]).then(([morning, nutrition, nutritionPlan, split, workouts, routine, endOfDay, recent]) => {
       setEodDone(Boolean(endOfDay.data));
       setTodayData({
         loaded: true,
@@ -5742,9 +5745,11 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
         nutritionPlan: nutritionPlan.data || null,
         sessions: split.data?.sessions || [],
         // Sessions abandoned straight after starting (nothing lifted, under 2 minutes) are not workouts.
-        workouts: (workouts.data || []).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log) })).filter(log => log.date === today && !log.in_progress && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)),
+        // Done today: workouts that count (at least half the sets), not one left unfinished.
+        workouts: (workouts.data || []).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log) })).filter(log => log.date === today && !log.in_progress && countsAsDone(log)),
         weekWorkouts: (workouts.data || []).filter(log => isFinishedWorkout(log, today)).map(log => ({ ...log, duration_mins: settledWorkoutDuration(log), in_progress: false })),
         activeWorkout: (workouts.data || []).find(log => log.date === today && log.in_progress) || null,
+        recentWorkouts: recent?.data || [],
       });
     }).catch(error => {
       console.error("Dashboard load error:", error);
@@ -5837,7 +5842,11 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
     // The banner above already continues an active workout.
     workout: workoutBannerShown
       ? { inProgressName: null, scheduledName: null, done: true }
-      : { inProgressName: activeWorkout?.session_name || null, scheduledName: todaySession?.name || null, scheduledActivity: isActivitySession(todaySession), done: fitnessDone },
+      : {
+        inProgressName: activeWorkout?.session_name || null, scheduledName: todaySession?.name || null, scheduledActivity: isActivitySession(todaySession), done: fitnessDone,
+        // When this session is usually done, if the history shows a pattern.
+        usualTime: todaySession ? usualStartTime(todayData.recentWorkouts || [], { sessionName: todaySession.name, dayCode: homeDate.dayCode, timeOf: log => getZonedDateInfo(new Date(log.created_at), homeTimeZone).time, dayOf: log => dateKeyDayCode(log.date) }) : null,
+      },
     meals: dashboardMeals.map((meal, index) => ({ name: meal.name, time: meal.time, index, logged: isMealAnswered(dashMeals.results[index]), flexible: isFlexibleMeal(meal) })),
     habits,
     endOfDayDone: eodDone,
@@ -8907,7 +8916,7 @@ function withPlanApproval(sessions, now = new Date()) {
       // A newer proposal replaces one still waiting.
       setPlanChangeMessages(current => [
         ...current.map(item => (proposal && item.proposal?.status === "pending" ? { ...item, proposal: { ...item.proposal, status: "replaced" } } : item)),
-        { role: "assistant", content: result.message, ...(proposal ? { proposal } : {}) },
+        { role: "assistant", content: result.message, ...(proposal ? { proposal } : {}), ...(result.options?.length ? { options: result.options } : {}) },
       ]);
       setPlanChangeRecommendation(result);
     } catch (error) {
@@ -9018,6 +9027,15 @@ function withPlanApproval(sessions, now = new Date()) {
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
             {["Review my plan and recommend changes", "A few exercises don't suit me", "I want to change sets or reps", "My available days changed", "My main goal changed", "I think I need a full rebuild"].map(prompt => (
               <button key={prompt} className="t3d-btn t3d-btn-sm" style={{ fontSize: 8 }} onClick={() => askPlanChangeCoach(prompt)}>{prompt}</button>
+            ))}
+          </div>
+        )}
+
+        {/* The coach's question, answered with one tap. */}
+        {planChangeMessages.at(-1)?.role === "assistant" && planChangeMessages.at(-1)?.options?.length > 0 && !planChangeLoading && (
+          <div data-testid="plan-change-options" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {planChangeMessages.at(-1).options.map(option => (
+              <button key={option} type="button" className="t3d-btn t3d-btn-sm" style={{ fontSize: 9, minHeight: 40, borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => askPlanChangeCoach(option)}>{option}</button>
             ))}
           </div>
         )}
@@ -9295,13 +9313,18 @@ function withPlanApproval(sessions, now = new Date()) {
   // Today's own session is the one suggested. A session missed earlier this
   // week is only offered as an optional catch-up.
   const recommendedSession = todaySession;
-  const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase()));
-  const trainedToday = history.some(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2));
-  const completedTodayNames = [...new Set(history.filter(log => log.date === today && (Number(log.total_volume) > 0 || (Number(log.duration_mins) || 0) >= 2)).map(log => log.session_name).filter(Boolean))];
+  // Only workouts that count as done (at least half the sets): one left
+  // unfinished, or closed later, never hides today's session.
+  const recommendedDoneToday = Boolean(recommendedSession && history.some(log => log.date === today && log.session_name?.toLowerCase() === recommendedSession.name?.toLowerCase() && countsAsDone(log)));
+  const trainedToday = history.some(log => log.date === today && countsAsDone(log));
+  const completedTodayNames = [...new Set(history.filter(log => log.date === today && countsAsDone(log)).map(log => log.session_name).filter(Boolean))];
   const doneForToday = !(workoutInProgress && activeSession) && (recommendedDoneToday || trainedToday);
   // No session on today's day of the plan: say so first. A missed session is
   // only an optional catch-up, not the day's workout.
   const restDay = !todaySession && sessions.length > 0;
+  // How long a session really takes: the average of its recent complete
+  // workouts, leaving out one-offs (lib/workout-stats). null until 3 exist.
+  const usualMinutes = session => (session && !isActivitySession(session) ? typicalSessionMinutes(history, session.name) : null);
   // A plan built today with nothing trained yet: offer its first session
   // today, whatever day it is scheduled for.
   const dayOneSession = planStartKey === today && !realHistoryForDayOne(history, planStartKey)
@@ -9463,7 +9486,7 @@ function withPlanApproval(sessions, now = new Date()) {
                 </div>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 10, color: "#6F8792" }}>
                   <span>Want to train again?</span>
-                  {recommendedSession && <button type="button" onClick={() => requestStartWorkout(recommendedSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", minHeight: 44, textDecoration: "underline" }}>Repeat {recommendedSession.name}</button>}
+                  {recommendedSession && <button type="button" onClick={() => requestStartWorkout(recommendedSession)} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", minHeight: 44, textDecoration: "underline" }}>{recommendedDoneToday ? `Repeat ${recommendedSession.name}` : `Start ${recommendedSession.name} (today's session)`}</button>}
                   <button type="button" onClick={openOtherWorkouts} style={{ background: "none", border: 0, color: "#8AABB8", cursor: "pointer", fontSize: 10, padding: "5px 6px", minHeight: 44, textDecoration: "underline" }}>Choose a workout</button>
                 </div>
               </div>
@@ -9488,7 +9511,7 @@ function withPlanApproval(sessions, now = new Date()) {
                         entries: [{ session: nextScheduled.session, label: nextScheduled.dayLabel.toUpperCase() }],
                       })} />
                     </div>
-                    <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 4 }}>{isActivitySession(nextScheduled.session) ? `${activityTypeLabel(nextScheduled.session.activityType)} · ${sessionPlannedMinutes(nextScheduled.session)} min` : `${exerciseCountText(nextScheduled.session)} · about ${sessionPlannedMinutes(nextScheduled.session)} min`}</div>
+                    <div style={{ fontSize: 10, color: "#8AABB8", marginTop: 4 }}>{isActivitySession(nextScheduled.session) ? `${activityTypeLabel(nextScheduled.session.activityType)} · ${sessionPlannedMinutes(nextScheduled.session)} min` : `${exerciseCountText(nextScheduled.session)} · ${usualMinutes(nextScheduled.session) ? `usually ${usualMinutes(nextScheduled.session)} min` : `about ${sessionPlannedMinutes(nextScheduled.session)} min`}`}</div>
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 10, fontSize: 10, color: "#6F8792" }}>
@@ -9508,7 +9531,7 @@ function withPlanApproval(sessions, now = new Date()) {
                     })} />
                   </div>
                   <div style={{ fontSize: 11, color: "#8AABB8" }}>
-                    Scheduled for today · {isActivitySession(recommendedSession) ? `${activityTypeLabel(recommendedSession.activityType)} · ${sessionPlannedMinutes(recommendedSession)} min` : exerciseCountText(recommendedSession)}
+                    Scheduled for today · {isActivitySession(recommendedSession) ? `${activityTypeLabel(recommendedSession.activityType)} · ${sessionPlannedMinutes(recommendedSession)} min` : `${exerciseCountText(recommendedSession)}${usualMinutes(recommendedSession) ? ` · usually ${usualMinutes(recommendedSession)} min` : ""}`}
                   </div>
                   {!recommendedSession.approval?.approved && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, color: "#FFB547", fontSize: 8 }}>

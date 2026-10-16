@@ -126,7 +126,7 @@ test("the coach's reply keeps every change the app can save and never hides a dr
   const partly = readPlanChangeReply({ message: "Two changes.", recommendation: "targeted", changes: [{ kind: "remove_session", sessionName: "Legs" }, { kind: "add_session", sessionName: "Arms" }] });
   assert.equal(partly.changes.length, 1);
   assert.match(partly.message, /One part of this couldn't be prepared as a change you can approve/);
-  assert.deepEqual(readPlanChangeReply({ message: "Which days suit you?", recommendation: "clarify" }), { message: "Which days suit you?", recommendation: "clarify", changes: [] });
+  assert.deepEqual(readPlanChangeReply({ message: "Which days suit you?", recommendation: "clarify" }), { message: "Which days suit you?", recommendation: "clarify", changes: [], options: [] });
 });
 
 test("the workout coach's permanent changes are described before → after", async () => {
@@ -135,4 +135,11 @@ test("the workout coach's permanent changes are described before → after", asy
   assert.deepEqual(coachActionChangeLines(week, swap), ["Push A: Bench Press → Dumbbell Press"]);
   assert.deepEqual(coachActionChangeLines(week, { type: "propose_permanent_set_change", payload: { programmeExerciseId: "Row", setCount: 2 } }), ["Pull A · Row: 3 sets → 2 sets"]);
   assert.deepEqual(coachActionChangeLines([], swap), ["Swap to Dumbbell Press from now on"]);
+});
+
+test("the plan-change coach's question comes with up to four tap answers", async () => {
+  const { readPlanChangeReply } = await import("../lib/coaching/plan-change-reply.js");
+  const reply = readPlanChangeReply({ message: "I'd shorten Fridays. What's the main problem?", recommendation: "clarify", changes: [], options: ["Too hard / too long", "It's a logging problem", "Something hurts", "Too hard / too long", "x".repeat(60), "Other", "Fifth"] });
+  assert.deepEqual(reply.options, ["Too hard / too long", "It's a logging problem", "Something hurts", "Other"]);
+  assert.deepEqual(readPlanChangeReply({ message: "Done." }).options, []);
 });

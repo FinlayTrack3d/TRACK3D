@@ -29,6 +29,16 @@ test("next up follows the day: morning, workout, meal, habits, end of day", () =
   assert.deepEqual(nextUpItems({ hour: 21, endOfDayDue: false }), []);
 });
 
+test("the workout's usual time orders it against meals", () => {
+  const meals = [{ name: "Lunch", time: "12:30", logged: false }];
+  const late = nextUpItems({ hour: 11, time: "11:00", workout: { scheduledName: "Upper A", usualTime: "17:45" }, meals });
+  assert.deepEqual(late.map(item => item.id), ["meal", "workout"]);
+  assert.equal(late[1].detail, "Today's workout · usually 17:45");
+  const early = nextUpItems({ hour: 11, time: "11:00", workout: { scheduledName: "Upper A", usualTime: "11:30" }, meals });
+  assert.deepEqual(early.map(item => item.id), ["workout", "meal"]);
+  assert.equal(nextUpItems({ hour: 11, workout: { scheduledName: "Upper A" }, meals })[0].id, "workout", "no pattern: as before");
+});
+
 test("a meal whose time has passed is not next", () => {
   const meals = [{ name: "Eggs on Toast", time: "07:30", logged: false }, { name: "Lunch", time: "12:30", logged: false }, { name: "Dinner", time: "18:30", logged: false }];
   const mealAt = time => nextUpItems({ hour: Number(time.slice(0, 2)), time, meals }).find(item => item.id === "meal")?.title || null;
