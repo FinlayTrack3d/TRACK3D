@@ -108,5 +108,5 @@ test("five questions plus optional budget, allergies first", () => {
   assert.equal(AI_NUTRITION_QUESTIONS[0].id, "allergies");
   assert.deepEqual(AI_NUTRITION_QUESTIONS.filter(q => q.optional).map(q => q.id), ["budget"]);
   for (const removed of ["goal", "meals_per_day", "training_days", "experience"]) assert.ok(!AI_NUTRITION_QUESTIONS.some(q => q.id === removed));
-  assert.equal(preferencesText({ goal: "Bulk", diet_type: "Vegan", allergies: "nuts" }), "Any dietary preference? Vegan");
+  assert.equal(preferencesText({ goal: "Bulk", diet_type: "Vegan", allergies: "nuts" }), "Any dietary preferences? Vegan");
 });

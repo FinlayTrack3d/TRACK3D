@@ -27,6 +27,7 @@ import { QUICK_FOODS, addExtraFood, addOffPlanMacros, calculateLoggedNutrition, 
 import { EATING_SUPPORT_TEXT, calorieFloor, calorieTargetProblem, mealPlanFloorProblem, weeklyLossWarning } from "../lib/nutrition-safety";
 import { HEALTH_CONSENT_TEXT, HEALTH_CONSENT_VERSION, clearLocalAppData, deleteAccountProblem, exportFileName, exportFiles, exportLimitText, healthConsentStatus, listUserFiles, removeFiles } from "../lib/account";
 import { createZip } from "../lib/zip";
+import { scaleMealsToCalories, withIngredientMacros } from "../lib/food-table";
 import { EXERCISE_LIBRARY, canonicalExerciseName, swapAlternatives } from "../lib/exercise-swaps";
 import { sessionNameSuggestions, starterPlan } from "../lib/starter-plans";
 import { EXPERIENCE_ANSWERS, nextSetupStep, setupComplete, setupSavedBanner, setupSteps, tomorrowPlan } from "../lib/setup-steps";
@@ -9890,32 +9891,43 @@ function withPlanApproval(sessions, now = new Date()) {
 
 
 // ─── Nutrition Section ────────────────────────────────────────────────────────
-const COMMON_MEALS = {
+// Common meals; their calories and macros are worked out from the
+// ingredients (lib/food-table), not typed in.
+const COMMON_MEAL_LIST = {
   breakfast: [
     { name: "Oats & Banana", time: "08:00", ingredients: [{ name: "Oats", weight: 80, unit: "g" }, { name: "Banana", weight: 120, unit: "g" }, { name: "Whole milk", weight: 200, unit: "ml" }], calories: 420, protein: 14, carbs: 72, fats: 8 },
     { name: "Eggs on Toast", time: "08:00", ingredients: [{ name: "Eggs", weight: 150, unit: "g" }, { name: "Wholegrain bread", weight: 80, unit: "g" }, { name: "Butter", weight: 10, unit: "g" }], calories: 380, protein: 22, carbs: 32, fats: 16 },
-    { name: "Greek Yogurt & Berries", time: "08:00", ingredients: [{ name: "Greek yogurt", weight: 200, unit: "g" }, { name: "Mixed berries", weight: 100, unit: "g" }, { name: "Honey", weight: 10, unit: "g" }], calories: 220, protein: 18, carbs: 28, fats: 4 },
+    { name: "Greek Yogurt & Berries", time: "08:00", ingredients: [{ name: "Greek yogurt (0% fat)", weight: 200, unit: "g" }, { name: "Mixed berries", weight: 100, unit: "g" }, { name: "Honey", weight: 10, unit: "g" }], calories: 220, protein: 18, carbs: 28, fats: 4 },
     { name: "Protein Pancakes", time: "08:00", ingredients: [{ name: "Oats", weight: 60, unit: "g" }, { name: "Eggs", weight: 100, unit: "g" }, { name: "Protein powder", weight: 30, unit: "g" }], calories: 380, protein: 32, carbs: 38, fats: 8 },
+    { name: "Bagel, Egg & Ham", time: "08:00", ingredients: [{ name: "Bagel", weight: 85, unit: "g" }, { name: "Eggs", weight: 100, unit: "g" }, { name: "Ham", weight: 40, unit: "g" }] },
+    { name: "Granola Yogurt Bowl", time: "08:00", ingredients: [{ name: "Greek yogurt (0% fat)", weight: 250, unit: "g" }, { name: "Granola", weight: 45, unit: "g" }, { name: "Blueberries", weight: 80, unit: "g" }] },
   ],
   lunch: [
     { name: "Chicken & Rice", time: "13:00", ingredients: [{ name: "Chicken breast", weight: 200, unit: "g" }, { name: "White rice", weight: 100, unit: "g" }, { name: "Broccoli", weight: 150, unit: "g" }], calories: 520, protein: 52, carbs: 55, fats: 6 },
     { name: "Tuna Rice Bowl", time: "13:00", ingredients: [{ name: "Tuna in water", weight: 160, unit: "g" }, { name: "Brown rice", weight: 120, unit: "g" }, { name: "Spinach", weight: 80, unit: "g" }], calories: 440, protein: 48, carbs: 50, fats: 4 },
     { name: "Turkey Wrap", time: "13:00", ingredients: [{ name: "Turkey breast", weight: 150, unit: "g" }, { name: "Wholegrain wrap", weight: 60, unit: "g" }, { name: "Salad", weight: 80, unit: "g" }], calories: 380, protein: 38, carbs: 32, fats: 8 },
     { name: "Beef & Pasta", time: "13:00", ingredients: [{ name: "Lean beef mince", weight: 150, unit: "g" }, { name: "Pasta", weight: 100, unit: "g" }, { name: "Tomato sauce", weight: 100, unit: "g" }], calories: 580, protein: 42, carbs: 58, fats: 14 },
+    { name: "Chicken Pitta & Hummus", time: "13:00", ingredients: [{ name: "Chicken breast", weight: 150, unit: "g" }, { name: "Wholemeal pitta", weight: 60, unit: "g" }, { name: "Hummus", weight: 30, unit: "g" }, { name: "Salad", weight: 60, unit: "g" }] },
+    { name: "Prawn & Quinoa Salad", time: "13:00", ingredients: [{ name: "Prawns", weight: 150, unit: "g" }, { name: "Quinoa", weight: 60, unit: "g" }, { name: "Avocado", weight: 50, unit: "g" }, { name: "Salad", weight: 80, unit: "g" }] },
   ],
   dinner: [
     { name: "Salmon & Veg", time: "19:00", ingredients: [{ name: "Salmon fillet", weight: 180, unit: "g" }, { name: "Sweet potato", weight: 200, unit: "g" }, { name: "Asparagus", weight: 100, unit: "g" }], calories: 560, protein: 44, carbs: 42, fats: 18 },
     { name: "Chicken Stir Fry", time: "19:00", ingredients: [{ name: "Chicken breast", weight: 200, unit: "g" }, { name: "Mixed veg", weight: 200, unit: "g" }, { name: "Rice noodles", weight: 80, unit: "g" }], calories: 480, protein: 46, carbs: 48, fats: 8 },
     { name: "Steak & Potatoes", time: "19:00", ingredients: [{ name: "Sirloin steak", weight: 200, unit: "g" }, { name: "Baby potatoes", weight: 200, unit: "g" }, { name: "Green beans", weight: 100, unit: "g" }], calories: 620, protein: 52, carbs: 44, fats: 22 },
     { name: "Cod & Rice", time: "19:00", ingredients: [{ name: "Cod fillet", weight: 200, unit: "g" }, { name: "Brown rice", weight: 100, unit: "g" }, { name: "Spinach", weight: 100, unit: "g" }], calories: 440, protein: 46, carbs: 44, fats: 6 },
+    { name: "Turkey Chilli & Rice", time: "19:00", ingredients: [{ name: "Turkey mince", weight: 150, unit: "g" }, { name: "Kidney beans", weight: 80, unit: "g" }, { name: "Passata", weight: 150, unit: "g" }, { name: "White rice", weight: 70, unit: "g" }] },
+    { name: "Tofu Veg Noodles", time: "19:00", ingredients: [{ name: "Firm tofu", weight: 200, unit: "g" }, { name: "Egg noodles", weight: 75, unit: "g" }, { name: "Stir-fry vegetables", weight: 200, unit: "g" }, { name: "Soy sauce", weight: 15, unit: "ml" }] },
   ],
   snacks: [
     { name: "Protein Shake", time: "16:00", ingredients: [{ name: "Whey protein", weight: 30, unit: "g" }, { name: "Whole milk", weight: 300, unit: "ml" }], calories: 280, protein: 38, carbs: 14, fats: 6 },
     { name: "Rice Cakes & PB", time: "10:00", ingredients: [{ name: "Rice cakes", weight: 40, unit: "g" }, { name: "Peanut butter", weight: 30, unit: "g" }], calories: 220, protein: 8, carbs: 24, fats: 10 },
     { name: "Cottage Cheese", time: "21:00", ingredients: [{ name: "Cottage cheese", weight: 200, unit: "g" }, { name: "Pineapple", weight: 80, unit: "g" }], calories: 180, protein: 22, carbs: 14, fats: 4 },
     { name: "Mixed Nuts", time: "10:00", ingredients: [{ name: "Mixed nuts", weight: 40, unit: "g" }], calories: 240, protein: 6, carbs: 8, fats: 20 },
+    { name: "Apple & Peanut Butter", time: "16:00", ingredients: [{ name: "Apple", weight: 150, unit: "g" }, { name: "Peanut butter", weight: 20, unit: "g" }] },
+    { name: "Skyr & Honey", time: "16:00", ingredients: [{ name: "Skyr", weight: 150, unit: "g" }, { name: "Honey", weight: 10, unit: "g" }] },
   ],
 };
+const COMMON_MEALS = Object.fromEntries(Object.entries(COMMON_MEAL_LIST).map(([category, meals]) => [category, meals.map(withIngredientMacros)]));
 
 // ─── AI Tweaks Box ────────────────────────────────────────────────────────────
 // Asks the coach for a meal plan, adds it up in code and checks it against
@@ -9939,9 +9951,15 @@ async function requestMealPlan(area, content, targets, { allergies = [], wakeTim
       messages.push({ role: "assistant", content: reply }, { role: "user", content: "That could not be read. Return the full plan as JSON only." });
       continue;
     }
-    // Meal times come from the user's wake-up time, not the model.
-    const meals = applyMealTimes(parsed, wakeTime);
-    const check = { ...mealPlanTargetCheck(meals, targets), allergyConflicts: mealAllergyConflicts(meals, allergies) };
+    // Meal times come from the user's wake-up time, not the model. The
+    // numbers come from the ingredients (the AI's own totals tend to be
+    // written to match the target), then portions are scaled in code to
+    // reach the calorie target.
+    let meals = applyMealTimes(parsed, wakeTime).map(withIngredientMacros);
+    const workedCalories = meals.reduce((total, meal) => total + (Number(meal.calories) || 0), 0);
+    const targetCalories = Math.max(Number(targets.calories) || 0, minCalories || 0);
+    if (targetCalories > 0 && workedCalories > 0 && Math.abs(workedCalories - targetCalories) / targetCalories > 0.03) meals = scaleMealsToCalories(meals, targetCalories);
+    const check = { ...mealPlanTargetCheck(meals, targets), allergyConflicts: mealAllergyConflicts(meals, allergies), unchecked: [...new Set(meals.flatMap(meal => meal.uncheckedIngredients || []))] };
     if (minCalories > 0 && check.totals.calories < minCalories) {
       belowMinimum = check.totals.calories;
       messages.push({ role: "assistant", content: reply }, { role: "user", content: `Your plan adds up to ${check.totals.calories} kcal, below the minimum of ${minCalories} kcal a day. Increase the portions so the total is at least ${Math.max(minCalories, Number(targets.calories) || 0)} kcal. Return the full plan as JSON only.` });
@@ -9964,8 +9982,9 @@ async function requestMealPlan(area, content, targets, { allergies = [], wakeTim
 // Shown when the AI only came back with plans below the minimum.
 const belowMinimumText = minCalories => `The AI's plan came out below your minimum of ${minCalories.toLocaleString("en-GB")} kcal a day, so it wasn't used. Please try again.`;
 
-const mealPlanNeedsWarning = check => !check.ok || check.allergyConflicts?.length > 0;
+const mealPlanNeedsWarning = check => !check.ok || check.allergyConflicts?.length > 0 || check.unchecked?.length > 0;
 const mealPlanWarningText = (check, targets) => [
+  check.unchecked?.length ? `Not in the food table, so the coach's numbers are used for: ${check.unchecked.join(", ")}.` : "",
   check.allergyConflicts?.length ? `Contains foods you listed as allergies: ${allergyConflictText(check.allergyConflicts)}. Swap or remove these before saving.` : "",
   check.ok ? "" : `This plan adds up to ${check.totals.calories.toLocaleString()} kcal and ${check.totals.protein} g protein, which is off your targets of ${Number(targets.calories).toLocaleString()} kcal and ${targets.protein} g. Adjust the portions or ask for a tweak before saving.`,
 ].filter(Boolean).join(" ");
@@ -10035,6 +10054,20 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
   const [openMeal, setOpenMeal] = useState(null);
   const [swapOpen, setSwapOpen] = useState(null);
   const [swapDraft, setSwapDraft] = useState(EMPTY_SWAP);
+  // "Type what you had": the AI fills in the numbers, which stay editable.
+  const [swapEstimate, setSwapEstimate] = useState({ busy: false, note: "" });
+  const estimateSwap = async () => {
+    if (!swapDraft.name.trim() || swapEstimate.busy) return;
+    setSwapEstimate({ busy: true, note: "" });
+    try {
+      const result = await estimateFood(swapDraft.name);
+      setSwapDraft(draft => ({ ...draft, calories: String(result.caloriesMid), protein: String(result.proteinMid), carbs: String(result.carbsMid), fats: String(result.fatsMid) }));
+      setSwapEstimate({ busy: false, note: `AI estimate: ${result.caloriesLow.toLocaleString("en-GB")}–${result.caloriesHigh.toLocaleString("en-GB")} kcal${result.items.length > 1 ? ` (${result.items.map(item => item.name).join(", ")})` : ""}. Check the numbers, then swap it in.` });
+    } catch (error) {
+      console.log("Swap estimate error:", error?.message);
+      setSwapEstimate({ busy: false, note: "Couldn't estimate that just now. Enter the calories instead." });
+    }
+  };
   // Saving a swap to the library is a choice, not the default.
   const [keepSwap, setKeepSwap] = useState(false);
   const [lastChange, setLastChange] = useState(""); // what the last tap did, and how to undo it
@@ -10047,6 +10080,7 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
   };
   const openSwap = index => {
     setSwapDraft(EMPTY_SWAP);
+    setSwapEstimate({ busy: false, note: "" });
     setKeepSwap(false);
     setSwapOpen(current => (current === index ? null : index));
   };
@@ -10135,8 +10169,12 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
                   ))}
                 </div>
               ) : <div style={{ fontSize: 10, color: "#6F8792", marginBottom: 12 }}>No other meals in your library yet (today&apos;s planned meals aren&apos;t listed). Make your own below.</div>}
-              <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>OR MAKE YOUR OWN</div>
-              <input className="t3d-input" aria-label="Swap meal name" placeholder="e.g. Chicken wrap" value={swapDraft.name} onChange={event => { const value = event.target.value; setSwapDraft(draft => ({ ...draft, name: value })); }} style={{ marginBottom: 6 }} />
+              <div style={{ fontSize: 8, color: "#8AABB8", letterSpacing: 1, marginBottom: 6 }}>OR TYPE WHAT YOU HAD</div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                <input className="t3d-input" aria-label="Swap meal name" placeholder="e.g. Chicken wrap and a banana" value={swapDraft.name} onChange={event => { const value = event.target.value; setSwapDraft(draft => ({ ...draft, name: value })); setSwapEstimate({ busy: false, note: "" }); }} onKeyDown={event => { if (event.key === "Enter") estimateSwap(); }} style={{ flex: 1 }} />
+                <button type="button" className="t3d-btn t3d-btn-sm" data-testid="swap-estimate" style={{ flexShrink: 0, borderColor: SWAP_YELLOW, color: SWAP_YELLOW }} disabled={!swapDraft.name.trim() || swapEstimate.busy} onClick={estimateSwap}>{swapEstimate.busy ? "..." : "AI ESTIMATE"}</button>
+              </div>
+              {swapEstimate.note && <div role="status" data-testid="swap-estimate-note" style={{ fontSize: 9, color: "#C5D6DC", lineHeight: 1.5, marginBottom: 6 }}>{swapEstimate.note}</div>}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
                 {[["calories", "KCAL"], ["protein", "P (g)"], ["carbs", "C (g)"], ["fats", "F (g)"]].map(([key, label]) => (
                   <label key={key} style={{ color: "#6F8792", fontSize: 7 }}>{label}
@@ -10180,6 +10218,18 @@ function MealLogList({ meals, results, onResultsChange, onSave, compact = false,
 // anything described, or calories with protein, carbs and fat when known.
 // Food logged as calories only gets a rough protein/carbs/fat split, so the
 // day's macros always add up. onAdd(item) saves it and returns true or false.
+// The AI's estimate for food the user typed ("chicken wrap and a coke"),
+// added up in code: { items, caloriesMid, proteinMid, carbsMid, fatsMid, ... }.
+async function estimateFood(description) {
+  const res = await fetch("/api/chat", {
+    method: "POST", headers: await chatHeaders(),
+    body: JSON.stringify({ area: "food_estimate", messages: [{ role: "user", content: `Estimate this food exactly as I described it:\n- ${String(description).trim()}` }] }),
+  });
+  const result = sumFoodEstimate(extractJsonObject(await readCoachReply(res))?.items);
+  if (!result.items.length) throw new Error("no items in the estimate");
+  return result;
+}
+
 function LogSomethingElse({ onAdd }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -10202,13 +10252,7 @@ function LogSomethingElse({ onAdd }) {
     setBusy(true);
     setStatus("");
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST", headers: await chatHeaders(),
-        body: JSON.stringify({ area: "food_estimate", messages: [{ role: "user", content: `Estimate this food exactly as I described it:\n- ${name.trim()}` }] }),
-      });
-      const result = sumFoodEstimate(extractJsonObject(await readCoachReply(res))?.items);
-      if (!result.items.length) throw new Error("no items in the estimate");
-      setEstimate(result);
+      setEstimate(await estimateFood(name));
     } catch (error) {
       console.log("Food estimate error:", error?.message);
       setStatus("Couldn't estimate that just now. Enter the calories instead.");
@@ -10648,6 +10692,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
       activityLevel,
       goal,
       mealsPerDay,
+      nutritionStyle,
       wakeTime: wakeTime || null,
       answers: aiNutritionAnswers,
       tdee: macros.tdee ?? calculatedMacros?.tdee ?? null,
@@ -10744,13 +10789,6 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
     };
   });
   useEffect(() => { if (!loading) openSetupRef.current?.(); }, [loading]);
-
-  // EDIT MEALS / EDIT MEAL PLAN: straight to the meals step, keeping the
-  // current targets.
-  const openMealEditor = (restDay = false) => {
-    openSetup({ step: 2 });
-    setEditingRestDay(Boolean(restDay && plan?.rest_day_meals?.length));
-  };
 
   // New targets worked out from the profile: shown on the review with the
   // meals, ready to save.
@@ -11620,13 +11658,24 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                       {AI_NUTRITION_QUESTIONS.map((item, i) => <div key={item.id} style={{ flex: 1, height: 3, borderRadius: 2, opacity: item.optional ? 0.5 : 1, background: i<=aiNutritionStep?NEON:BORDER }} />)}
                     </div>
                     <div style={{ fontSize: 10, color: "#E0EAF0", marginBottom: 6 }}>{question.optional ? "OPTIONAL" : `QUESTION ${aiNutritionStep + 1} OF ${requiredCount}`}</div>
-                    <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>{question.q}</div>
+                    <div style={{ fontSize: 14, color: "#E0EAF0", marginBottom: 20, lineHeight: 1.6 }}>{question.q}{question.multi && <span style={{ display: "block", fontSize: 10, color: "#8AABB8" }}>Pick all that apply.</span>}</div>
                     {question.type === "choice" && (
                       <div style={{ marginBottom: 16 }}>
                         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
-                          {question.options.map(opt => (
-                            <button key={opt} className="t3d-btn" style={{ textAlign: "left", padding: "11px 16px", fontSize: 11, ...optionStyle(answer === opt) }} onClick={() => answerAndContinue(opt, 300)}>{opt}</button>
-                          ))}
+                          {question.options.map(opt => {
+                            // Several can be picked ("Halal, Low carb"); "No restrictions" stands alone.
+                            const picked = question.multi ? answer.split(", ").filter(Boolean) : [];
+                            const selected = question.multi ? picked.includes(opt) : answer === opt;
+                            return (
+                              <button key={opt} className="t3d-btn" aria-pressed={selected} style={{ textAlign: "left", padding: "11px 16px", fontSize: 11, ...optionStyle(selected) }}
+                                onClick={() => {
+                                  if (!question.multi) { answerAndContinue(opt, 300); return; }
+                                  const exclusive = opt === question.options[0];
+                                  const next = selected ? picked.filter(item => item !== opt) : exclusive ? [opt] : [...picked.filter(item => item !== question.options[0]), opt];
+                                  setAnswer(question.options.filter(item => next.includes(item)).join(", "));
+                                }}>{selected && question.multi ? "✓ " : ""}{opt}</button>
+                            );
+                          })}
                         </div>
                         <div style={{ color: "#8AABB8", fontSize: 9, marginBottom: 6 }}>OR TYPE YOUR OWN ANSWER</div>
                         <input className="t3d-input" placeholder="Type what suits you..." value={answer} onChange={event => setAnswer(event.target.value)} />
@@ -11732,6 +11781,22 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                             <span style={{ color: Math.abs(v-t)/t<0.1?NEON:"#FF8C00" }}>{v} / {t}{u}</span>
                           </div>
                         ))}
+                        {(() => {
+                          const target = editingRestDay ? restTarget.calories : finalMacros.calories;
+                          const fixedMeals = currentMeals.filter(meal => !isFlexibleMeal(meal));
+                          const flexibleCalories = currentMeals.filter(isFlexibleMeal).reduce((total, meal) => total + (Number(meal.calories) || 0), 0);
+                          const total = currentMeals.reduce((sum, meal) => sum + (Number(meal.calories) || 0), 0);
+                          if (!(target > 0) || !fixedMeals.length || Math.abs(total - target) / target <= 0.05) return null;
+                          return (
+                            <button type="button" className="t3d-btn t3d-btn-sm" data-testid="scale-portions" style={{ width: "100%", marginTop: 8, minHeight: 44 }}
+                              onClick={() => {
+                                const scaled = scaleMealsToCalories(fixedMeals, Math.max(0, target - flexibleCalories));
+                                let next = 0;
+                                const updated = currentMeals.map(meal => (isFlexibleMeal(meal) ? meal : scaled[next++]));
+                                setCurrentMeals(updated);
+                              }}>SCALE PORTIONS TO MY TARGET ({total > target ? "−" : "+"}{Math.abs(total - target).toLocaleString("en-GB")} KCAL)</button>
+                          );
+                        })()}
                         {!targetMinimumProblem && mealPlanFloorProblem(editingRestDay ? preparedRestDayMeals : preparedPlanMeals, sex) && (
                           <div data-testid="meals-below-minimum" style={{ fontSize: 10, color: "#FF8FA3", marginTop: 6, lineHeight: 1.5 }}>{mealPlanFloorProblem(editingRestDay ? preparedRestDayMeals : preparedPlanMeals, sex, editingRestDay ? "Your rest day meals" : "Your meals")} You can&apos;t save the plan until they do.</div>
                         )}
@@ -11854,6 +11919,9 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                   const saved = await savePlan(preparedPlanMeals, preparedRestDayMeals, realMacros);
                   setSavingPlan(false);
                   if (!saved) return;
+                  // Leave the setup in the same update as clearing the draft,
+                  // so the draft autosave can't write it back.
+                  setView("home");
                   clearSetupDraft();
                   const nextLibrary = mergeMealLibrary(mealLibrary, preparedPlanMeals);
                   setMealLibrary(nextLibrary);
@@ -11932,7 +12000,8 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
   const trainingGap = gapFor(plan?.meals, trainingTargets);
   const restGap = restPlan ? gapFor(plan.rest_day_meals, restTargets) : "";
   const mealsTotal = meals => (meals || []).reduce((total, meal) => ({ calories: total.calories + (Number(meal.calories) || 0), protein: total.protein + (Number(meal.protein) || 0) }), { calories: 0, protein: 0 });
-  const planStyle = inferNutritionStyle(plan?.meals || []);
+  // The style chosen in setup; plans saved before it was kept are worked out from their meals.
+  const planStyle = ["hybrid", "flexible", "fixed"].includes(plan?.setup?.nutritionStyle) ? plan.setup.nutritionStyle : inferNutritionStyle(plan?.meals || []);
   const planStyleText = planStyle === "hybrid"
     ? `Repeat your anchor meals; choose freely for the flexible slots.${restPlan ? " Rest days have their own meals." : ""}`
     : planStyle === "flexible" ? "Choose your food and work toward the daily totals."
@@ -12086,15 +12155,10 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
                       </div>
                       <div style={{ fontSize: 9, color: "#6F8792", marginTop: 2 }}>Target {day.targets.calories.toLocaleString("en-GB")} kcal · {day.targets.protein} g protein{day.targets.restDay ? " (about 12% lighter)" : ""}</div>
                     </div>
-                    <button className="t3d-btn t3d-btn-sm" style={{ fontSize: 8, flexShrink: 0 }} onClick={() => openMealEditor(day.rest)}>EDIT MEALS</button>
                   </div>
                   {day.gap && (
                     <div role="alert" data-testid={day.rest ? "plan-rest-gap" : "plan-target-gap"} style={{ border: "1px solid rgba(255,181,71,.4)", background: "rgba(255,181,71,.06)", borderRadius: 6, padding: 10, marginTop: 8, fontSize: 10, color: "#FFD08A", lineHeight: 1.55 }}>
-                      <strong style={{ color: "#FFB547" }}>Your meals don&apos;t match your targets.</strong> {day.gap.replace("These meals", day.rest ? "Your rest day meals" : "Your training day meals")}
-                      <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-                        <button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(255,181,71,.45)", color: "#FFB547" }} onClick={() => openMealEditor(day.rest)}>EDIT MEALS</button>
-                        <button className="t3d-btn t3d-btn-sm" onClick={() => openSetup({ step: 0 })}>CHANGE TARGETS</button>
-                      </div>
+                      <strong style={{ color: "#FFB547" }}>Your meals don&apos;t match your targets.</strong> {day.gap.replace("These meals", day.rest ? "Your rest day meals" : "Your training day meals")} Fix it with EDIT PLAN above (SCALE PORTIONS TO MY TARGET is under the meals).
                     </div>
                   )}
                 </div>
@@ -12132,7 +12196,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
 
 
           <div className="t3d-card" data-testid="meal-library" style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><h2 className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</h2><div style={{ color: "#8AABB8", fontSize: 9 }}>Meals you like that aren&apos;t in your plan, ready for planning the week. Your plan&apos;s meals are in LOG AS YOU GO.</div></div><div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}><button className="t3d-btn t3d-btn-sm" onClick={() => (showLibraryForm ? closeLibraryForm() : setShowLibraryForm(true))}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button><button className="t3d-btn t3d-btn-sm" style={{ borderColor: "rgba(0,200,255,.35)", color: NEON2 }} onClick={() => openMealEditor(false)}>EDIT MEAL PLAN →</button></div></div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}><div><h2 className="t3d-ctitle" style={{ marginBottom: 3 }}>MY MEAL LIBRARY</h2><div style={{ color: "#8AABB8", fontSize: 9 }}>Meals you like that aren&apos;t in your plan, ready for planning the week. Your plan&apos;s meals are in LOG AS YOU GO.</div></div><div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}><button className="t3d-btn t3d-btn-sm" onClick={() => (showLibraryForm ? closeLibraryForm() : setShowLibraryForm(true))}>{showLibraryForm ? "CANCEL" : "+ NEW MEAL"}</button></div></div>
             {showLibraryForm && <div style={{ padding: 11, background: SURFACE2, borderRadius: 6, marginBottom: 10 }}>
               <input className="t3d-input" placeholder="Meal name" value={libraryMealDraft.name} onChange={event => setLibraryMealDraft(meal => ({ ...meal, name: event.target.value }))} style={{ marginBottom: 8 }} />
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 5 }}>
