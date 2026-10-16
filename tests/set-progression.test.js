@@ -194,3 +194,10 @@ test("a plan the user wrote gets per-set ranges: staggered, or straight for begi
   ]);
   assert.deepEqual(planRangeReview([{ name: "A", exercises: [{ name: "Squat", sets: 3, reps: ["6-8", "8-10", "10-12"] }] }]).changes, []);
 });
+
+test("a set well over its range never says to go up for the next set, which can't be heavier", () => {
+  const next = suggestSet({ ranges: ["6-8", "8-10", "10-12"], setIndex: 1, todaySets: [set(60, 14)], step: 2.5 });
+  assert.equal(next.weight, "60");
+  assert.match(next.note, /^Too light — this goes up next time\. Stay at 60 kg/);
+  assert.doesNotMatch(next.note, /go up a step for the next set/);
+});

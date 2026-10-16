@@ -4498,7 +4498,8 @@ Last ${recentCheckins.length} check-ins before today, newest first: ${recentChec
 }
 
 // ─── End of Day Check-in ──────────────────────────────────────────────────────
-function EndOfDayCheckin({ user, onComplete }) {
+// profile: for the step goal (the same one as the dashboard's Steps card).
+function EndOfDayCheckin({ user, onComplete, profile = null }) {
   const [step, setStep] = useState(0);
   const [mood, setMood] = useState(null);
   const [energy, setEnergy] = useState(null);
@@ -4516,6 +4517,14 @@ function EndOfDayCheckin({ user, onComplete }) {
   const [newGoalText, setNewGoalText] = useState("");
 
   const today = homeDateKey(user);
+  const stepGoal = Number(profile?.stepGoal) > 0 ? Number(profile.stepGoal) : DEFAULT_STEP_GOAL;
+  // Steps already entered on the dashboard today are filled in.
+  useEffect(() => {
+    if (!user) return;
+    supabase.from("daily_steps").select("steps").eq("user_id", user.id).eq("date", today).maybeSingle()
+      .then(({ data }) => { if (data?.steps !== undefined && data?.steps !== null) setSteps(current => current || String(data.steps)); })
+      .catch(() => {});
+  }, [user, today]);
 
   useEffect(() => {
     if (!user) return;
@@ -4622,6 +4631,10 @@ Give me my daily roundup and spot any patterns.` }],
       future_you: futureYou, ai_roundup: aiRoundup,
       created_at: new Date().toISOString(),
     }, { onConflict: "user_id,date" });
+    // The same number on the dashboard's Steps card.
+    if (steps !== "" && Number(steps) >= 0) {
+      await supabase.from("daily_steps").upsert({ user_id: user.id, date: today, steps: Math.min(100000, parseInt(steps) || 0), updated_at: new Date().toISOString() }, { onConflict: "user_id,date" });
+    }
     setSaving(false);
     onComplete();
   };
@@ -4676,10 +4689,10 @@ Give me my daily roundup and spot any patterns.` }],
         <input className="t3d-input" type="number" placeholder="e.g. 8500"
           value={steps} onChange={e => setSteps(e.target.value)}
           style={{ textAlign: "center", fontSize: 28, padding: 16, maxWidth: 200, margin: "0 auto", display: "block" }} />
-        <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 10 }}>Goal: 10,000 steps</div>
+        <div style={{ fontSize: 10, color: "#E0EAF0", marginTop: 10 }}>Goal: {stepGoal.toLocaleString("en-GB")} steps</div>
         {steps && (
-          <div style={{ marginTop: 8, fontSize: 11, color: parseInt(steps)>=10000?NEON:"#FF8C00" }}>
-            {parseInt(steps)>=10000?"🎯 Goal hit!":"🎯 " + (10000-parseInt(steps)).toLocaleString() + " short of goal"}
+          <div style={{ marginTop: 8, fontSize: 11, color: parseInt(steps)>=stepGoal?NEON:"#FF8C00" }}>
+            {parseInt(steps)>=stepGoal?"🎯 Goal hit!":"🎯 " + (stepGoal-parseInt(steps)).toLocaleString() + " short of goal"}
           </div>
         )}
       </div>
@@ -4733,7 +4746,7 @@ Give me my daily roundup and spot any patterns.` }],
               <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginTop: 4 }}>ENERGY {energy}/5</div>
             </div>
             <div style={{ textAlign: "center" }}>
-              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: parseInt(steps)>=10000?NEON:"#FF8C00" }}>{parseInt(steps||0).toLocaleString()}</div>
+              <div style={{ fontFamily: "'Orbitron',monospace", fontSize: 18, color: parseInt(steps)>=stepGoal?NEON:"#FF8C00" }}>{steps === "" ? "—" : parseInt(steps||0).toLocaleString()}</div>
               <div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1, marginTop: 4 }}>STEPS</div>
             </div>
           </div>
@@ -5832,7 +5845,7 @@ function Dashboard({ habits, setHabits, user, onNavigate, profile, onProfileSave
 
   if (view === "history") return <DashboardHistory user={user} onBack={() => setView("home")} />;
   if (view === "weekly") return <WeeklyRecap user={user} onBack={() => setView("home")} />;
-  if (showEod) return <EndOfDayCheckin user={user} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
+  if (showEod) return <EndOfDayCheckin user={user} profile={profile} onComplete={() => { setEodDone(true); setShowEod(false); }} />;
   const nextUp = nextUpItems({
     hour: Number(homeDate.time.slice(0, 2)),
     time: homeDate.time,
@@ -7771,7 +7784,7 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .8, marginBottom: 8, fontWeight: 700 }}>REPS</span>
-                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps ?? ""}
+                    <input className="workout-number" aria-label="Reps" type="number" inputMode="numeric" value={reps ?? ""} onFocus={event => event.target.select()}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], reps: e.target.value } }))}
                       placeholder="reps"
                       style={{ background: "#F2F7F9", border: `3px solid ${NEON2}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
@@ -7796,7 +7809,7 @@ function withPlanApproval(sessions, now = new Date()) {
                 <div className="workout-field">
                   <label style={{ display: "block", textAlign: "center" }}>
                     <span style={{ display: "block", fontSize: 12, color: "#F2F7F9", letterSpacing: .4, marginBottom: 8, fontWeight: 700 }}>Weight (kg):</span>
-                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight ?? ""}
+                    <input className="workout-number" aria-label="Weight in kilograms" type="number" inputMode="decimal" value={weight ?? ""} onFocus={event => event.target.select()}
                       onChange={e => setCurrentInputs(prev => ({ ...prev, [exerciseIdx]: { ...prev[exerciseIdx], weight: e.target.value } }))}
                       placeholder="kg"
                       style={{ background: "#F2F7F9", border: `3px solid ${NEON}`, borderRadius: 10, fontWeight: 800, textAlign: "center", color: "#080C10", outline: "none" }} />
@@ -8089,7 +8102,7 @@ function withPlanApproval(sessions, now = new Date()) {
             )}
           </div>
           <div className="t3d-grid3" style={{ marginBottom: 14 }}>
-            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>MINUTES</div></div>
+            <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON }}>{duration}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>{Number(duration) === 1 ? "MINUTE" : "MINUTES"}</div></div>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: NEON2 }}>{completionReview.completedSets}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>SETS COMPLETED</div></div>
             <div><div style={{ fontFamily: "'Orbitron',monospace", fontSize: 20, color: "#FF8C00" }}>{Math.round(completionReview.totalVolumeKg).toLocaleString()}</div><div style={{ fontSize: 9, color: "#E0EAF0", letterSpacing: 1 }}>KG VOLUME</div></div>
           </div>
@@ -8169,7 +8182,10 @@ function withPlanApproval(sessions, now = new Date()) {
           <p style={{ fontSize: 11, color: "#8AABB8" }}>Tempo = lower · pause · lift · pause, in seconds.{aiPlan.sessions?.some(session => (session.exercises || []).some(exercise => /x/i.test(String(exercise.tempo || "")))) ? " X means an explosive movement." : ""}</p>
           {split && <p style={{ fontSize: 11, color: "#FFB547" }}>Saving this programme replaces your current plan. Your workout history stays saved.</p>}
           {aiPlanError && aiPlanFailure}
-          {aiPlan.notes && <div style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6, whiteSpace: "pre-line" }}>{aiPlan.notes}</div>}
+          {/* The notes as short lines (why this split, how to progress, effort), even when they come back as one paragraph. */}
+          {aiPlan.notes && <div data-testid="plan-notes" style={{ background: "rgba(0,255,178,.04)", border: "1px solid rgba(0,255,178,.15)", borderRadius: 6, padding: 12, marginBottom: 16, fontSize: 11, color: "#8AABB8", lineHeight: 1.6 }}>
+            {(String(aiPlan.notes).includes("\n") ? String(aiPlan.notes).split(/\n+/) : String(aiPlan.notes).split(/(?<=[.!?])\s+(?=[A-Z])/)).map(line => line.trim()).filter(Boolean).map(line => <div key={line} style={{ marginBottom: 6 }}>{line}</div>)}
+          </div>}
           {aiPlan.sessions?.map((s, sIdx) => (
             <div key={sIdx} style={{ marginBottom: 16, background: SURFACE2, borderRadius: 6, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
@@ -12273,7 +12289,7 @@ function Nutrition({ user, userSessions, profile: savedProfile = null, onProfile
           <div className="t3d-card" data-testid="today-targets" style={{ marginBottom: 16, padding: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
               <h2 className="t3d-ctitle" style={{ margin: 0 }}>REMAINING TODAY</h2>
-              <div style={{ fontSize: 9, color: todayTargets.restDay ? NEON2 : "#8AABB8" }}>{todayTargets.restDay ? "REST DAY" : "TRAINING DAY"} TARGET · {todayTargets.calories.toLocaleString("en-GB")} KCAL</div>
+              <div style={{ fontSize: 9, color: todayTargets.restDay ? NEON2 : "#8AABB8" }}>{todayTargets.restDay ? "REST DAY" : hasRestDayMeals(plan) ? "TRAINING DAY" : "TODAY'S"} TARGET · {todayTargets.calories.toLocaleString("en-GB")} KCAL</div>
             </div>
             {offPlanRoughCalories > 0 && <div data-testid="offplan-rough" style={{ color: "#8AABB8", fontSize: 9, lineHeight: 1.5, marginBottom: 6 }}>Includes a rough protein, carbs and fat split for {Math.round(offPlanRoughCalories).toLocaleString("en-GB")} kcal of extra food logged without them.</div>}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, textAlign: "center" }}>
@@ -13032,7 +13048,7 @@ function HabitsPage({ habits, setHabits, user = null }) {
           <button className="t3d-btn" style={{ padding: "12px 22px", marginBottom: 18 }} onClick={() => setAdding(true)}>+ ADD A HABIT</button>
           <div style={{ fontSize: 9, color: "#4A6070", letterSpacing: 1, marginBottom: 8 }}>POPULAR DAILY HABITS</div>
           <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 7, opacity: .58 }}>
-            {POPULAR_DAILY_HABITS.map(habit => <button key={habit.name} className="t3d-btn t3d-btn-sm" style={{ whiteSpace: "normal" }} onClick={() => addHabit(habit)}>+ {habit.name}</button>)}
+            {remainingSuggestions.map(habit => <button key={habit.name} className="t3d-btn t3d-btn-sm" style={{ whiteSpace: "normal" }} onClick={() => addHabit(habit)}>+ {habit.name}</button>)}
           </div>
         </div>
       )}
